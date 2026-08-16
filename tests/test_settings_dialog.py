@@ -143,11 +143,67 @@ def test_switching_off_reopening_leaves_the_folder_closed_on_start(qapp, tmp_pat
     try:
         assert reopened._model.rowCount() == 0
         assert "switched off in the settings" in reopened._status_label.text()
-        # The folder is remembered, so switching the setting back on brings
-        # it straight back.
-        assert reopened._session.folder == str(folder)
     finally:
         reopened.close()
+
+    # Closing a run that never opened a folder must not throw the remembered
+    # one away. The check has to come after that window has closed and
+    # written its session out, which is where it would be lost.
+    third_run = MainWindow(SessionStore(tmp_path / "session.json"))
+    try:
+        assert third_run._session.folder == str(folder)
+    finally:
+        third_run.close()
+
+    # And with reopening switched back on, the folder really does come back.
+    third_run_settings = SettingsStore(tmp_path / SETTINGS_FILE_NAME)
+    third_run_settings.save(Settings(reopen_last_folder=True))
+    fourth_run = MainWindow(SessionStore(tmp_path / "session.json"))
+    try:
+        assert wait_until(qapp, lambda: fourth_run._model.rowCount() == 1)
+    finally:
+        fourth_run.close()
+
+
+def test_a_folder_that_is_not_connected_keeps_its_checked_files(qapp, tmp_path):
+    """A disconnected drive must not clear the marks the user made.
+
+    The file list cannot be read, so it says nothing about which files were
+    checked. Saving it as empty would throw the marks away for good.
+    """
+    folder = tmp_path / "recordings"
+    folder.mkdir()
+    write_fake_audio(folder / "one.m4a")
+    write_fake_audio(folder / "two.m4a")
+
+    window = MainWindow(SessionStore(tmp_path / "session.json"))
+    try:
+        window._folder_panel.folderChosen.emit(str(folder))
+        assert wait_until(qapp, lambda: window._model.rowCount() == 2)
+        window._model.set_checked_names(["two.m4a"])
+    finally:
+        window.close()
+
+    # The drive goes away, and the application is opened and closed again.
+    for child in folder.iterdir():
+        child.unlink()
+    folder.rmdir()
+    while_disconnected = MainWindow(SessionStore(tmp_path / "session.json"))
+    try:
+        assert "not available" in while_disconnected._status_label.text()
+    finally:
+        while_disconnected.close()
+
+    # The drive comes back.
+    folder.mkdir()
+    write_fake_audio(folder / "one.m4a")
+    write_fake_audio(folder / "two.m4a")
+    reconnected = MainWindow(SessionStore(tmp_path / "session.json"))
+    try:
+        assert wait_until(qapp, lambda: reconnected._model.rowCount() == 2)
+        assert reconnected._model.checked_names() == ["two.m4a"]
+    finally:
+        reconnected.close()
 
 
 def test_the_log_file_is_reported_rather_than_opened_when_it_is_missing(qapp, tmp_path):

@@ -76,6 +76,9 @@ class MainWindow(QMainWindow):
         self._pending_checked: list[str] = []
         self._pending_selected: str | None = None
         self._needs_initial_split = True
+        # Whether the file list on screen is a true reading of the folder.
+        # It is not, until a scan has come back with the folder's contents.
+        self._file_list_is_current = False
 
         self.setWindowTitle(APPLICATION_NAME)
 
@@ -343,6 +346,7 @@ class MainWindow(QMainWindow):
         self._pending_selected = selected
         self.setWindowTitle(f"{folder.name} - {APPLICATION_NAME}")
         self._set_status(f"Reading {folder}...")
+        self._file_list_is_current = False
         self._scanner.start(folder)
         self._schedule_save()
 
@@ -350,6 +354,9 @@ class MainWindow(QMainWindow):
         if scan_id != self._scanner.current_scan_id:
             return
         self._model.set_files(files)
+        # The list now really is what the folder holds, empty or not, so it
+        # is worth saving.
+        self._file_list_is_current = True
         self._model.set_checked_names(self._pending_checked)
         self._update_summary()
 
@@ -644,10 +651,28 @@ class MainWindow(QMainWindow):
         self._save_timer.start()
 
     def _save_session(self) -> None:
+        # A run that never opened a folder keeps the one already remembered
+        # rather than writing an empty one over it. That happens whenever
+        # reopening the last folder is switched off: the folder is not
+        # opened, so there is nothing here to save, and saving nothing would
+        # throw away the very folder the setting is meant to leave alone.
+        folder = str(self._folder) if self._folder is not None else self._session.folder
+        if self._file_list_is_current:
+            checked = self._model.checked_names()
+            selected = self._selected_file_name()
+        else:
+            # The file list has not been read this run, so it says nothing
+            # about which files were checked. Saving it as empty would throw
+            # that away. This happens when reopening the last folder is
+            # switched off, and when the folder is on a drive that is not
+            # connected: in both cases the checked files are still there,
+            # waiting for the folder to come back.
+            checked = self._session.checked_files
+            selected = self._session.selected_file
         state = SessionState(
-            folder=str(self._folder) if self._folder is not None else None,
-            checked_files=self._model.checked_names(),
-            selected_file=self._selected_file_name(),
+            folder=folder,
+            checked_files=checked,
+            selected_file=selected,
             window_geometry=_encode(self.saveGeometry()),
             splitter_state=_encode(self._splitter.saveState()),
         )

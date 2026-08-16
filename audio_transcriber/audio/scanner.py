@@ -24,7 +24,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
 
-from audio_transcriber.audio.library import AudioFile, list_audio_files, read_duration
+from audio_transcriber.audio.library import list_audio_files, read_duration
 
 _log = logging.getLogger(__name__)
 

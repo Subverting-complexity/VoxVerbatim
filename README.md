@@ -84,23 +84,63 @@ The main ones:
 | `Up` / `Down` | Move through the file list |
 | `Space` | Check or clear the highlighted file |
 | `Ctrl+Space` | Play, or pause if already playing |
-| `Alt+Left` / `Alt+Right` | Back or forward 15 seconds |
-| `Alt+Shift+Left` / `Alt+Shift+Right` | Back or forward 2 minutes |
-| `Alt+Ctrl+Left` / `Alt+Ctrl+Right` | Back or forward 5 minutes |
+| `Alt+Left` / `Alt+Right` | Back or forward by the short skip |
+| `Alt+Shift+Left` / `Alt+Shift+Right` | Back or forward by the medium skip |
+| `Alt+Ctrl+Left` / `Alt+Ctrl+Right` | Back or forward by the long skip |
+| `Ctrl+,` | Open the Settings dialog |
 | `F6` | Move to the next panel |
+| `Ctrl+Q` | Close the application |
+
+## Settings
+
+Press `Ctrl+,`, or choose **File** then **Settings**. You can change:
+
+* Whether the folder from your last run is opened again when you start.
+  Switching this off does not forget the folder; it simply waits for you to
+  choose one.
+* The three skip intervals, which start at 15 seconds, 2 minutes and 5
+  minutes. Changing one changes the buttons, the Playback menu, the keyboard
+  shortcut list and what a screen reader reads out, all together.
+
+The **File** menu also opens the log file, and the folder that holds your
+settings, so you never have to go looking for either.
 
 ## Where your settings are kept
 
-The session file and the log file live in
-`%LOCALAPPDATA%\Audio Transcriber\Audio Transcriber`. Deleting `session.json`
-resets the application to its first-run state. If something goes wrong,
-`audio-transcriber.log` in the same folder is the place to look.
+Everything the application writes for itself lives in one folder:
+
+```
+%LOCALAPPDATA%\JB Org\Audio Transcriber
+```
+
+That is `C:\Users\<you>\AppData\Local\JB Org\Audio Transcriber`. The path is
+not written into the code. It comes from asking Windows where per-user
+configuration belongs, using the organisation name and the application name,
+so renaming either moves the folder.
+
+Three files live there:
+
+| File | What it holds |
+| --- | --- |
+| `settings.json` | What you chose in the Settings dialog |
+| `session.json` | Where you were: folder, checked files, highlighted file, window layout |
+| `audio-transcriber.log` | What went wrong, if anything did |
+
+They are separate on purpose. Your settings are decisions you made and
+expect to keep; the session is only where you happened to be. Deleting
+`session.json` loses your place, and deleting `settings.json` loses your
+preferences, and neither stops the application from starting. Both files are
+plain JSON you can read or edit by hand, and a damaged one is ignored rather
+than being fatal.
 
 ## How the code is arranged
 
 ```
 audio_transcriber/
-    app.py           Starting up: settings location, logging, the main window
+    app.py           Starting up: logging, the stores, the main window
+    paths.py         Where the settings, the session and the log are kept
+    json_store.py    Reading and writing those files safely
+    settings.py      The settings the user chooses
     session.py       Reading and writing the saved session
     formatting.py    Durations and sizes, in compact and spoken forms
     audio/
@@ -113,15 +153,20 @@ audio_transcriber/
         file_table.py      The file list, its model and its keyboard handling
         player_panel.py    Transport buttons and the seek bar
         file_info_panel.py Details of the selected file
+        settings_dialog.py Changing the settings
         help_dialogs.py    Keyboard shortcuts and About
         accessibility.py   Naming controls and announcing changes
         flow_layout.py     A row of buttons that wraps when space is short
 ```
 
-Nothing in `audio_transcriber/session.py`, `formatting.py` or
+Nothing in `audio_transcriber/session.py`, `settings.py`, `formatting.py` or
 `audio/library.py` depends on the user interface, which is what will let the
 transcription services be added underneath the same window without
 disturbing it.
+
+Adding a setting means adding a field to `Settings`, a row to the dialog,
+and using it wherever it belongs. Nothing else: reading, checking, saving
+and surviving a damaged file are already handled for every field.
 
 ## Working on it
 

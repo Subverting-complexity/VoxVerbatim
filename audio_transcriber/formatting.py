@@ -61,6 +61,21 @@ def spoken_duration(seconds: float | None) -> str:
     return " ".join(parts)
 
 
+def compact_interval(seconds: int) -> str:
+    """Return a short label for a skip interval, such as ``15 sec`` or ``2 min``.
+
+    This is what fits on a button. The spoken form of the same interval
+    comes from :func:`spoken_duration`, which writes the units out in full.
+    """
+    seconds = max(0, int(seconds))
+    minutes, remainder = divmod(seconds, 60)
+    if not minutes:
+        return f"{remainder} sec"
+    if not remainder:
+        return f"{minutes} min"
+    return f"{minutes} min {remainder} sec"
+
+
 def format_position(milliseconds: int | None) -> str:
     """Return a compact playback position for a value in milliseconds."""
     if milliseconds is None:

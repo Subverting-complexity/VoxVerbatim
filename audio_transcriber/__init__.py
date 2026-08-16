@@ -11,4 +11,8 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 APPLICATION_NAME = "Audio Transcriber"
-ORGANISATION_NAME = "Audio Transcriber"
+
+#: The organisation the application belongs to. Windows works out where
+#: per-user files are kept from this and the application name, so changing
+#: it moves the settings and the session to a different folder.
+ORGANISATION_NAME = "JB Org"

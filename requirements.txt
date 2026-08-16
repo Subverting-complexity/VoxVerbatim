@@ -1,0 +1,3 @@
+# Libraries the application needs to run.
+PySide6>=6.6
+mutagen>=1.47

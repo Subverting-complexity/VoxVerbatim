@@ -1,0 +1,3 @@
+# Libraries needed to work on the application, on top of requirements.txt.
+-r requirements.txt
+pytest>=8.0

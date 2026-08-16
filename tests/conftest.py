@@ -47,3 +47,54 @@ def write_fake_audio(path, size_bytes: int = 2048) -> None:
     deliberate: it exercises the path where a duration is unavailable.
     """
     path.write_bytes(b"\0" * size_bytes)
+
+
+def write_real_audio(
+    path,
+    level_db: float = -30.0,
+    seconds: float = 2.0,
+    codec: str = "aac",
+    layout: str = "stereo",
+    rate: int = 48000,
+    tone_hz: float = 440.0,
+) -> None:
+    """Write a real recording of a steady tone at a known level.
+
+    The enhancement tests need audio that can actually be decoded and
+    measured, which the empty files above cannot be. A steady tone is used
+    because its loudness and its peak are both predictable, so a test can
+    say what the answer should be rather than only that there was one.
+
+    ``level_db`` is the amplitude of the tone in decibels below full scale.
+    A tone at this level measures close to the same figure in LUFS, because
+    the loudness weighting is flat near this frequency.
+    """
+    import array
+    import math
+
+    import av
+
+    count = int(rate * seconds)
+    channels = 2 if layout == "stereo" else 1
+    amplitude = (10 ** (level_db / 20.0)) * 32767.0
+    tone = array.array("h", (0,)) * (count * channels)
+    for index in range(count):
+        value = int(amplitude * math.sin(2.0 * math.pi * tone_hz * index / rate))
+        for channel in range(channels):
+            tone[index * channels + channel] = value
+
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream(codec, rate=rate, layout=layout)
+        frame = av.AudioFrame(format="s16", layout=layout, samples=count)
+        frame.planes[0].update(tone.tobytes())
+        frame.sample_rate = rate
+        frame.pts = 0
+        queue = av.audio.fifo.AudioFifo()
+        queue.write(frame)
+        # Encoders want blocks of a size they choose, so the samples go
+        # through a queue rather than in one lump.
+        for block in queue.read_many(1024):
+            for packet in stream.encode(block):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)

@@ -1,3 +1,7 @@
 # Libraries the application needs to run.
 PySide6>=6.6
 mutagen>=1.47
+# Decoding, loudness measurement and lossless writing for Enhance Audio.
+# PyAV carries the FFmpeg libraries with it, so nothing has to be installed
+# separately on the machine.
+av>=12.0

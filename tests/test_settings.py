@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from audio_transcriber.formatting import compact_interval
-from audio_transcriber.settings import Settings, SettingsStore
+from audio_transcriber.settings import EnhanceSettings, Settings, SettingsStore
 
 
 def test_saved_settings_come_back_unchanged(tmp_path):
@@ -87,3 +87,61 @@ def test_interval_labels_are_short_enough_for_a_button():
     assert compact_interval(120) == "2 min"
     assert compact_interval(90) == "1 min 30 sec"
     assert compact_interval(3600) == "60 min"
+
+
+def test_the_enhancement_settings_are_saved_and_come_back(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    settings = Settings(
+        enhance=EnhanceSettings(
+            output_folder=r"D:\Enhanced",
+            target_lufs=-16.0,
+            ceiling_dbtp=-2.0,
+            maximum_gain_db=18.0,
+            use_limiter=True,
+            output_format="flac",
+            replace_existing=True,
+        )
+    )
+
+    assert store.save(settings)
+
+    assert store.load() == settings
+
+
+def test_settings_written_before_enhancement_existed_still_load(tmp_path):
+    """An older settings file has no enhancement section at all."""
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"short_skip_seconds": 20}), encoding="utf-8")
+
+    loaded = SettingsStore(path).load()
+
+    assert loaded.short_skip_seconds == 20
+    assert loaded.enhance == EnhanceSettings()
+
+
+def test_nonsense_enhancement_values_fall_back_to_the_defaults(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "enhance": {
+                    "output_folder": 42,
+                    "target_lufs": "loud",
+                    "ceiling_dbtp": 20.0,
+                    "maximum_gain_db": -5.0,
+                    "use_limiter": "sometimes",
+                    "output_format": "mp3",
+                    "replace_existing": None,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = SettingsStore(path).load().enhance
+
+    assert loaded == EnhanceSettings()
+    # A format the application cannot write must not survive being edited
+    # into the file, or the next run would ask for an encoder that is not
+    # there.
+    assert loaded.output_format == "wav16"

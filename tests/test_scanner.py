@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
+from audio_transcriber.audio import scanner as scanner_module
 from audio_transcriber.audio.scanner import FolderScanner
 
 from tests.conftest import wait_until, write_fake_audio
@@ -38,6 +42,36 @@ def test_a_folder_that_is_not_there_is_reported_in_words(qapp, tmp_path):
 
     assert wait_until(qapp, lambda: failures)
     assert "no longer exists" in failures[0]
+    scanner.stop()
+
+
+def test_starting_a_new_scan_does_not_wait_for_a_slow_one(qapp, tmp_path, monkeypatch):
+    """Switching folders must not block the window while a slow file is read.
+
+    A scan can only notice that it was cancelled between files, so a file
+    that takes a long time to read would hold up anyone waiting for the
+    thread. Starting the next scan therefore cancels without waiting.
+    """
+    write_fake_audio(tmp_path / "slow.m4a")
+    reading = threading.Event()
+    release = threading.Event()
+
+    def slow_read(_path):
+        reading.set()
+        release.wait(10.0)
+        return None
+
+    monkeypatch.setattr(scanner_module, "read_duration", slow_read)
+    scanner = FolderScanner()
+    scanner.start(tmp_path)
+    assert reading.wait(5.0), "the scan never reached the slow file"
+
+    started_at = time.monotonic()
+    scanner.start(tmp_path)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.5, f"starting a scan waited {elapsed:.2f} seconds for the previous one"
+    release.set()
     scanner.stop()
 
 

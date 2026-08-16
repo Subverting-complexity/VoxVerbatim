@@ -157,7 +157,7 @@ class MainWindow(QMainWindow):
             playback_menu,
             "Play or &Pause",
             QKeySequence("Ctrl+Space"),
-            self._player.toggle_play_pause,
+            self.toggle_play_pause,
         )
         playback_menu.addSeparator()
         for label, shortcut, delta in (
@@ -204,7 +204,7 @@ class MainWindow(QMainWindow):
             menu,
             text,
             QKeySequence(shortcut),
-            lambda _checked=False, d=delta_seconds: self._player.skip(d * 1000),
+            lambda _checked=False, d=delta_seconds: self.skip(d * 1000),
         )
 
     def _connect_signals(self) -> None:
@@ -228,6 +228,10 @@ class MainWindow(QMainWindow):
         self._player.durationChanged.connect(self._on_player_duration_changed)
         self._player.errorOccurred.connect(self._on_player_error)
         self._player_panel.statusChanged.connect(self._on_playback_status_changed)
+        self._player_panel.playRequested.connect(self.play)
+        self._player_panel.pauseRequested.connect(self.pause)
+        self._player_panel.skipRequested.connect(self.skip)
+        self._player_panel.seekRequested.connect(self.seek_to)
 
     # -- Folders and files ----------------------------------------------
 
@@ -336,6 +340,10 @@ class MainWindow(QMainWindow):
     def _update_for_row(self, row: int) -> None:
         audio_file = self._model.file_at(row)
         self._info_panel.set_file(audio_file)
+        # Playback stops as soon as the highlight moves, before the new file
+        # has finished loading. Otherwise the previous file would still be
+        # heard while the panel already reports the new one as stopped.
+        self._player.stop()
         self._player_panel.set_media_loaded(audio_file is not None)
         if audio_file is None:
             self._media_load_timer.stop()
@@ -350,6 +358,7 @@ class MainWindow(QMainWindow):
         self._update_for_row(-1)
 
     def _load_selected_media(self) -> None:
+        self._media_load_timer.stop()
         audio_file = self._model.file_at(self._table.selected_row())
         if audio_file is None:
             self._player.load(None)
@@ -357,6 +366,33 @@ class MainWindow(QMainWindow):
         if self._player.source_path == audio_file.path:
             return
         self._player.load(audio_file.path)
+
+    # -- Transport ------------------------------------------------------
+    #
+    # Every playback command goes through here first, so that the file the
+    # user is looking at is the file the command acts on. Loading a file is
+    # held back for a moment after the highlight moves, and without this a
+    # command given in that moment would act on the file before it.
+
+    def play(self) -> None:
+        self._load_selected_media()
+        self._player.play()
+
+    def pause(self) -> None:
+        self._load_selected_media()
+        self._player.pause()
+
+    def toggle_play_pause(self) -> None:
+        self._load_selected_media()
+        self._player.toggle_play_pause()
+
+    def skip(self, milliseconds: int) -> None:
+        self._load_selected_media()
+        self._player.skip(milliseconds)
+
+    def seek_to(self, milliseconds: int) -> None:
+        self._load_selected_media()
+        self._player.seek_to(milliseconds)
 
     def _selected_file_name(self) -> str | None:
         audio_file = self._model.file_at(self._table.selected_row())

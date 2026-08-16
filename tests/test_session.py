@@ -38,6 +38,14 @@ def test_a_damaged_file_gives_an_empty_session(tmp_path):
     assert SessionStore(path).load() == SessionState()
 
 
+def test_a_file_that_is_not_utf_8_gives_an_empty_session(tmp_path):
+    """A session file with stray bytes must not stop the application starting."""
+    path = tmp_path / "session.json"
+    path.write_bytes(b'{"folder": "\xff\xfe not text"}')
+
+    assert SessionStore(path).load() == SessionState()
+
+
 def test_a_file_holding_the_wrong_types_falls_back_to_defaults(tmp_path):
     path = tmp_path / "session.json"
     path.write_text(

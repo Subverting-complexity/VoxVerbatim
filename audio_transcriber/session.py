@@ -93,17 +93,21 @@ class SessionStore:
     def load(self) -> SessionState:
         """Return the saved session, or an empty one if there is nothing usable."""
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            raw = self._path.read_bytes()
         except FileNotFoundError:
             return SessionState()
         except OSError:
             _log.warning("Could not read the session file %s", self._path, exc_info=True)
             return SessionState()
 
+        # The file is read as bytes and decoded here so that a file holding
+        # something other than UTF-8 text is treated as damaged like any
+        # other unreadable file. Decoding it on the way in would raise
+        # instead, and this runs before the window exists to report it.
         try:
-            data = json.loads(raw)
-        except ValueError:
-            _log.warning("The session file %s is not valid JSON; ignoring it.", self._path)
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            _log.warning("The session file %s could not be read as JSON; ignoring it.", self._path)
             return SessionState()
 
         if not isinstance(data, dict):

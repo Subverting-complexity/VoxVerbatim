@@ -54,6 +54,18 @@ class PlayerPanel(QGroupBox):
     statusChanged = Signal(str)
     """The playback status changed, in words worth announcing."""
 
+    # The transport controls ask for what they want rather than driving the
+    # player themselves. The window loading the selected file is slightly
+    # behind the highlight in the list, and it has to catch up before an
+    # action is carried out, or the action would land on the previous file.
+    playRequested = Signal()
+    pauseRequested = Signal()
+    skipRequested = Signal(int)
+    """Move by this many milliseconds, forwards if positive."""
+
+    seekRequested = Signal(int)
+    """Move to this position, in milliseconds from the start."""
+
     def __init__(self, player: AudioPlayer, parent: QWidget | None = None) -> None:
         super().__init__("Audio player", parent)
         self._player = player
@@ -70,12 +82,12 @@ class PlayerPanel(QGroupBox):
         # Alt+P belongs to the Playback menu, so Play answers to Alt+L.
         self._play_button = QPushButton("P&lay", self)
         describe(self._play_button, "Play", "Starts playing the selected file.")
-        self._play_button.clicked.connect(self._player.play)
+        self._play_button.clicked.connect(lambda: self.playRequested.emit())
         self._add_button(controls, self._play_button)
 
         self._pause_button = QPushButton("Pa&use", self)
         describe(self._pause_button, "Pause", "Pauses playback at the current position.")
-        self._pause_button.clicked.connect(self._player.pause)
+        self._pause_button.clicked.connect(lambda: self.pauseRequested.emit())
         self._add_button(controls, self._pause_button)
 
         for text, name, delta_seconds in FORWARD_BUTTONS:
@@ -128,7 +140,9 @@ class PlayerPanel(QGroupBox):
     ) -> QPushButton:
         button = QPushButton(text, self)
         describe(button, name, f"Moves playback {name.lower()}.")
-        button.clicked.connect(lambda _checked=False, d=delta_seconds: self._player.skip(d * 1000))
+        button.clicked.connect(
+            lambda _checked=False, d=delta_seconds: self.skipRequested.emit(d * 1000)
+        )
         return self._add_button(controls, button)
 
     def _add_button(self, controls: QHBoxLayout, button: QPushButton) -> QPushButton:
@@ -167,7 +181,7 @@ class PlayerPanel(QGroupBox):
         if not loaded:
             self._duration_ms = 0
             self._set_slider_value(0)
-            self._seek_slider.setRange(0, 0)
+            self._set_slider_range(0)
             self._update_time_label(0)
             self._set_status(STATUS_NO_FILE)
         else:
@@ -185,7 +199,8 @@ class PlayerPanel(QGroupBox):
 
     def _on_duration_changed(self, milliseconds: int) -> None:
         self._duration_ms = max(0, milliseconds)
-        self._seek_slider.setRange(0, self._duration_ms // 1000)
+        self._set_slider_range(self._duration_ms // 1000)
+        self._set_slider_value(min(self._player.position // 1000, self._duration_ms // 1000))
         self._update_seek_description()
         self._update_time_label(self._player.position)
 
@@ -205,7 +220,7 @@ class PlayerPanel(QGroupBox):
     def _on_slider_value_changed(self, value: int) -> None:
         if self._syncing_slider:
             return
-        self._player.seek_to(value * 1000)
+        self.seekRequested.emit(value * 1000)
 
     def _set_slider_value(self, seconds: int) -> None:
         if self._seek_slider.value() == seconds:
@@ -213,6 +228,20 @@ class PlayerPanel(QGroupBox):
         self._syncing_slider = True
         try:
             self._seek_slider.setValue(seconds)
+        finally:
+            self._syncing_slider = False
+
+    def _set_slider_range(self, maximum_seconds: int) -> None:
+        """Change the length of the seek bar without it counting as a seek.
+
+        A shorter recording than the last one drags the slider's value down
+        with it, which looks exactly like the user moving the slider. Left
+        unguarded, loading a short file after a long one would jump straight
+        to the end of it.
+        """
+        self._syncing_slider = True
+        try:
+            self._seek_slider.setRange(0, max(0, maximum_seconds))
         finally:
             self._syncing_slider = False
 

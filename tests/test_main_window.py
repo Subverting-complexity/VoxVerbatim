@@ -130,6 +130,45 @@ def test_an_empty_folder_says_so(qapp, store, tmp_path):
         close_window(window)
 
 
+def test_playing_straight_after_moving_the_highlight_uses_the_new_file(
+    qapp, store, audio_folder
+):
+    """A command given before the new file has loaded must still act on it.
+
+    Loading is held back for a moment after the highlight moves, so that
+    arrowing through a long list does not open every file on the way. A
+    command given inside that moment has to bring the load forward, or it
+    would act on the file the user has just moved away from.
+    """
+    window = open_window(qapp, store)
+    try:
+        window._folder_panel.folderChosen.emit(str(audio_folder))
+        assert wait_until(qapp, lambda: window._model.rowCount() == 3)
+
+        # No events are processed between these two lines, so the delay
+        # before loading has not run out when Play is pressed.
+        window._table.select_row(2)
+        window.play()
+
+        assert window._player.source_path == audio_folder / "gamma.m4a"
+    finally:
+        close_window(window)
+
+
+def test_moving_the_highlight_stops_what_was_playing(qapp, store, audio_folder):
+    window = open_window(qapp, store)
+    try:
+        window._folder_panel.folderChosen.emit(str(audio_folder))
+        assert wait_until(qapp, lambda: window._model.rowCount() == 3)
+        window.play()
+
+        window._table.select_row(1)
+
+        assert not window._player.is_playing
+    finally:
+        close_window(window)
+
+
 def test_the_summary_counts_files_and_checked_files(qapp, store, audio_folder):
     window = open_window(qapp, store)
     try:

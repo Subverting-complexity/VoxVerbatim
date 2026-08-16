@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QModelIndex, Qt, QTimer, QUrl
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QMainWindow,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QVBoxLayout,
@@ -23,8 +25,14 @@ from audio_transcriber.audio.player import AudioPlayer
 from audio_transcriber.audio.scanner import FolderScanner
 from audio_transcriber.paths import log_file_path
 from audio_transcriber.session import SessionState, SessionStore
-from audio_transcriber.settings import SETTINGS_FILE_NAME, Settings, SettingsStore
+from audio_transcriber.settings import (
+    SETTINGS_FILE_NAME,
+    EnhanceSettings,
+    Settings,
+    SettingsStore,
+)
 from audio_transcriber.ui.accessibility import announce, describe
+from audio_transcriber.ui.enhance_dialog import EnhanceAudioDialog, summarise
 from audio_transcriber.ui.file_info_panel import FileInfoPanel
 from audio_transcriber.ui.file_table import AudioFileTableModel, AudioFileTableView
 from audio_transcriber.ui.folder_panel import FolderPanel
@@ -125,6 +133,18 @@ class MainWindow(QMainWindow):
         # behind the name.
         self._summary_label = QLabel(self)
 
+        # Alt+F, Alt+O and Alt+L are already taken by the File menu, the
+        # folder box and the Play button, so Enhance answers to Alt+N.
+        self._enhance_button = QPushButton("E&nhance Audio...", self)
+        describe(
+            self._enhance_button,
+            "Enhance Audio",
+            "Makes quiet recordings louder, writing the result to a folder you "
+            "choose. It works on the checked files, or on the highlighted file if "
+            "none are checked.",
+        )
+        self._enhance_button.clicked.connect(self.show_enhance_audio)
+
         left = QWidget(self)
         # Wide enough for the three columns of the file list to be readable
         # without scrolling sideways. Measured in characters of the current
@@ -137,6 +157,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._table_label)
         left_layout.addWidget(self._table, 1)
         left_layout.addWidget(self._summary_label)
+        left_layout.addWidget(self._enhance_button)
 
         self._player_panel = PlayerPanel(self._player, self._settings, self)
         self._info_panel = FileInfoPanel(self)
@@ -185,6 +206,13 @@ class MainWindow(QMainWindow):
         )
         self._refresh_action = self._add_action(
             file_menu, "&Refresh File List", QKeySequence(Qt.Key.Key_F5), self.refresh
+        )
+        file_menu.addSeparator()
+        self._enhance_action = self._add_action(
+            file_menu,
+            "E&nhance Audio...",
+            QKeySequence("Ctrl+E"),
+            self.show_enhance_audio,
         )
         file_menu.addSeparator()
         self._add_action(
@@ -513,6 +541,62 @@ class MainWindow(QMainWindow):
         # readers re-read a cell after the state behind it changes. Saying
         # it plainly costs a few words and removes the doubt.
         announce(self._status_label, f"{name} {state}")
+
+    # -- Enhancing audio --------------------------------------------------
+
+    def files_to_enhance(self) -> list[AudioFile]:
+        """The recordings an enhancement run would work on.
+
+        The checked files are what the check boxes are for, so they win.
+        Where nothing is checked, the highlighted file is what the user is
+        looking at and is taken to be what they mean.
+        """
+        checked = self._model.checked_files()
+        if checked:
+            return checked
+        selected = self._model.file_at(self._table.selected_row())
+        return [selected] if selected is not None else []
+
+    def show_enhance_audio(self) -> None:
+        """Open the Enhance Audio dialog on the chosen files."""
+        files = self.files_to_enhance()
+        if not files:
+            self._set_status(
+                "There is nothing to enhance. Check the files you want, or highlight "
+                "one in the file list.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        dialog = EnhanceAudioDialog(
+            [audio_file.path for audio_file in files],
+            self._settings.enhance,
+            source_folder=self._folder,
+            parent=self,
+        )
+        dialog.exec()
+        self._remember_enhance_settings(dialog.chosen_settings())
+        summary = dialog.summary
+        if summary is not None:
+            self._set_status(summarise(summary), alert=True)
+        else:
+            self._set_status("Enhance Audio was closed without enhancing anything.")
+
+    def _remember_enhance_settings(self, enhance: EnhanceSettings) -> None:
+        """Keep what the user chose, so the dialog opens the same way next time.
+
+        This happens whether or not anything was enhanced, because setting
+        the parameters up and then closing the dialog is a reasonable thing
+        to do.
+
+        A failure to save is only logged here, rather than announced. What
+        the user is waiting to hear is how the run went, and burying that
+        under a message about the settings file would serve them badly. The
+        Settings dialog reports the same failure plainly.
+        """
+        self._settings = replace(self._settings, enhance=enhance)
+        if not self._settings_store.save(self._settings):
+            _log.warning("The Enhance Audio settings could not be saved.")
 
     def _summary_text(self) -> str:
         total = self._model.rowCount()

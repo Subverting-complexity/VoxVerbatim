@@ -122,8 +122,12 @@ class AudioFileTableModel(QAbstractTableModel):
 
     def checked_names(self) -> list[str]:
         """The checked file names, in the order they appear in the table."""
+        return [audio_file.key for audio_file in self.checked_files()]
+
+    def checked_files(self) -> list[AudioFile]:
+        """The checked files themselves, in the order they appear in the table."""
         return [
-            audio_file.key for audio_file in self._files if audio_file.key in self._checked_names
+            audio_file for audio_file in self._files if audio_file.key in self._checked_names
         ]
 
     def set_checked_names(self, names: list[str] | set[str]) -> None:

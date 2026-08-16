@@ -36,6 +36,8 @@ Files
   F5                  Read the folder again.
   Up and Down         Move through the file list.
   Space               Check or clear the highlighted file.
+  Ctrl+E              Enhance the checked files, or the highlighted one
+                      if none are checked.
 
 Settings and closing
   Ctrl+comma          Open the Settings dialog.

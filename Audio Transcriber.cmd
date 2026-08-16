@@ -21,7 +21,7 @@ if not exist "%VENV_PY%" call :create_venv
 if not exist "%VENV_PY%" goto :no_python
 
 rem Install the libraries only when something is missing, so normal starts are quick.
-"%VENV_PY%" -c "import PySide6, mutagen" >nul 2>&1
+"%VENV_PY%" -c "import PySide6, mutagen, av" >nul 2>&1
 if errorlevel 1 call :install_requirements
 if errorlevel 1 goto :setup_failed
 

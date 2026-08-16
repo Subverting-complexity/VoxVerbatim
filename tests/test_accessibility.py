@@ -11,11 +11,21 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QAccessible, QKeyEvent
-from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton, QTableView
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTableView,
+)
 
 from audio_transcriber.audio.library import AudioFile
 from audio_transcriber.session import SessionStore
+from audio_transcriber.settings import EnhanceSettings
+from audio_transcriber.ui import enhance_dialog as enhance_dialog_module
 from audio_transcriber.ui import main_window as main_window_module
+from audio_transcriber.ui.enhance_dialog import EnhanceAudioDialog
 from audio_transcriber.ui.file_info_panel import FileInfoPanel
 from audio_transcriber.ui.file_table import (
     COLUMN_DURATION,
@@ -221,3 +231,118 @@ def test_the_focus_is_caught_when_the_transport_controls_switch_off(qapp, tmp_pa
         assert "focus has moved" in window._status_label.text()
     finally:
         window.close()
+
+
+# -- The Enhance Audio dialog -------------------------------------------
+
+
+def enhance_dialog(tmp_path, files=None):
+    folder = tmp_path / "recordings"
+    folder.mkdir(exist_ok=True)
+    paths = files if files is not None else [folder / "one.m4a"]
+    return EnhanceAudioDialog(paths, EnhanceSettings(output_folder=str(tmp_path / "enhanced")))
+
+
+def test_every_control_in_the_enhance_dialog_has_a_name(qapp, tmp_path):
+    dialog = enhance_dialog(tmp_path)
+    try:
+        unnamed = [
+            widget.__class__.__name__
+            for widget in (
+                dialog._file_list,
+                dialog._folder_edit,
+                dialog._browse_button,
+                dialog._target_box,
+                dialog._ceiling_box,
+                dialog._gain_box,
+                dialog._limiter_box,
+                dialog._format_box,
+                dialog._replace_box,
+                dialog._progress_bar,
+                dialog._report_text,
+                dialog._start_button,
+                dialog._close_button,
+            )
+            if not widget.accessibleName()
+        ]
+
+        assert unnamed == []
+    finally:
+        dialog.close()
+
+
+def test_no_two_controls_in_the_enhance_dialog_answer_the_same_alt_key(qapp, tmp_path):
+    """Two controls on one Alt letter means neither is reliably reachable."""
+    dialog = enhance_dialog(tmp_path)
+    try:
+        letters = [
+            text[text.index("&") + 1].casefold()
+            for text in (
+                widget.text()
+                for kind in (QLabel, QPushButton, QCheckBox)
+                for widget in dialog.findChildren(kind)
+            )
+            if "&" in text and not text.endswith("&")
+        ]
+
+        assert sorted(letters) == sorted(set(letters)), f"repeated Alt letters in {letters}"
+    finally:
+        dialog.close()
+
+
+def test_each_field_in_the_enhance_dialog_is_reached_by_its_own_label(qapp, tmp_path):
+    """A label with no buddy names nothing, and the field is read as blank."""
+    dialog = enhance_dialog(tmp_path)
+    try:
+        labelled = {label.buddy() for label in dialog.findChildren(QLabel) if label.buddy()}
+
+        for field in (
+            dialog._folder_edit,
+            dialog._target_box,
+            dialog._ceiling_box,
+            dialog._gain_box,
+            dialog._format_box,
+        ):
+            assert field in labelled, f"{field.accessibleName()} has no label pointing at it"
+    finally:
+        dialog.close()
+
+
+def test_the_progress_of_a_run_is_said_out_loud(qapp, tmp_path, monkeypatch):
+    """A progress bar is only read if the user goes and looks at it.
+
+    Each file is therefore announced as it starts, which is the pace at
+    which something actually changes.
+    """
+    announced: list[str] = []
+    monkeypatch.setattr(
+        enhance_dialog_module,
+        "announce",
+        lambda widget, message, urgent=False: announced.append(message),
+    )
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog._on_file_started("beta.m4a", 2, 3)
+
+        assert announced == ["Enhancing beta.m4a. File 2 of 3."]
+    finally:
+        dialog.close()
+
+
+def test_a_run_that_cannot_start_says_why_out_loud(qapp, tmp_path, monkeypatch):
+    announced: list[str] = []
+    monkeypatch.setattr(
+        enhance_dialog_module,
+        "announce",
+        lambda widget, message, urgent=False: announced.append(message),
+    )
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog._folder_edit.setText("")
+
+        assert dialog.start() is False
+
+        assert announced
+        assert "No output folder has been chosen" in announced[0]
+    finally:
+        dialog.close()

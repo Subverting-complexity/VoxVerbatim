@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Visual Studio
+#   The .vs folder holds per-user state: window layout, the local history
+#   database, and browsing indexes. None of it belongs to the project.
+.vs/

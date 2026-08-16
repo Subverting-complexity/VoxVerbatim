@@ -9,32 +9,24 @@ import traceback
 from pathlib import Path
 from types import TracebackType
 
-from PySide6.QtCore import QCoreApplication, QStandardPaths
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from audio_transcriber import APPLICATION_NAME, ORGANISATION_NAME, __version__
-from audio_transcriber.session import SESSION_FILE_NAME, SessionStore
+from audio_transcriber.paths import (
+    LOG_FILE_NAME,
+    SESSION_FILE_NAME,
+    SETTINGS_FILE_NAME,
+    config_directory,
+)
+from audio_transcriber.session import SessionStore
+from audio_transcriber.settings import SettingsStore
 from audio_transcriber.ui.main_window import MainWindow
 
 _log = logging.getLogger(__name__)
 
-LOG_FILE_NAME = "audio-transcriber.log"
 _LOG_MAX_BYTES = 1024 * 1024
 _LOG_BACKUP_COUNT = 2
-
-
-def config_directory() -> Path:
-    """Return the per-user folder holding the session file and the log.
-
-    On Windows this sits under the user's AppData folder, which is where a
-    desktop application is expected to keep its settings.
-    """
-    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
-    if not location:
-        location = str(Path.home() / f".{APPLICATION_NAME.lower().replace(' ', '-')}")
-    directory = Path(location)
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
 
 
 def configure_logging(directory: Path) -> None:
@@ -103,11 +95,14 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(list(sys.argv if argv is None else argv))
     app.setApplicationDisplayName(APPLICATION_NAME)
 
-    directory = config_directory()
+    directory = config_directory(create=True)
     configure_logging(directory)
     _install_exception_hook()
     _log.info("Starting %s version %s", APPLICATION_NAME, __version__)
 
-    window = MainWindow(SessionStore(directory / SESSION_FILE_NAME))
+    window = MainWindow(
+        SessionStore(directory / SESSION_FILE_NAME),
+        SettingsStore(directory / SETTINGS_FILE_NAME),
+    )
     window.show()
     return app.exec()

@@ -13,13 +13,12 @@ layer encodes and decodes.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
+
+from audio_transcriber.json_store import read_json_object, write_json_object
 
 _log = logging.getLogger(__name__)
 
@@ -92,59 +91,11 @@ class SessionStore:
 
     def load(self) -> SessionState:
         """Return the saved session, or an empty one if there is nothing usable."""
-        try:
-            raw = self._path.read_bytes()
-        except FileNotFoundError:
+        data = read_json_object(self._path)
+        if data is None:
             return SessionState()
-        except OSError:
-            _log.warning("Could not read the session file %s", self._path, exc_info=True)
-            return SessionState()
-
-        # The file is read as bytes and decoded here so that a file holding
-        # something other than UTF-8 text is treated as damaged like any
-        # other unreadable file. Decoding it on the way in would raise
-        # instead, and this runs before the window exists to report it.
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            _log.warning("The session file %s could not be read as JSON; ignoring it.", self._path)
-            return SessionState()
-
-        if not isinstance(data, dict):
-            _log.warning("The session file %s does not contain an object; ignoring it.", self._path)
-            return SessionState()
-
         return SessionState.from_dict(data)
 
     def save(self, state: SessionState) -> bool:
-        """Write the session to disk, returning whether it worked.
-
-        The file is written to a temporary name first and then moved into
-        place. That way an interrupted save leaves the previous session
-        intact instead of a half-written file that cannot be parsed.
-        """
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            handle = tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self._path.parent,
-                prefix=self._path.name,
-                suffix=".tmp",
-                delete=False,
-            )
-            temp_name = handle.name
-            try:
-                with handle:
-                    json.dump(state.to_dict(), handle, indent=2)
-                os.replace(temp_name, self._path)
-            except BaseException:
-                try:
-                    os.unlink(temp_name)
-                except OSError:
-                    pass
-                raise
-        except OSError:
-            _log.warning("Could not save the session to %s", self._path, exc_info=True)
-            return False
-        return True
+        """Write the session to disk, returning whether it worked."""
+        return write_json_object(self._path, state.to_dict())

@@ -1,8 +1,9 @@
 """The audio player: transport buttons, a seek bar, and a plain-words status.
 
-The buttons are labelled compactly on screen, but every one of them carries
-a full accessible name such as "Back 2 minutes", so a screen reader never
-has to read out a row of angle brackets.
+The buttons are labelled compactly on screen, and every one of them also
+carries a full accessible name such as "Back 2 minutes". Both are worked
+out from the skip intervals in the settings, so changing an interval
+changes what the button says and what a screen reader reads.
 """
 
 from __future__ import annotations
@@ -20,34 +21,35 @@ from PySide6.QtWidgets import (
 
 from audio_transcriber.audio.player import AudioPlayer
 from audio_transcriber.formatting import (
+    compact_interval,
     format_duration,
     format_position,
     spoken_duration,
     spoken_position,
 )
+from audio_transcriber.settings import Settings
 from audio_transcriber.ui.accessibility import announce, describe
 from audio_transcriber.ui.flow_layout import FlowWidget
 
-#: The skip buttons, in the order they appear from left to right. Each entry
-#: is the text on the button, the name a screen reader reads, and how far the
-#: button moves in seconds.
-#:
-#: The buttons say how far they move in words. Arrow brackets would leave the
-#: difference between two minutes and five minutes to a count of how many
-#: brackets there are, and the difference between back and forward to which
-#: way they point, which is exactly the sort of thing someone using a
-#: magnifier should not have to work out.
-SKIP_BUTTONS: tuple[tuple[str, str, int], ...] = (
-    ("- 5 min", "Back 5 minutes", -300),
-    ("- 2 min", "Back 2 minutes", -120),
-    ("- 15 sec", "Back 15 seconds", -15),
-)
 
-FORWARD_BUTTONS: tuple[tuple[str, str, int], ...] = (
-    ("+ 15 sec", "Forward 15 seconds", 15),
-    ("+ 2 min", "Forward 2 minutes", 120),
-    ("+ 5 min", "Forward 5 minutes", 300),
-)
+def skip_button_label(seconds: int) -> str:
+    """The text on a skip button, such as ``- 2 min`` or ``+ 15 sec``.
+
+    The buttons say how far they move in words. Arrow brackets would leave
+    the difference between two minutes and five minutes to a count of how
+    many brackets there are, and the difference between back and forward to
+    which way they point, which is exactly the sort of thing someone using a
+    magnifier should not have to work out.
+    """
+    sign = "-" if seconds < 0 else "+"
+    return f"{sign} {compact_interval(abs(seconds))}"
+
+
+def skip_button_name(seconds: int) -> str:
+    """The name a screen reader reads, such as ``Back 2 minutes``."""
+    direction = "Back" if seconds < 0 else "Forward"
+    return f"{direction} {spoken_duration(abs(seconds))}"
+
 
 _SEEK_ARROW_STEP_SECONDS = 5
 _SEEK_PAGE_STEP_SECONDS = 30
@@ -84,20 +86,31 @@ class PlayerPanel(QGroupBox):
     focusReleased = Signal()
     """The controls are switching off while one of them holds the focus."""
 
-    def __init__(self, player: AudioPlayer, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        player: AudioPlayer,
+        settings: Settings | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__("Audio player", parent)
         self._player = player
         self._syncing_slider = False
         self._duration_ms = 0
+        self._settings = settings or Settings()
 
         self._buttons: list[QPushButton] = []
+        self._skip_seconds_by_button: dict[QPushButton, int] = {}
         # The buttons wrap onto a second line when the window is narrow or
         # the system font is large, so the panel never forces the window
         # wider than the screen.
         controls = FlowWidget(self)
 
-        for text, name, delta_seconds in SKIP_BUTTONS:
-            self._add_skip_button(controls, text, name, delta_seconds)
+        # Longest skip first on the way back, so the row reads as one scale
+        # running from the largest jump backwards to the largest forwards.
+        self._back_buttons = [
+            self._add_skip_button(controls, -seconds)
+            for seconds in reversed(self._settings.skip_seconds)
+        ]
 
         # Alt+P belongs to the Playback menu, so Play answers to Alt+L.
         self._play_button = QPushButton("P&lay", self)
@@ -110,8 +123,10 @@ class PlayerPanel(QGroupBox):
         self._pause_button.clicked.connect(lambda: self.pauseRequested.emit())
         self._add_button(controls, self._pause_button)
 
-        for text, name, delta_seconds in FORWARD_BUTTONS:
-            self._add_skip_button(controls, text, name, delta_seconds)
+        self._forward_buttons = [
+            self._add_skip_button(controls, seconds)
+            for seconds in self._settings.skip_seconds
+        ]
 
         self._seek_label = QLabel("Playback position", self)
         self._seek_slider = QSlider(Qt.Orientation.Horizontal, self)
@@ -155,19 +170,38 @@ class PlayerPanel(QGroupBox):
 
     # -- Construction helpers -------------------------------------------
 
-    def _add_skip_button(
-        self,
-        controls: FlowWidget,
-        text: str,
-        name: str,
-        delta_seconds: int,
-    ) -> QPushButton:
-        button = QPushButton(text, self)
-        describe(button, name, f"Moves playback {name.lower()}.")
+    def _add_skip_button(self, controls: FlowWidget, delta_seconds: int) -> QPushButton:
+        button = QPushButton(self)
+        # How far the button moves is read from the settings when it is
+        # pressed, rather than captured now, so a change in the settings
+        # takes effect without rebuilding the button.
         button.clicked.connect(
-            lambda _checked=False, d=delta_seconds: self.skipRequested.emit(d * 1000)
+            lambda _checked=False, b=button: self.skipRequested.emit(
+                self._skip_milliseconds_of(b)
+            )
         )
+        self._skip_seconds_by_button[button] = delta_seconds
+        self._label_skip_button(button, delta_seconds)
         return self._add_button(controls, button)
+
+    def _label_skip_button(self, button: QPushButton, delta_seconds: int) -> None:
+        name = skip_button_name(delta_seconds)
+        button.setText(skip_button_label(delta_seconds))
+        describe(button, name, f"Moves playback {name.lower()}.")
+
+    def _skip_milliseconds_of(self, button: QPushButton) -> int:
+        return self._skip_seconds_by_button.get(button, 0) * 1000
+
+    def apply_settings(self, settings: Settings) -> None:
+        """Take new skip intervals, relabelling the buttons to match."""
+        self._settings = settings
+        backwards = list(reversed(settings.skip_seconds))
+        for button, seconds in zip(self._back_buttons, backwards):
+            self._skip_seconds_by_button[button] = -seconds
+            self._label_skip_button(button, -seconds)
+        for button, seconds in zip(self._forward_buttons, settings.skip_seconds):
+            self._skip_seconds_by_button[button] = seconds
+            self._label_skip_button(button, seconds)
 
     def _add_button(self, controls: FlowWidget, button: QPushButton) -> QPushButton:
         """Add a transport button to the row that wraps."""

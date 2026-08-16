@@ -12,9 +12,20 @@ from PySide6.QtWidgets import (
 )
 
 from audio_transcriber import APPLICATION_NAME, __version__
+from audio_transcriber.settings import Settings
 from audio_transcriber.ui.accessibility import describe
+from audio_transcriber.ui.player_panel import skip_button_name
 
-KEYBOARD_SHORTCUTS = """\
+def keyboard_shortcuts_text(settings: Settings | None = None) -> str:
+    """The list of shortcuts, with the skip distances the user has chosen.
+
+    The six skip commands move as far as the settings say, so the list is
+    written out from the settings rather than fixed, and never tells the
+    user something the buttons no longer do.
+    """
+    settings = settings or Settings()
+    short, medium, long = settings.skip_seconds
+    return f"""\
 Getting around
   Tab and Shift+Tab   Move between the controls of the window.
   F6                  Move to the next panel.
@@ -26,14 +37,20 @@ Files
   Up and Down         Move through the file list.
   Space               Check or clear the highlighted file.
 
+Settings and closing
+  Ctrl+comma          Open the Settings dialog.
+  Ctrl+Q              Close the application.
+  The File menu also opens the log file, and the folder that holds the
+  settings, the session and the log.
+
 Playback
   Ctrl+Space          Play, or pause if already playing.
-  Alt+Left            Back 15 seconds.
-  Alt+Right           Forward 15 seconds.
-  Alt+Shift+Left      Back 2 minutes.
-  Alt+Shift+Right     Forward 2 minutes.
-  Alt+Ctrl+Left       Back 5 minutes.
-  Alt+Ctrl+Right      Forward 5 minutes.
+  Alt+Left            {skip_button_name(-short)}.
+  Alt+Right           {skip_button_name(short)}.
+  Alt+Shift+Left      {skip_button_name(-medium)}.
+  Alt+Shift+Right     {skip_button_name(medium)}.
+  Alt+Ctrl+Left       {skip_button_name(-long)}.
+  Alt+Ctrl+Right      {skip_button_name(long)}.
 
 On the seek bar
   Left and Right      Move 5 seconds.
@@ -45,12 +62,12 @@ On the seek bar
 class KeyboardShortcutsDialog(QDialog):
     """Shows the keyboard shortcuts in a window that can be read and copied."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Keyboard shortcuts")
 
         self._text = QPlainTextEdit(self)
-        self._text.setPlainText(KEYBOARD_SHORTCUTS)
+        self._text.setPlainText(keyboard_shortcuts_text(settings))
         self._text.setReadOnly(True)
         self._text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         describe(

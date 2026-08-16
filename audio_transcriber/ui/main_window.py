@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QModelIndex, Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtCore import QByteArray, QModelIndex, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
+    QDialog,
     QLabel,
     QMainWindow,
     QSplitter,
@@ -20,17 +21,21 @@ from audio_transcriber import APPLICATION_NAME
 from audio_transcriber.audio.library import AudioFile, DurationState
 from audio_transcriber.audio.player import AudioPlayer
 from audio_transcriber.audio.scanner import FolderScanner
+from audio_transcriber.paths import log_file_path
 from audio_transcriber.session import SessionState, SessionStore
+from audio_transcriber.settings import SETTINGS_FILE_NAME, Settings, SettingsStore
 from audio_transcriber.ui.accessibility import announce, describe
 from audio_transcriber.ui.file_info_panel import FileInfoPanel
 from audio_transcriber.ui.file_table import AudioFileTableModel, AudioFileTableView
 from audio_transcriber.ui.folder_panel import FolderPanel
 from audio_transcriber.ui.help_dialogs import KeyboardShortcutsDialog, show_about
+from audio_transcriber.ui.settings_dialog import SettingsDialog
 from audio_transcriber.ui.player_panel import (
     STATUS_FINISHED,
     STATUS_PAUSED,
     STATUS_PLAYING,
     PlayerPanel,
+    skip_button_name,
 )
 
 _log = logging.getLogger(__name__)
@@ -51,10 +56,22 @@ _ANNOUNCED_PLAYBACK_STATUSES = frozenset({STATUS_PLAYING, STATUS_PAUSED, STATUS_
 class MainWindow(QMainWindow):
     """The one window of the application."""
 
-    def __init__(self, session_store: SessionStore, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        session_store: SessionStore,
+        settings_store: SettingsStore | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._session_store = session_store
         self._session = session_store.load()
+        # The settings sit beside the session by default, which keeps
+        # everything the application writes for itself in one folder and
+        # keeps a test's temporary folder self-contained.
+        self._settings_store = settings_store or SettingsStore(
+            session_store.path.parent / SETTINGS_FILE_NAME
+        )
+        self._settings = self._settings_store.load()
         self._folder: Path | None = None
         self._pending_checked: list[str] = []
         self._pending_selected: str | None = None
@@ -118,7 +135,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._table, 1)
         left_layout.addWidget(self._summary_label)
 
-        self._player_panel = PlayerPanel(self._player, self)
+        self._player_panel = PlayerPanel(self._player, self._settings, self)
         self._info_panel = FileInfoPanel(self)
 
         right = QWidget(self)
@@ -150,6 +167,10 @@ class MainWindow(QMainWindow):
         self._update_summary()
 
     def _build_menus(self) -> None:
+        # Each entry is a menu command, which of the three skip intervals it
+        # uses, and whether it goes back or forward, so the six can be
+        # relabelled when the intervals change.
+        self._skip_actions: list[tuple[QAction, int, int]] = []
         menu_bar = self.menuBar()
 
         file_menu = menu_bar.addMenu("&File")
@@ -163,6 +184,15 @@ class MainWindow(QMainWindow):
             file_menu, "&Refresh File List", QKeySequence(Qt.Key.Key_F5), self.refresh
         )
         file_menu.addSeparator()
+        self._add_action(
+            file_menu,
+            "&Settings...",
+            QKeySequence.StandardKey.Preferences,
+            self.show_settings,
+        )
+        self._add_action(file_menu, "Open &Log File", None, self.open_log_file)
+        self._add_action(file_menu, "Open Settings Fol&der", None, self.open_settings_folder)
+        file_menu.addSeparator()
         self._add_action(file_menu, "E&xit", QKeySequence("Ctrl+Q"), self.close)
 
         playback_menu = menu_bar.addMenu("&Playback")
@@ -172,20 +202,16 @@ class MainWindow(QMainWindow):
             QKeySequence("Ctrl+Space"),
             self.toggle_play_pause,
         )
+        # These six read their distance from the settings, so their labels
+        # are worked out rather than written down. They carry no Alt letter
+        # of their own for that reason; each has a shortcut key instead, and
+        # the arrow keys walk the menu.
         playback_menu.addSeparator()
-        for label, shortcut, delta in (
-            ("Back 15 &seconds", "Alt+Left", -15),
-            ("Back &2 minutes", "Alt+Shift+Left", -120),
-            ("Back &5 minutes", "Alt+Ctrl+Left", -300),
-        ):
-            self._add_skip_action(playback_menu, label, shortcut, delta)
+        for interval, shortcut in enumerate(("Alt+Left", "Alt+Shift+Left", "Alt+Ctrl+Left")):
+            self._add_skip_action(playback_menu, interval, -1, shortcut)
         playback_menu.addSeparator()
-        for label, shortcut, delta in (
-            ("Forward 15 se&conds", "Alt+Right", 15),
-            ("Forward 2 &minutes", "Alt+Shift+Right", 120),
-            ("Forward 5 m&inutes", "Alt+Ctrl+Right", 300),
-        ):
-            self._add_skip_action(playback_menu, label, shortcut, delta)
+        for interval, shortcut in enumerate(("Alt+Right", "Alt+Shift+Right", "Alt+Ctrl+Right")):
+            self._add_skip_action(playback_menu, interval, 1, shortcut)
 
         view_menu = menu_bar.addMenu("&View")
         self._add_action(
@@ -212,13 +238,24 @@ class MainWindow(QMainWindow):
         self.addAction(action)
         return action
 
-    def _add_skip_action(self, menu, text: str, shortcut: str, delta_seconds: int) -> QAction:
-        return self._add_action(
+    def _add_skip_action(self, menu, interval: int, direction: int, shortcut: str) -> QAction:
+        """Add one of the six skip commands to the Playback menu.
+
+        ``interval`` picks one of the three intervals from the settings and
+        ``direction`` is -1 for back or 1 for forward. Both the distance and
+        the wording follow the settings, so changing an interval changes the
+        menu as well as the buttons.
+        """
+        action = self._add_action(
             menu,
-            text,
+            skip_button_name(direction * self._settings.skip_seconds[interval]),
             QKeySequence(shortcut),
-            lambda _checked=False, d=delta_seconds: self.skip(d * 1000),
+            lambda _checked=False, i=interval, d=direction: self.skip(
+                d * self._settings.skip_seconds[i] * 1000
+            ),
         )
+        self._skip_actions.append((action, interval, direction))
+        return action
 
     def _connect_signals(self) -> None:
         self._folder_panel.folderChosen.connect(self._on_folder_chosen)
@@ -254,6 +291,12 @@ class MainWindow(QMainWindow):
         folder_text = self._session.folder
         if not folder_text:
             self._set_status("Select a folder to begin.")
+            return
+        if not self._settings.reopen_last_folder:
+            self._set_status(
+                "Select a folder to begin. Reopening the last folder is switched off "
+                "in the settings."
+            )
             return
         folder = Path(folder_text)
         self._folder_panel.set_folder(folder)
@@ -512,8 +555,62 @@ class MainWindow(QMainWindow):
     def _focus_file_table(self) -> None:
         self._table.setFocus(Qt.FocusReason.TabFocusReason)
 
+    # -- Settings and the files the application keeps ---------------------
+
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
+    def show_settings(self) -> None:
+        """Open the Settings dialog and take what the user chose."""
+        dialog = SettingsDialog(self._settings, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.apply_settings(dialog.chosen_settings())
+
+    def apply_settings(self, settings: Settings) -> None:
+        """Put new settings to work everywhere that uses them, and save them."""
+        self._settings = settings
+        self._player_panel.apply_settings(settings)
+        for action, interval, direction in self._skip_actions:
+            action.setText(skip_button_name(direction * settings.skip_seconds[interval]))
+        if self._settings_store.save(settings):
+            self._set_status("Settings saved.", alert=True)
+        else:
+            self._set_status(
+                f"The settings could not be saved to {self._settings_store.path}.",
+                alert=True,
+                urgent=True,
+            )
+
+    def open_log_file(self) -> None:
+        """Open the log file in whatever the user reads text files with."""
+        path = log_file_path()
+        if not path.is_file():
+            self._set_status(
+                f"There is no log file yet. It will appear at {path}.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        self._open_with_windows(path, "log file")
+
+    def open_settings_folder(self) -> None:
+        """Open the folder holding the settings, the session and the log."""
+        self._open_with_windows(self._settings_store.path.parent, "settings folder")
+
+    def _open_with_windows(self, path: Path, description: str) -> None:
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self._set_status(f"Opened the {description}, {path}.", alert=True)
+        else:
+            self._set_status(
+                f"Windows could not open the {description}, {path}.",
+                alert=True,
+                urgent=True,
+            )
+
     def _show_keyboard_shortcuts(self) -> None:
-        dialog = KeyboardShortcutsDialog(self)
+        dialog = KeyboardShortcutsDialog(self._settings, self)
         dialog.exec()
         # Qt returns the focus to whatever had it before the dialog opened,
         # which is what a keyboard user expects.

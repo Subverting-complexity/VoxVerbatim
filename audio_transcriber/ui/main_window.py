@@ -26,7 +26,12 @@ from audio_transcriber.ui.file_info_panel import FileInfoPanel
 from audio_transcriber.ui.file_table import AudioFileTableModel, AudioFileTableView
 from audio_transcriber.ui.folder_panel import FolderPanel
 from audio_transcriber.ui.help_dialogs import KeyboardShortcutsDialog, show_about
-from audio_transcriber.ui.player_panel import PlayerPanel
+from audio_transcriber.ui.player_panel import (
+    STATUS_FINISHED,
+    STATUS_PAUSED,
+    STATUS_PLAYING,
+    PlayerPanel,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -37,6 +42,10 @@ _MEDIA_LOAD_DELAY_MS = 250
 
 #: Saving the session is cheap but pointless to repeat on every key press.
 _SESSION_SAVE_DELAY_MS = 750
+
+#: The playback statuses worth reading out. The others follow from moving
+#: the highlight rather than from a playback command.
+_ANNOUNCED_PLAYBACK_STATUSES = frozenset({STATUS_PLAYING, STATUS_PAUSED, STATUS_FINISHED})
 
 
 class MainWindow(QMainWindow):
@@ -90,13 +99,18 @@ class MainWindow(QMainWindow):
             "transcription.",
         )
 
+        # This label and the status label below carry messages, so neither is
+        # given an accessible name. A label has no accessible value of its
+        # own: its text is its name, and naming it would hide what it says
+        # behind the name.
         self._summary_label = QLabel(self)
-        describe(self._summary_label, "File list summary")
 
         left = QWidget(self)
-        # Wide enough that the three columns of the file list are readable
-        # without scrolling sideways, even before the user resizes anything.
-        left.setMinimumWidth(360)
+        # Wide enough for the three columns of the file list to be readable
+        # without scrolling sideways. Measured in characters of the current
+        # font, so that at the large text sizes a low-vision user runs, this
+        # does not become a floor that pushes the window off the screen.
+        left.setMinimumWidth(self.fontMetrics().averageCharWidth() * 30)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(8, 8, 4, 8)
         left_layout.addWidget(self._folder_panel)
@@ -127,7 +141,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._splitter)
 
         self._status_label = QLabel("Ready", self)
-        describe(self._status_label, "Status")
         status_bar = QStatusBar(self)
         status_bar.addWidget(self._status_label, 1)
         status_bar.setSizeGripEnabled(True)
@@ -232,6 +245,7 @@ class MainWindow(QMainWindow):
         self._player_panel.pauseRequested.connect(self.pause)
         self._player_panel.skipRequested.connect(self.skip)
         self._player_panel.seekRequested.connect(self.seek_to)
+        self._player_panel.focusReleased.connect(self._on_player_focus_released)
 
     # -- Folders and files ----------------------------------------------
 
@@ -249,6 +263,7 @@ class MainWindow(QMainWindow):
                 f"The folder {folder} is not available. It may be on a drive that is "
                 "not connected.",
                 alert=True,
+                urgent=True,
             )
             return
         self._load_folder(
@@ -323,7 +338,7 @@ class MainWindow(QMainWindow):
         self._model.clear()
         self._clear_selection()
         self._update_summary()
-        self._set_status(message, alert=True)
+        self._set_status(message, alert=True, urgent=True)
 
     def _on_scan_finished(self, scan_id: int) -> None:
         if scan_id != self._scanner.current_scan_id:
@@ -421,18 +436,33 @@ class MainWindow(QMainWindow):
             self._info_panel.refresh_duration()
 
     def _on_player_error(self, message: str) -> None:
-        self._set_status(message, alert=True)
+        self._set_status(message, alert=True, urgent=True)
 
     def _on_playback_status_changed(self, status: str) -> None:
-        self._set_status(status, alert=True)
+        # Only the statuses that follow from something the user did are read
+        # out. "Stopped" and "No file loaded" come from moving the highlight
+        # in the file list, and announcing those would interrupt the reading
+        # of each file name on the way down the list.
+        self._set_status(status, alert=status in _ANNOUNCED_PLAYBACK_STATUSES)
+
+    def _on_player_focus_released(self) -> None:
+        """Catch the focus when the transport controls switch off underneath it."""
+        self._focus_file_table()
+        self._set_status(
+            "No file is loaded. The focus has moved to the audio file list.",
+            alert=True,
+            urgent=True,
+        )
 
     # -- Checked files --------------------------------------------------
 
     def _on_file_checked(self, name: str, checked: bool) -> None:
-        # No alert here: a screen reader announces the new state of the
-        # check box itself, and saying it twice is worse than saying it once.
         state = "checked" if checked else "cleared"
         self._set_status(f"{name} {state}. {self._summary_text()}.")
+        # The check box does report its own new state, but only some screen
+        # readers re-read a cell after the state behind it changes. Saying
+        # it plainly costs a few words and removes the doubt.
+        announce(self._status_label, f"{name} {state}")
 
     def _summary_text(self) -> str:
         total = self._model.rowCount()
@@ -447,33 +477,40 @@ class MainWindow(QMainWindow):
 
     # -- Status ---------------------------------------------------------
 
-    def _set_status(self, message: str, alert: bool = False) -> None:
+    def _set_status(self, message: str, alert: bool = False, urgent: bool = False) -> None:
         """Show a message in the status bar, and read it out if it matters."""
         self._status_label.setText(message)
         if alert:
-            announce(self._status_label, message)
+            announce(self._status_label, message, urgent=urgent)
 
     # -- Panels and focus -----------------------------------------------
 
     def focus_next_panel(self) -> None:
-        """Move the focus to the next panel of the window, and say which one."""
-        panels: list[tuple[str, QWidget]] = [
-            ("Audio folder", self._folder_panel),
-            ("Audio files", self._table),
-            ("Audio player", self._player_panel),
-            ("Selected file", self._info_panel),
+        """Move the focus to the next panel of the window, and say which one.
+
+        Each panel names the control the focus should land on. Calling
+        setFocus on the panel itself is no good: a plain container keeps the
+        focus and answers no keys, while a group box passes it to a child
+        that is not always the first one.
+        """
+        panels: list[tuple[str, QWidget, object]] = [
+            ("Audio folder", self._folder_panel, self._folder_panel.focus_browse_button),
+            ("Audio files", self._table, self._focus_file_table),
+            ("Audio player", self._player_panel, self._player_panel.focus_play_button),
+            ("Selected file", self._info_panel, self._info_panel.focus_first_field),
         ]
         focused = self.focusWidget()
         current_index = -1
-        for index, (_name, widget) in enumerate(panels):
-            if focused is not None and (focused is widget or widget.isAncestorOf(focused)):
+        for index, (_name, panel, _focus) in enumerate(panels):
+            if focused is not None and (focused is panel or panel.isAncestorOf(focused)):
                 current_index = index
                 break
-        name, widget = panels[(current_index + 1) % len(panels)]
-        widget.setFocus(Qt.FocusReason.TabFocusReason)
-        if not widget.hasFocus():
-            widget.focusNextChild()
+        name, _panel, focus = panels[(current_index + 1) % len(panels)]
+        focus()
         self._set_status(name, alert=True)
+
+    def _focus_file_table(self) -> None:
+        self._table.setFocus(Qt.FocusReason.TabFocusReason)
 
     def _show_keyboard_shortcuts(self) -> None:
         dialog = KeyboardShortcutsDialog(self)

@@ -319,11 +319,19 @@ class AudioFileTableView(QTableView):
         Qt only toggles a check box when the highlight is on the cell that
         holds it. Rows are selected whole here, so the space bar is handled
         directly and works no matter which column the highlight sits in.
+
+        The highlight moves to the file name first. The check box lives on
+        that cell, so a screen reader reading the focused cell is looking at
+        the one whose state just changed. Toggling from the Duration cell
+        without moving would change a state the user is not pointed at, and
+        they would hear nothing at all.
         """
         is_toggle_key = event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Select)
         no_modifiers = event.modifiers() == Qt.KeyboardModifier.NoModifier
         index = self.currentIndex()
         if is_toggle_key and no_modifiers and index.isValid():
+            if index.column() != COLUMN_NAME:
+                self.setCurrentIndex(index.sibling(index.row(), COLUMN_NAME))
             self.toggleCheckRequested.emit(index.row())
             event.accept()
             return

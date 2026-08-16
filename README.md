@@ -51,17 +51,27 @@ renamed in the meantime are quietly dropped.
 The application is built for JAWS, NVDA and ZoomText Magnifier/Reader, and
 everything in it can be done from the keyboard.
 
-* Every control has a name a screen reader reads out, and the values in the
-  file list are offered in a spoken form as well as a compact one, so "4.2 MB"
-  is read as "4.2 megabytes" and "1:32" as "1 minute 32 seconds".
+* Every control has a name a screen reader reads out. The file list offers a
+  spoken form of each value as well as the compact one on screen, so "4.2 MB"
+  is read as "4.2 megabytes" and "1:32" as "1 minute 32 seconds". The
+  Selected file panel writes its values out in words, because that is where
+  a value is read closely rather than scanned down a column.
 * The file list is a standard Qt table with real rows, columns and check
-  boxes, so a screen reader can navigate it as a table.
+  boxes, so a screen reader can navigate it as a table. The space bar checks
+  or clears a file from any column of the highlighted row.
 * Values you might want to read closely, such as the folder path and the
   details of the selected file, sit in read-only text boxes. They take
   focus, they can be read a word at a time or copied, and they show a real
-  caret for ZoomText to follow.
+  caret for ZoomText to follow. The caret stays where you left it even while
+  the playback position rewrites itself.
 * Status changes that happen away from the focus, such as a folder finishing
-  loading or playback failing, are both shown on screen and announced.
+  loading or playback failing, are shown on screen and announced. Errors
+  interrupt; everything else waits its turn.
+* The skip buttons say how far they move in words, so nothing depends on
+  counting arrow brackets or noticing which way they point.
+* The transport buttons wrap onto a second line rather than forcing the
+  window wider than the screen, so the application still fits at large
+  Windows text sizes and high scaling.
 * Nothing is signalled by colour, icon or position alone.
 
 Press **F1** in the application for the full list of keyboard shortcuts.
@@ -105,6 +115,7 @@ audio_transcriber/
         file_info_panel.py Details of the selected file
         help_dialogs.py    Keyboard shortcuts and About
         accessibility.py   Naming controls and announcing changes
+        flow_layout.py     A row of buttons that wraps when space is short
 ```
 
 Nothing in `audio_transcriber/session.py`, `formatting.py` or

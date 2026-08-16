@@ -7,10 +7,9 @@ has to read out a row of angle brackets.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QPushButton,
     QSizePolicy,
@@ -20,26 +19,42 @@ from PySide6.QtWidgets import (
 )
 
 from audio_transcriber.audio.player import AudioPlayer
-from audio_transcriber.formatting import format_duration, format_position, spoken_duration
-from audio_transcriber.ui.accessibility import describe
+from audio_transcriber.formatting import (
+    format_duration,
+    format_position,
+    spoken_duration,
+    spoken_position,
+)
+from audio_transcriber.ui.accessibility import announce, describe
+from audio_transcriber.ui.flow_layout import FlowWidget
 
 #: The skip buttons, in the order they appear from left to right. Each entry
 #: is the text on the button, the name a screen reader reads, and how far the
 #: button moves in seconds.
+#:
+#: The buttons say how far they move in words. Arrow brackets would leave the
+#: difference between two minutes and five minutes to a count of how many
+#: brackets there are, and the difference between back and forward to which
+#: way they point, which is exactly the sort of thing someone using a
+#: magnifier should not have to work out.
 SKIP_BUTTONS: tuple[tuple[str, str, int], ...] = (
-    ("<<<", "Back 5 minutes", -300),
-    ("<<", "Back 2 minutes", -120),
-    ("<", "Back 15 seconds", -15),
+    ("- 5 min", "Back 5 minutes", -300),
+    ("- 2 min", "Back 2 minutes", -120),
+    ("- 15 sec", "Back 15 seconds", -15),
 )
 
 FORWARD_BUTTONS: tuple[tuple[str, str, int], ...] = (
-    (">", "Forward 15 seconds", 15),
-    (">>", "Forward 2 minutes", 120),
-    (">>>", "Forward 5 minutes", 300),
+    ("+ 15 sec", "Forward 15 seconds", 15),
+    ("+ 2 min", "Forward 2 minutes", 120),
+    ("+ 5 min", "Forward 5 minutes", 300),
 )
 
 _SEEK_ARROW_STEP_SECONDS = 5
 _SEEK_PAGE_STEP_SECONDS = 30
+
+#: A seek made from the keyboard is read out once the user stops moving,
+#: rather than on every key press.
+_SEEK_ANNOUNCE_DELAY_MS = 600
 
 STATUS_NO_FILE = "No file loaded"
 STATUS_STOPPED = "Stopped"
@@ -66,6 +81,9 @@ class PlayerPanel(QGroupBox):
     seekRequested = Signal(int)
     """Move to this position, in milliseconds from the start."""
 
+    focusReleased = Signal()
+    """The controls are switching off while one of them holds the focus."""
+
     def __init__(self, player: AudioPlayer, parent: QWidget | None = None) -> None:
         super().__init__("Audio player", parent)
         self._player = player
@@ -73,8 +91,10 @@ class PlayerPanel(QGroupBox):
         self._duration_ms = 0
 
         self._buttons: list[QPushButton] = []
-        controls = QHBoxLayout()
-        controls.setSpacing(6)
+        # The buttons wrap onto a second line when the window is narrow or
+        # the system font is large, so the panel never forces the window
+        # wider than the screen.
+        controls = FlowWidget(self)
 
         for text, name, delta_seconds in SKIP_BUTTONS:
             self._add_skip_button(controls, text, name, delta_seconds)
@@ -93,8 +113,6 @@ class PlayerPanel(QGroupBox):
         for text, name, delta_seconds in FORWARD_BUTTONS:
             self._add_skip_button(controls, text, name, delta_seconds)
 
-        controls.addStretch(1)
-
         self._seek_label = QLabel("Playback position", self)
         self._seek_slider = QSlider(Qt.Orientation.Horizontal, self)
         self._seek_slider.setRange(0, 0)
@@ -105,17 +123,23 @@ class PlayerPanel(QGroupBox):
         self._update_seek_description()
         self._seek_slider.valueChanged.connect(self._on_slider_value_changed)
 
-        # The slider counts in whole seconds, so the number a screen reader
-        # reads out for its value is a number of seconds into the recording
-        # rather than a meaningless count of steps.
+        # A seek the user makes from the keyboard is read out in words once
+        # they stop moving. The slider's own value is a count of seconds,
+        # which is exact but hard to picture on a long recording.
+        self._seek_announce_timer = QTimer(self)
+        self._seek_announce_timer.setSingleShot(True)
+        self._seek_announce_timer.setInterval(_SEEK_ANNOUNCE_DELAY_MS)
+        self._seek_announce_timer.timeout.connect(self._announce_seek_position)
+
         self._time_label = QLabel(self)
         self._time_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
+        # These two labels carry messages, so they are left unnamed. A label
+        # has no accessible value: naming it would hide what it says.
         self._status_label = QLabel(STATUS_NO_FILE, self)
-        describe(self._status_label, "Playback status")
 
         layout = QVBoxLayout(self)
-        layout.addLayout(controls)
+        layout.addWidget(controls)
         layout.addWidget(self._seek_label)
         layout.addWidget(self._seek_slider)
         layout.addWidget(self._time_label)
@@ -133,7 +157,7 @@ class PlayerPanel(QGroupBox):
 
     def _add_skip_button(
         self,
-        controls: QHBoxLayout,
+        controls: FlowWidget,
         text: str,
         name: str,
         delta_seconds: int,
@@ -145,27 +169,13 @@ class PlayerPanel(QGroupBox):
         )
         return self._add_button(controls, button)
 
-    def _add_button(self, controls: QHBoxLayout, button: QPushButton) -> QPushButton:
-        """Add a transport button, allowing it to narrow on a small window.
-
-        Eight buttons at the width Windows gives a button by default would
-        stop this panel from ever being narrower than about 700 pixels. The
-        smallest width allowed here is worked out from the current font, so
-        the buttons still grow when the user runs a large system font.
-        """
-        metrics = button.fontMetrics()
-        text_width = metrics.horizontalAdvance(button.text().replace("&", ""))
-        button.setMinimumWidth(text_width + metrics.height() * 2)
+    def _add_button(self, controls: FlowWidget, button: QPushButton) -> QPushButton:
+        """Add a transport button to the row that wraps."""
         self._buttons.append(button)
-        controls.addWidget(button)
+        controls.add(button)
         return button
 
     # -- State ----------------------------------------------------------
-
-    @property
-    def status_widget(self) -> QWidget:
-        """The widget holding the status text, for accessibility alerts."""
-        return self._status_label
 
     def set_media_loaded(self, loaded: bool) -> None:
         """Enable or disable the controls depending on whether a file is loaded.
@@ -174,7 +184,16 @@ class PlayerPanel(QGroupBox):
         rather than switching one off at a time. A control that switches
         itself off while it has focus takes the focus away with it, which
         leaves a keyboard or screen reader user stranded.
+
+        When all of them do have to switch off, and one of them holds the
+        focus, Qt would drop the focus somewhere arbitrary. The window is
+        told instead, so it can put the focus somewhere sensible and say
+        where it went.
         """
+        # Whether the focus was ours is worked out before anything is
+        # switched off, and reported afterwards, so that the window has the
+        # last word on both where the focus goes and what the status says.
+        losing_focus = not loaded and self._holds_focus()
         for button in self._buttons:
             button.setEnabled(loaded)
         self._seek_slider.setEnabled(loaded)
@@ -186,9 +205,17 @@ class PlayerPanel(QGroupBox):
             self._set_status(STATUS_NO_FILE)
         else:
             self._set_status(STATUS_STOPPED)
+        if losing_focus:
+            self.focusReleased.emit()
 
     def focus_play_button(self) -> None:
-        self._play_button.setFocus()
+        self._play_button.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _holds_focus(self) -> bool:
+        # The window is asked rather than the application, so this is right
+        # even when the window is not the active one on the desktop.
+        focused = self.window().focusWidget()
+        return focused is not None and (focused is self or self.isAncestorOf(focused))
 
     # -- Player signals -------------------------------------------------
 
@@ -221,6 +248,13 @@ class PlayerPanel(QGroupBox):
         if self._syncing_slider:
             return
         self.seekRequested.emit(value * 1000)
+        # Only a seek the user made restarts this timer. Updates that come
+        # from playback go through _set_slider_value, which marks them as
+        # ours, so listening to a recording stays quiet.
+        self._seek_announce_timer.start()
+
+    def _announce_seek_position(self) -> None:
+        announce(self._seek_slider, spoken_position(self._seek_slider.value() * 1000))
 
     def _set_slider_value(self, seconds: int) -> None:
         if self._seek_slider.value() == seconds:

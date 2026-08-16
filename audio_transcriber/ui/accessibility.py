@@ -6,16 +6,17 @@ it takes focus. The second is announcing a change that happened somewhere
 other than where the focus is, such as a folder finishing loading, which a
 screen reader would otherwise never mention.
 
-An announcement is sent as an accessibility alert on the widget that
-displays the message. The message is always visible on screen as well, so a
-sighted user and a screen reader user get the same information.
+Announcements carry their own text. Qt turns them into the Windows
+notification that NVDA and JAWS listen for. An earlier version raised a bare
+alert on the label showing the message and left the screen reader to go and
+read it, which does not work: the message never travelled with the event.
 """
 
 from __future__ import annotations
 
 import logging
 
-from PySide6.QtGui import QAccessible, QAccessibleEvent
+from PySide6.QtGui import QAccessible, QAccessibleAnnouncementEvent
 from PySide6.QtWidgets import QWidget
 
 _log = logging.getLogger(__name__)
@@ -31,6 +32,10 @@ def describe(
     The name is the short label a screen reader reads on focus. The
     description is the extra sentence that explains how to work the control,
     which most screen readers read after the name.
+
+    Never call this on a label that carries a message. A label has no value
+    of its own: its accessible name *is* its text, so naming it hides
+    whatever it says behind the name instead.
     """
     widget.setAccessibleName(name)
     if description is not None:
@@ -40,17 +45,27 @@ def describe(
     return widget
 
 
-def announce(widget: QWidget, message: str) -> None:
-    """Ask any running screen reader to read ``message`` out now.
+def announce(widget: QWidget, message: str, urgent: bool = False) -> None:
+    """Ask any running screen reader to read ``message`` out.
 
-    The widget passed in should be the one showing the message, because
-    that is where the screen reader looks for the text of the alert.
+    An urgent message interrupts whatever is being said, which suits errors
+    and things the user is waiting for. Anything else waits its turn rather
+    than talking over the user.
+
+    The message is always on screen as well, so a sighted user and a screen
+    reader user are told the same thing.
     """
     if not message:
         return
     try:
         if not QAccessible.isActive():
             return
-        QAccessible.updateAccessibility(QAccessibleEvent(widget, QAccessible.Event.Alert))
+        event = QAccessibleAnnouncementEvent(widget, message)
+        event.setPoliteness(
+            QAccessible.AnnouncementPoliteness.Assertive
+            if urgent
+            else QAccessible.AnnouncementPoliteness.Polite
+        )
+        QAccessible.updateAccessibility(event)
     except Exception:  # accessibility must never take the application down
-        _log.debug("Could not send an accessibility alert.", exc_info=True)
+        _log.debug("Could not announce %r.", message, exc_info=True)

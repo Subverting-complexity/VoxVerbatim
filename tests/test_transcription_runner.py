@@ -1,0 +1,328 @@
+"""Tests for the background runner that drives the transcription pipeline.
+
+The pipeline itself is replaced throughout. These tests are about what the
+runner reports and when it stops, not about transcription, and a real run
+would call four paid services over the network. Nothing here imports a
+provider or opens a socket.
+"""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+import pytest
+
+from audio_transcriber.transcription import pipeline
+from audio_transcriber.transcription.model import (
+    FinalToken,
+    ReviewStatus,
+    Transcript,
+)
+from audio_transcriber.transcription.runner import (
+    RecordingOutcome,
+    RunSummary,
+    TranscriptionRunner,
+    summarise,
+)
+
+from tests.conftest import wait_until
+
+
+def make_transcript(
+    name: str,
+    words: int = 3,
+    needing_review: int = 0,
+    warnings: tuple[str, ...] = (),
+) -> Transcript:
+    """A transcript with a known number of words, some of them still in doubt."""
+    transcript = Transcript(recording_name=name, warnings=list(warnings))
+    for index in range(words):
+        token = FinalToken(text=f"word{index}")
+        if index < needing_review:
+            token.review_status = ReviewStatus.PENDING
+        transcript.tokens.append(token)
+    return transcript
+
+
+@pytest.fixture
+def recordings(tmp_path) -> list[Path]:
+    """Two file names. Nothing reads them, because the pipeline is replaced."""
+    return [tmp_path / "alpha.m4a", tmp_path / "beta.m4a"]
+
+
+def fake_pipeline(monkeypatch, transcribe) -> None:
+    """Put ``transcribe`` in the pipeline's place for the length of one test."""
+    monkeypatch.setattr(pipeline, "transcribe_recording", transcribe)
+
+
+# -- Reporting a run -----------------------------------------------------
+
+
+def test_the_runner_reports_each_recording_and_finishes(qapp, monkeypatch, recordings):
+    def transcribe(recording, options, progress=None, cancelled=None):
+        if progress is not None:
+            progress(
+                pipeline.PipelineProgress(
+                    fraction=0.5, stage=f"Comparing what each service heard for {recording.name}."
+                )
+            )
+        return make_transcript(recording.name, words=4, needing_review=1)
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    started: list[tuple[str, int, int]] = []
+    finished: list[RecordingOutcome] = []
+    summaries: list[RunSummary] = []
+    runner.recordingStarted.connect(
+        lambda name, number, total: started.append((name, number, total))
+    )
+    runner.recordingFinished.connect(finished.append)
+    runner.runFinished.connect(summaries.append)
+
+    assert runner.start(recordings, pipeline.PipelineOptions()) is True
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    assert started == [("alpha.m4a", 1, 2), ("beta.m4a", 2, 2)]
+    assert [outcome.name for outcome in finished] == ["alpha.m4a", "beta.m4a"]
+    assert all(outcome.succeeded for outcome in finished)
+    assert summaries[0].transcribed == 2
+    assert summaries[0].failed == 0
+    assert summaries[0].review_count == 2
+    assert summaries[0].cancelled is False
+
+
+def test_progress_carries_the_stage_sentence_and_covers_the_whole_run(
+    qapp, monkeypatch, recordings
+):
+    def transcribe(recording, options, progress=None, cancelled=None):
+        progress(pipeline.PipelineProgress(fraction=0.0, stage=f"Preparing {recording.name}."))
+        progress(pipeline.PipelineProgress(fraction=1.0, stage=f"Finished {recording.name}."))
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    reports: list[tuple[int, str]] = []
+    summaries: list[RunSummary] = []
+    runner.progressChanged.connect(lambda percentage, stage: reports.append((percentage, stage)))
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings, pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    # The first recording covers the first half of the bar and the second the
+    # rest, so a two-recording run does not run to the end twice.
+    assert reports == [
+        (0, "Preparing alpha.m4a."),
+        (50, "Finished alpha.m4a."),
+        (50, "Preparing beta.m4a."),
+        (100, "Finished beta.m4a."),
+    ]
+
+
+def test_the_warnings_from_a_transcript_are_carried_into_its_report(
+    qapp, monkeypatch, recordings
+):
+    def transcribe(recording, options, progress=None, cancelled=None):
+        return make_transcript(
+            recording.name,
+            warnings=("Microsoft MAI did not answer, so its opinion is missing.",),
+        )
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    finished: list[RecordingOutcome] = []
+    summaries: list[RunSummary] = []
+    runner.recordingFinished.connect(finished.append)
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings[:1], pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    assert "Microsoft MAI did not answer" in finished[0].message
+
+
+# -- Recordings go one at a time -----------------------------------------
+
+
+def test_recordings_are_never_transcribed_at_the_same_time(qapp, monkeypatch, tmp_path):
+    """Two at once would collide on rate limits that are counted per account."""
+    running = 0
+    most_at_once = 0
+    lock = threading.Lock()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        nonlocal running, most_at_once
+        with lock:
+            running += 1
+            most_at_once = max(most_at_once, running)
+        try:
+            return make_transcript(recording.name)
+        finally:
+            with lock:
+                running -= 1
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    runner.start([tmp_path / f"take-{index}.m4a" for index in range(5)], pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    assert most_at_once == 1
+    assert summaries[0].transcribed == 5
+
+
+def test_a_second_run_cannot_start_on_top_of_the_first(qapp, monkeypatch, recordings):
+    release = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        release.wait(10.0)
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    assert runner.start(recordings, pipeline.PipelineOptions()) is True
+    assert runner.start(recordings, pipeline.PipelineOptions()) is False
+
+    release.set()
+    assert wait_until(qapp, lambda: bool(summaries))
+
+
+# -- Stopping ------------------------------------------------------------
+
+
+def test_cancelling_stops_the_queue_and_says_the_run_was_stopped(
+    qapp, monkeypatch, tmp_path
+):
+    seen: list[str] = []
+    release = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        seen.append(recording.name)
+        release.wait(10.0)
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    runner.start([tmp_path / f"take-{index}.m4a" for index in range(4)], pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(seen))
+    runner.cancel()
+    release.set()
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    assert summaries[0].cancelled is True
+    # The recording in hand finishes, and nothing after it is started.
+    assert seen == ["take-0.m4a"]
+    assert len(summaries[0].results) == 1
+
+
+def test_the_pipeline_is_given_a_way_to_ask_whether_it_should_stop(
+    qapp, monkeypatch, recordings
+):
+    answers: list[bool] = []
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        answers.append(cancelled())
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings[:1], pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    assert answers == [False]
+
+
+# -- Failures ------------------------------------------------------------
+
+
+def test_a_recording_that_cannot_be_read_becomes_a_result_and_the_run_goes_on(
+    qapp, monkeypatch, recordings
+):
+    def transcribe(recording, options, progress=None, cancelled=None):
+        if recording.name == "alpha.m4a":
+            raise OSError("The file is not readable.")
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings, pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    summary = summaries[0]
+    assert summary.failed == 1
+    assert summary.transcribed == 1
+    assert "The file is not readable." in summary.results[0].message
+    assert summary.results[1].succeeded is True
+
+
+def test_a_failure_with_nothing_to_say_still_says_something(qapp, monkeypatch, recordings):
+    def transcribe(recording, options, progress=None, cancelled=None):
+        raise RuntimeError()
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings[:1], pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    assert "RuntimeError" in summaries[0].results[0].message
+
+
+# -- Saying how it went --------------------------------------------------
+
+
+def test_a_clean_run_is_summarised_with_its_review_count():
+    summary = RunSummary(
+        results=[
+            RecordingOutcome(
+                path=Path("alpha.m4a"),
+                transcript=make_transcript("alpha.m4a", words=10, needing_review=3),
+            )
+        ]
+    )
+
+    assert summarise(summary) == "Finished. 1 of 1 recordings transcribed. 3 words to review."
+
+
+def test_a_run_with_nothing_to_review_says_so_rather_than_saying_nothing():
+    summary = RunSummary(
+        results=[RecordingOutcome(path=Path("alpha.m4a"), transcript=make_transcript("alpha.m4a"))]
+    )
+
+    assert "Nothing is waiting for review." in summarise(summary)
+
+
+def test_a_stopped_run_is_not_reported_as_finished():
+    summary = RunSummary(
+        results=[RecordingOutcome(path=Path("alpha.m4a"), transcript=make_transcript("alpha.m4a"))],
+        cancelled=True,
+    )
+
+    assert summarise(summary).startswith("The run was stopped.")
+
+
+def test_a_failure_is_named_in_the_summary():
+    summary = RunSummary(
+        results=[RecordingOutcome(path=Path("alpha.m4a"), error="No key was set.")]
+    )
+
+    text = summarise(summary)
+    assert "could not be transcribed" in text
+    assert "0 of 1 recordings transcribed" in text

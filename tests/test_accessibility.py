@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QAccessible, QKeyEvent
+from PySide6.QtGui import QAccessible, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -25,6 +25,7 @@ from audio_transcriber.session import SessionStore
 from audio_transcriber.settings import EnhanceSettings
 from audio_transcriber.ui import enhance_dialog as enhance_dialog_module
 from audio_transcriber.ui import main_window as main_window_module
+from audio_transcriber.ui import enhance_notes as notes
 from audio_transcriber.ui.enhance_dialog import EnhanceAudioDialog
 from audio_transcriber.ui.file_info_panel import FileInfoPanel
 from audio_transcriber.ui.file_table import (
@@ -344,5 +345,179 @@ def test_a_run_that_cannot_start_says_why_out_loud(qapp, tmp_path, monkeypatch):
 
         assert announced
         assert "No output folder has been chosen" in announced[0]
+    finally:
+        dialog.close()
+
+
+def test_the_note_panel_follows_the_focus_onto_every_setting(qapp, tmp_path):
+    """Including the spin boxes, which hand the focus to a field inside them.
+
+    Watching each control for focus directly would miss those, because the
+    widget that takes the focus is not the widget the user thinks they are
+    on.
+    """
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog.show()
+        expected = [
+            (dialog._file_list, notes.FILES),
+            (dialog._folder_edit, notes.OUTPUT_FOLDER),
+            (dialog._browse_button, notes.OUTPUT_FOLDER),
+            (dialog._target_box, notes.TARGET_LOUDNESS),
+            (dialog._ceiling_box, notes.CEILING),
+            (dialog._gain_box, notes.MAXIMUM_GAIN),
+            (dialog._limiter_box, notes.LIMITER),
+            (dialog._format_box, notes.OUTPUT_FORMAT),
+            (dialog._replace_box, notes.REPLACE_EXISTING),
+        ]
+
+        landed = []
+        for widget, key in expected:
+            widget.setFocus(Qt.FocusReason.TabFocusReason)
+            qapp.processEvents()
+            landed.append((key, dialog._showing_note, dialog._notes_text.toPlainText()))
+
+        for key, showing, shown in landed:
+            assert showing == key
+            assert shown == notes.note_text(key)
+    finally:
+        dialog.close()
+
+
+def test_reading_a_note_does_not_change_the_note(qapp, tmp_path):
+    """The panel takes focus so it can be read, and must hold still when it does."""
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog.show()
+        dialog._limiter_box.setFocus(Qt.FocusReason.TabFocusReason)
+        qapp.processEvents()
+
+        dialog._notes_text.setFocus(Qt.FocusReason.TabFocusReason)
+        qapp.processEvents()
+
+        assert dialog._showing_note == notes.LIMITER
+        assert dialog._notes_text.toPlainText() == notes.note_text(notes.LIMITER)
+    finally:
+        dialog.close()
+
+
+def test_the_note_panel_says_which_setting_it_is_talking_about(qapp, tmp_path):
+    """Otherwise a block of prose appears with nothing tying it to anything."""
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog.show()
+        dialog._ceiling_box.setFocus(Qt.FocusReason.TabFocusReason)
+        qapp.processEvents()
+
+        assert notes.note_for(notes.CEILING).title in dialog._notes_group.title()
+    finally:
+        dialog.close()
+
+
+def test_a_note_starts_at_its_first_line_rather_than_where_the_last_one_stopped(
+    qapp, tmp_path
+):
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog.show()
+        dialog._limiter_box.setFocus(Qt.FocusReason.TabFocusReason)
+        qapp.processEvents()
+        dialog._notes_text.verticalScrollBar().setValue(
+            dialog._notes_text.verticalScrollBar().maximum()
+        )
+
+        dialog._gain_box.setFocus(Qt.FocusReason.TabFocusReason)
+        qapp.processEvents()
+
+        assert dialog._notes_text.verticalScrollBar().value() == 0
+        assert dialog._notes_text.textCursor().position() == 0
+    finally:
+        dialog.close()
+
+
+def test_the_short_summary_is_what_a_screen_reader_hears_on_focus(qapp, tmp_path):
+    """The full note is far too long to hear every time the focus moves."""
+    dialog = enhance_dialog(tmp_path)
+    try:
+        for widget, key in (
+            (dialog._target_box, notes.TARGET_LOUDNESS),
+            (dialog._limiter_box, notes.LIMITER),
+            (dialog._format_box, notes.OUTPUT_FORMAT),
+        ):
+            assert widget.accessibleDescription() == notes.summary_of(key)
+            assert widget.accessibleName() == notes.note_for(key).title
+            # The same words are on the tooltip, so a mouse user and a
+            # screen reader user are told the same thing.
+            assert widget.toolTip() == notes.summary_of(key)
+    finally:
+        dialog.close()
+
+
+def test_the_whole_guide_can_be_opened_from_the_dialog(qapp, tmp_path, monkeypatch):
+    opened: list = []
+    monkeypatch.setattr(
+        enhance_dialog_module.EnhancementGuideDialog, "exec", lambda self: opened.append(self)
+    )
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog.show()
+
+        dialog._guide_button.click()
+
+        assert len(opened) == 1
+        assert opened[0]._text.toPlainText() == notes.guide_text()
+    finally:
+        dialog.close()
+
+
+def test_the_guide_window_starts_on_the_text_rather_than_the_close_button(qapp):
+    guide = enhance_dialog_module.EnhancementGuideDialog()
+    try:
+        guide.show()
+
+        assert guide.focusWidget() is guide._text
+        assert guide._text.isReadOnly()
+        assert guide._text.accessibleName()
+    finally:
+        guide.close()
+
+
+def test_the_dialog_scrolls_rather_than_running_off_the_bottom_of_the_screen(qapp, tmp_path):
+    """At a large text size this dialog is taller than the screen it is on.
+
+    Growing past the screen would put Start and Cancel out of reach, so it
+    stops at the screen and the contents scroll instead.
+    """
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog.show()
+        room = dialog._room_to_grow()
+
+        dialog._progress_group.setVisible(True)
+        dialog._report_group.setVisible(True)
+        dialog._grow_to_fit()
+
+        assert dialog.height() <= room
+        # And the buttons are outside the scrolling part, so they stay put.
+        assert not dialog._scroll.isAncestorOf(dialog._start_button)
+        assert not dialog._scroll.isAncestorOf(dialog._close_button)
+    finally:
+        dialog.close()
+
+
+def test_f1_is_what_opens_the_guide(qapp, tmp_path, monkeypatch):
+    """F1 asks for help on what is in front of you everywhere else in Windows."""
+    opened: list = []
+    monkeypatch.setattr(
+        enhance_dialog_module.EnhancementGuideDialog, "exec", lambda self: opened.append(self)
+    )
+    dialog = enhance_dialog(tmp_path)
+    try:
+        dialog.show()
+        assert dialog._guide_shortcut.key() == QKeySequence(Qt.Key.Key_F1)
+
+        dialog._guide_shortcut.activated.emit()
+
+        assert len(opened) == 1
     finally:
         dialog.close()

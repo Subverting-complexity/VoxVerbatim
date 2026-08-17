@@ -39,6 +39,11 @@ Files
   Ctrl+E              Enhance the checked files, or the highlighted one
                       if none are checked.
 
+In the Enhance Audio dialog
+  Tab                 Move between the settings. The panel at the bottom
+                      explains whichever one you are on.
+  F1                  Explain every setting, in one window.
+
 Settings and closing
   Ctrl+comma          Open the Settings dialog.
   Ctrl+Q              Close the application.

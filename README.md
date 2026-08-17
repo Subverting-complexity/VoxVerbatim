@@ -92,6 +92,14 @@ it lifts both by the same amount. That is what the maximum gain is for. A
 recording so quiet that it needs 40 dB is better left short of the target
 than dragged up to it.
 
+You do not have to remember any of this while you are using it. The dialog
+has a panel at the bottom that explains whichever setting you are on: tab
+onto the limiter and the panel tells you what ticking it does, what it
+costs, and when to bother. Tab into the panel and it holds still so you can
+read it. `F1`, or the **Guide to these settings** button, shows all of the
+explanations together in one window you can read straight through and copy
+from.
+
 The run happens in the background with a progress bar, and can be cancelled
 at any point. A cancelled run keeps the files it had already written and
 throws away the one it was part way through. When it finishes you get a
@@ -127,7 +135,14 @@ everything in it can be done from the keyboard.
   counting arrow brackets or noticing which way they point.
 * The transport buttons wrap onto a second line rather than forcing the
   window wider than the screen, so the application still fits at large
-  Windows text sizes and high scaling.
+  Windows text sizes and high scaling. The Enhance Audio dialog scrolls
+  rather than growing past the bottom of the screen, so Start and Cancel
+  never go out of reach.
+* Explanations that are too long for a tooltip are not hidden behind one.
+  Each Enhance Audio setting carries a short summary that a screen reader
+  reads when the focus lands on it, and a full explanation in a panel that
+  follows the focus. The panel takes focus itself so it can be read, and
+  holds still while you read it.
 * Nothing is signalled by colour, icon or position alone.
 
 Press **F1** in the application for the full list of keyboard shortcuts.
@@ -214,6 +229,7 @@ audio_transcriber/
         file_info_panel.py Details of the selected file
         settings_dialog.py Changing the settings
         enhance_dialog.py  Setting up and running an enhancement
+        enhance_notes.py   What each enhancement setting means, in words
         help_dialogs.py    Keyboard shortcuts and About
         accessibility.py   Naming controls and announcing changes
         flow_layout.py     A row of buttons that wraps when space is short

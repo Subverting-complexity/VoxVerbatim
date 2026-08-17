@@ -41,7 +41,7 @@ the folder is the application. Their settings still go to their own user
 folder rather than into it, so you can send them a newer folder later
 without disturbing anything they have chosen or taught it.
 
-The folder is about 260 MB, most of which is Qt. The first build takes
+The folder is about 230 MB, most of which is Qt. The first build takes
 several minutes, because it downloads the libraries in `requirements.txt`
 and the build tool before it starts, which is a few hundred megabytes
 between them. Later builds take about a minute and a half. The `publish` folder is not kept in the

@@ -31,6 +31,9 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+#   Ours is not generated. It is how the shareable build is defined, it is
+#   written by hand and commented, and publish.cmd is useless without it.
+!packaging/audio-transcriber.spec
 
 # Installer logs
 pip-log.txt
@@ -221,3 +224,9 @@ __marimo__/
 #   The .vs folder holds per-user state: window layout, the local history
 #   database, and browsing indexes. None of it belongs to the project.
 .vs/
+
+# The shareable build
+#   publish.cmd writes the built application here. It is several hundred
+#   megabytes of copied libraries, all of it rebuildable from the source
+#   beside it, so it is kept out of the repository.
+/publish/

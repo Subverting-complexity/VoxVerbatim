@@ -21,7 +21,6 @@ Three things about it matter more than they look:
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -96,8 +95,6 @@ _NOTE_LINES = 7
 #: a test run with no desktop.
 _FALLBACK_MAXIMUM_HEIGHT = 900
 
-_log = logging.getLogger(__name__)
-
 
 class EnhancementGuideDialog(QDialog):
     """Every setting explained, one after another, in one readable window.
@@ -158,6 +155,7 @@ class EnhanceAudioDialog(QDialog):
         # are filled in as the controls are built.
         self._note_keys: dict[QWidget, str] = {}
         self._showing_note: str | None = None
+        self._watching_focus = False
 
         self._build_ui()
         self._connect_signals()
@@ -448,6 +446,43 @@ class EnhanceAudioDialog(QDialog):
         self._note_keys[widget] = key
         return widget
 
+    def showEvent(self, event) -> None:
+        """Start watching the focus while the dialog is actually on screen."""
+        super().showEvent(event)
+        self._watch_focus(True)
+
+    def hideEvent(self, event) -> None:
+        """Stop watching as soon as it is not.
+
+        The watch is on the application, which outlives this dialog by a
+        long way, and the dialog is owned by the main window rather than
+        being thrown away when it closes. Left connected, every opening of
+        Enhance Audio would add another watcher that stays for the life of
+        the application, each one looking at every focus change anywhere in
+        it. Closing is also not the same as being closed: the Cancel button
+        and Escape both go through reject, which hides the dialog without
+        raising a close event at all, so tidying up there would never have
+        happened in ordinary use.
+        """
+        self._watch_focus(False)
+        super().hideEvent(event)
+
+    def _watch_focus(self, watching: bool) -> None:
+        """Follow the focus, or stop following it.
+
+        The application is asked about the focus rather than each control
+        being watched, because the widget that actually takes focus is
+        often a part of a control rather than the control itself.
+        """
+        application = QApplication.instance()
+        if application is None or watching == self._watching_focus:
+            return
+        self._watching_focus = watching
+        if watching:
+            application.focusChanged.connect(self._on_focus_changed)
+        else:
+            application.focusChanged.disconnect(self._on_focus_changed)
+
     def _on_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
         """Show the note for whatever now has the focus, if it has one.
 
@@ -554,13 +589,6 @@ class EnhanceAudioDialog(QDialog):
         # Windows, so it does here too.
         self._guide_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F1), self)
         self._guide_shortcut.activated.connect(self.show_guide)
-
-        # The application is asked about the focus rather than each control
-        # being watched, because the widget that actually takes focus is
-        # often a part of a control rather than the control itself.
-        application = QApplication.instance()
-        if application is not None:
-            application.focusChanged.connect(self._on_focus_changed)
 
         self._runner.fileStarted.connect(self._on_file_started)
         self._runner.fileFinished.connect(self._on_file_finished)
@@ -825,15 +853,6 @@ class EnhanceAudioDialog(QDialog):
             event.ignore()
             return
         self._runner.stop()
-        # The focus watch is on the application, which outlives this
-        # dialog, so it is let go of deliberately rather than left to be
-        # tidied up.
-        application = QApplication.instance()
-        if application is not None:
-            try:
-                application.focusChanged.disconnect(self._on_focus_changed)
-            except (RuntimeError, TypeError):
-                _log.debug("The focus watch was already disconnected.")
         super().closeEvent(event)
 
 

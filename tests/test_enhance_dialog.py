@@ -11,7 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QDialog
+from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import QApplication, QDialog
 
 from audio_transcriber.audio.enhance import EnhanceOptions, Outcome
 from audio_transcriber.audio.enhance_runner import EnhanceRunner
@@ -376,3 +377,31 @@ def test_what_the_dialog_was_left_on_is_remembered_for_next_time(
     saved = SettingsStore(tmp_path / SETTINGS_FILE_NAME).load()
     assert saved.enhance.target_lufs == -14.0
     assert saved.enhance.output_format == "flac"
+
+
+def test_opening_the_dialog_again_and_again_does_not_pile_them_up(
+    qapp, tmp_path, recordings, monkeypatch
+):
+    """The dialog belongs to the window, so closing it does not get rid of it.
+
+    Each one carries a background runner and a watch on the application's
+    focus, so a pile of them is not merely wasted memory.
+    """
+    window = open_window(qapp, tmp_path, recordings[0].parent, 2)
+    try:
+        monkeypatch.setattr(
+            EnhanceAudioDialog, "exec", lambda self: QDialog.DialogCode.Rejected
+        )
+        window._table.select_row(0)
+
+        for _ in range(4):
+            window.show_enhance_audio()
+            qapp.processEvents()
+        # deleteLater posts an event that a running application drains on
+        # its next turn round the loop. A test has no running loop, so it
+        # is drained here by hand.
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+        assert window.findChildren(EnhanceAudioDialog) == []
+    finally:
+        window.close()

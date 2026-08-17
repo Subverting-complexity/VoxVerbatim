@@ -521,3 +521,41 @@ def test_f1_is_what_opens_the_guide(qapp, tmp_path, monkeypatch):
         assert len(opened) == 1
     finally:
         dialog.close()
+
+
+def test_a_closed_dialog_stops_watching_the_focus(qapp, tmp_path):
+    """Otherwise every opening of Enhance Audio leaves a watcher behind.
+
+    The watch is on the application, which outlives the dialog, and the
+    dialog is owned by the main window rather than thrown away when it
+    closes. Cancel and Escape both go through reject, which hides the
+    dialog without raising a close event, so tidying up on close alone
+    never happened at all in ordinary use.
+    """
+    dialogs = [enhance_dialog(tmp_path) for _ in range(3)]
+    try:
+        for dialog in dialogs:
+            dialog.show()
+            qapp.processEvents()
+        assert [d._watching_focus for d in dialogs] == [True, True, True]
+
+        # reject is what the Cancel button and Escape both do, and what
+        # exec returns through.
+        for dialog in dialogs:
+            dialog.reject()
+            qapp.processEvents()
+
+        assert [d._watching_focus for d in dialogs] == [False, False, False]
+
+        # A dialog that is opened again picks the watch back up, rather
+        # than going quiet for the rest of its life.
+        dialogs[0].show()
+        qapp.processEvents()
+        dialogs[0]._limiter_box.setFocus(Qt.FocusReason.TabFocusReason)
+        qapp.processEvents()
+
+        assert dialogs[0]._watching_focus is True
+        assert dialogs[0]._showing_note == notes.LIMITER
+    finally:
+        for dialog in dialogs:
+            dialog.close()

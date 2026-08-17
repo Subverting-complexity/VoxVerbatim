@@ -85,6 +85,8 @@ from audio_transcriber.transcription.alignment import (
 )
 from audio_transcriber.transcription.confidence import (
     ASSUMED_ACOUSTIC_CONFIDENCE,
+    HIGH_CONFIDENCE_THRESHOLD,
+    ConfidenceAssessment,
     TextSignals,
     assess_text,
     best_acoustic_confidence,
@@ -763,6 +765,13 @@ def _decide_scope(
         # reason that two of the three services do not report a confidence
         # figure, which is a fact about their APIs and not about the audio.
         category = Confidence.HIGH
+    if unresolved:
+        # A refusal to decide outranks everything above it, the unanimity
+        # rule included. This test used to live inside _emit; it is here now
+        # so that the category the word actually gets is settled in one
+        # place, and so that the strength saved beside it can be worked out
+        # from that same answer rather than from an earlier draft of it.
+        category = Confidence.UNRESOLVED
 
     return _emit(
         scope=scope,
@@ -771,6 +780,7 @@ def _decide_scope(
         groups=groups,
         winner=winner,
         assessment_category=category,
+        assessment_strength=_recorded_strength(assessment, category),
         risk=risk,
         reasons=reasons,
         evidence=evidence,
@@ -779,8 +789,38 @@ def _decide_scope(
         boundaries=boundaries,
         overlaps=overlaps,
         llm_decision=llm_decision,
-        unresolved=unresolved,
     )
+
+
+def _recorded_strength(assessment: ConfidenceAssessment, category: Confidence) -> float:
+    """The strength to save beside the category the word was actually given.
+
+    Nearly always this is simply the strength the assessment worked out. It
+    differs in one case: where a rule above has moved the word *up* into
+    high confidence, as the unanimous-agreement rule does, saving the raw
+    figure would put a number below the high-confidence threshold next to a
+    category that says there is nothing to look at here. The two would then
+    contradict each other, and worse, they would contradict each other
+    invisibly: the review window would leave the word alone while the
+    low-confidence sweep pulled the same word up as weak, and nobody reading
+    either screen could tell why.
+
+    So a promoted word is recorded at the bottom of the band it was promoted
+    into, and no higher. The unanimous-agreement rule argues that the word is
+    good enough to leave alone; it does not argue that the word is certain,
+    and rounding it up to one would claim something nobody established.
+
+    A category moved the other way, *down* below what its strength says, is
+    left alone. That happens where the rules refused to settle the word, and
+    nothing goes wrong: the word is already in the queue for its own stated
+    reasons, and an honest strength beside it tells the reader the useful
+    truth that the arithmetic was content and the refusal came from
+    somewhere else. Only an inflated strength can hide a word from the person
+    who ought to see it, so only inflation is corrected here.
+    """
+    if category is Confidence.HIGH and assessment.strength < HIGH_CONFIDENCE_THRESHOLD:
+        return HIGH_CONFIDENCE_THRESHOLD
+    return assessment.strength
 
 
 #: A value that cannot be confused with "the model declined", which is what
@@ -1293,6 +1333,7 @@ def _emit(
     groups: Sequence[_Group],
     winner: _Group,
     assessment_category: Confidence,
+    assessment_strength: float,
     risk: tuple[RiskCategory, ...],
     reasons: Sequence[ReviewReason],
     evidence: LanguageEvidence,
@@ -1301,7 +1342,6 @@ def _emit(
     boundaries: Mapping[Provider, set[int]],
     overlaps: Container[int],
     llm_decision: str | None,
-    unresolved: bool,
 ) -> list[FinalToken]:
     """Turn one settled place into the final words it produces.
 
@@ -1349,7 +1389,8 @@ def _emit(
             text=word,
             normalised_text=normalise(word),
             text_source=_source_of(winner),
-            text_confidence=Confidence.UNRESOLVED if unresolved else assessment_category,
+            text_confidence=assessment_category,
+            confidence_strength=assessment_strength,
             start=timing.start,
             end=timing.end,
             timing_source=timing.source,

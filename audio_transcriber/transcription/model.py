@@ -32,6 +32,8 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
+from audio_transcriber.transcription.normalise import normalise
+
 #: The version of the reconciliation rules that produced a transcript. It is
 #: written into provenance so that a transcript produced today can still be
 #: explained after the rules have moved on. Bump it whenever a change would
@@ -541,6 +543,44 @@ class FinalToken:
     text_source: Provider | None = None
     text_confidence: Confidence = Confidence.UNRESOLVED
 
+    confidence_strength: float | None = None
+    """The application's own combined estimate for this word, nought to one.
+
+    This does not retreat from the argument in :class:`Confidence` above.
+    That argument is about the numbers the *services* report: ElevenLabs,
+    AssemblyAI and Deepgram each publish a figure they each call a
+    confidence, the three are measured on scales that do not correspond, two
+    of the services publish nothing at all, and averaging any of that would
+    manufacture a precision that was never there. All of that still holds,
+    and none of those numbers is what this field holds.
+
+    What this field holds is the application's own conclusion, worked out by
+    ``confidence.assess_text`` from evidence the application gathered itself:
+    how far the services agreed, how clearly the winning reading beat the
+    next one, how well the words lined up, whether the language of the span
+    is one the deciding service is trusted on, and whether the user has told
+    us about the word. It is therefore never to be shown or described as a
+    service's confidence, and it is not comparable with one. It *is*
+    comparable with the same field on another word, because both were
+    reached by the same rules from the same kinds of evidence, and that one
+    comparison is the whole reason to save it.
+
+    It is kept beside the category rather than in place of it, because the
+    two answer different questions. The category is the decision: leave this
+    alone, look at it, look at it now. The strength is where inside that
+    decision the word actually fell, which is what lets a thousand words be
+    sorted weakest first, and what lets two spellings of the same surname be
+    recognised as about equally shaky. Neither can be recovered from the
+    other, so both are written down.
+
+    ``None`` means the strength was never worked out: the transcript was
+    made before this field existed, or the word came out of a path that does
+    no text assessment at all. It emphatically does not mean the word is
+    weak. Anything that compares against a threshold must leave such words
+    out rather than reading the absence as a low number, because a word
+    nobody measured is not a word we know to be bad.
+    """
+
     # -- When it was said
     start: float | None = None
     end: float | None = None
@@ -584,6 +624,37 @@ class FinalToken:
     """What the adjudicating model decided here, if it was consulted."""
 
     human_corrected: bool = False
+    """A person decided something about this word.
+
+    Deliberately broad. Correcting the text sets it, correcting the speaker
+    sets it, and confirming or rejecting the timing sets it, because all three
+    are a person putting their judgement on the word and all three are reasons
+    to stop treating it as something the services alone produced.
+
+    It is emphatically **not** the answer to "was the text replaced". Use
+    :attr:`text_corrected` for that. The two were once the same field, and the
+    damage that did is worth remembering: confirming a clock made the word
+    report that somebody had rewritten it, and left it permanently exempt from
+    every replacement rule the project would ever learn, which is precisely
+    the case those rules exist for.
+    """
+
+    text_corrected: bool = False
+    """The text of this word was replaced, by a person or by a rule they accepted.
+
+    True only where :meth:`Transcript.with_correction` was actually given a
+    new text and that text differed from what the word said. A correction to
+    the speaker alone does not set it, and neither does a decision about the
+    timing.
+
+    This is what anything asking "does this word still say what the services
+    said" must read. A replacement rule refuses to touch a word that is
+    already ``text_corrected``, because a person typing into this transcript
+    is a newer and stronger statement than a rule; and re-matching keeps the
+    saved strength for such a word, because the 1.0 that a correction confers
+    is not a measurement of anything.
+    """
+
     original_text: str | None = None
     """What the word said before a person changed it."""
 
@@ -915,6 +986,15 @@ class Transcript:
         Correcting the text does not touch the timing or the speaker, and
         correcting the speaker does not touch the text. That separation is
         the same one the whole design rests on.
+
+        Two flags come out of this rather than one, and the difference is the
+        whole reason :attr:`FinalToken.text_corrected` exists.
+        ``human_corrected`` is set for any correction at all, including one
+        that only names the speaker, because in every case a person has put
+        their judgement on the word. ``text_corrected`` is set only on the
+        branch below that actually replaces the text, so that anything asking
+        "does this word still say what the services said" gets an answer to
+        the question it asked rather than to a wider one.
         """
         tokens = list(self.tokens)
         for position, token in enumerate(tokens):
@@ -925,7 +1005,31 @@ class Transcript:
                 corrected.original_text = token.original_text or token.text
                 corrected.text = text
                 corrected.text_confidence = Confidence.HIGH
+                # The strength has to move with the category, or the two
+                # would tell a person different stories: the word would read
+                # as settled and still be dragged back out by anything that
+                # thresholds on the number. One is the figure
+                # ``confidence.assess_text`` reaches by its own shortcut for
+                # a word a person corrected, and it is written out here
+                # rather than imported because that module already imports
+                # this one.
+                corrected.confidence_strength = 1.0
                 corrected.text_source = None
+                # The comparison form has to be rebuilt from the new text.
+                # Left as it was, it would go on describing the word the
+                # person has just replaced, and every rule, lookup and
+                # grouping decision that compares on this field would match
+                # the old spelling on a word that no longer says it. The
+                # visible effect is a correction that is quietly made again
+                # every time the project is reprocessed.
+                corrected.normalised_text = normalise(text)
+                # Set here, inside the branch that genuinely rewrote the
+                # word, rather than beside ``human_corrected`` below. A word
+                # reached by this method for its speaker alone has not been
+                # rewritten, and saying it had would put it beyond the reach
+                # of every replacement rule for the rest of the project's
+                # life.
+                corrected.text_corrected = True
             if speaker is not None and speaker != token.speaker:
                 corrected.speaker = speaker
                 corrected.speaker_confidence = Confidence.HIGH

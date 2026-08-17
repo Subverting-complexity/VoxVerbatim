@@ -267,14 +267,53 @@ transcript is incomplete.
 When it finishes you are told how many places need a person, and offered
 the two useful things: the transcript folder, and the review window.
 
-The review window, on `Ctrl+R`, is where you work through them. It holds
-only the words that need you, and it can be narrowed by why each one was
-flagged and by how confident the application is. For each one you can hear
-the word with several seconds either side, see what every service heard
-there, and then correct the text, the speaker or the timing separately.
-`F3` moves to the next item, `F5` plays it again, and `F4` confirms it as
-correct and moves on. Every correction is also remembered: the next
-transcription is sent the words you have already put right.
+The review window, on `Ctrl+R`, is where you work through them. It covers
+the whole folder rather than one recording, because the same name is
+usually got wrong in the same way in every recording of the same client,
+and deciding it once is the whole point.
+
+It holds two lists. The first holds groups of words that need you, and a
+group gathers the occurrences of what looks like one intended word from
+across every recording in the folder: `Bosch`, `Bosh` and `Bosche` arrive
+together, because they are probably the same surname heard three ways. The
+second list holds the individual occurrences of whichever group you are on,
+each with its recording, its time, its confidence and its language.
+Selecting one plays it.
+
+Typing a replacement settles the whole group at once, across every file it
+touches, and the window says how many that is before it happens. Where the
+grouping has gathered something it should not have, `Isolate Occurrence`
+pulls that one word out and leaves the rest of the group intact; separate
+words can be gathered into a group of your own the same way. `Correct as
+Detected` says the word was right all along.
+
+For each occurrence you can still hear it with several seconds either side,
+see what every service heard there, and correct the text, the speaker or the
+timing separately, exactly as before. `F3` and `Shift+F3` move between
+occurrences, `Ctrl+F3` between groups, `F5` plays again, and `F4` confirms an
+item as correct and moves on.
+
+Nothing here has a Save button. Every change is written as you make it, and
+a folder reopens on the group and the occurrence you were last on.
+
+### A folder is a project
+
+Everything the review learns belongs to the folder it was learned in, and
+stays there. A replacement you accept in one client's folder is applied to
+every recording in that folder, including ones you transcribe next month,
+and is invisible in every other folder. That isolation is deliberate: a
+surname that is almost certain in one client's recordings is a distraction
+in somebody else's.
+
+Transcribe a new file into a folder you have already reviewed and the
+project answers it with what it already knows. Every replacement you have
+accepted is applied automatically, and anything the project cannot answer
+falls into the review queue instead. A spelling you have never accepted a
+correction for is never rewritten silently — it is put in front of you,
+beside the spellings you have already settled, so one action clears it.
+
+The folder's own state lives in `audio-transcriber-project.json` beside the
+recordings, so it travels with them when the folder is copied or backed up.
 
 ### What ends up beside the recording
 
@@ -389,7 +428,7 @@ The main ones:
 | `Space` | Check or clear the highlighted file |
 | `Ctrl+E` | Enhance the checked files, or the highlighted one |
 | `Ctrl+T` | Transcribe the checked files, or the highlighted one |
-| `Ctrl+R` | Open the review window on the highlighted recording |
+| `Ctrl+R` | Review everything in the folder that needs you |
 | `Ctrl+Space` | Play, or pause if already playing |
 | `Alt+Left` / `Alt+Right` | Back or forward by the short skip |
 | `Alt+Shift+Left` / `Alt+Shift+Right` | Back or forward by the medium skip |
@@ -496,6 +535,8 @@ audio_transcriber/
         calibration.py   How well each service has actually done
         cost.py          What a run will cost, before it starts
         exports.py       The two documents a person actually reads
+        grouping.py      Gathering the same misheard word from across a folder
+        project.py       What a folder remembers about its own review
         store.py         The folder of files that sits beside each recording
         runner.py        Working through several recordings on a background thread
         providers/
@@ -532,8 +573,15 @@ Nothing in `audio_transcriber/session.py`, `settings.py`, `formatting.py`,
 two runners, whose whole job is to put slow work on a background thread and
 report back. The whole of transcription can therefore be run, and is tested,
 without a window existing at all; and the review window, in the other
-direction, takes a finished transcript and something that can play audio and
-knows nothing about services or storage.
+direction, takes a folder, a way of reading one transcript at a time and
+something that can play audio, and knows nothing about services or storage.
+
+It reads one transcript at a time rather than all of them because the
+difference is not small. A transcript holds every service's words and every
+candidate, so an hour of audio is tens of megabytes, and a folder of fifty
+recordings measured at 37 seconds and 1.6 gigabytes when they were all read
+at once. The folder's own file already holds everything the two lists show,
+so opening a folder reads no transcripts at all.
 
 Within `transcription/`, each module does one job and knows nothing about
 the others. `pipeline.py` is the only one that knows the order they go in,

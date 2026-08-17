@@ -27,6 +27,7 @@ space, which is cheap, and removes a whole family of failures that only ever
 appear on somebody else's computer, which is not.
 """
 
+import importlib.util
 import os
 import re
 
@@ -37,17 +38,17 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 #: and whatever folder the build was started from.
 REPOSITORY_ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 
-APPLICATION_NAME = "Audio Transcriber"
-ORGANISATION_NAME = "JB Org"
-
 #: The libraries collected in full, for the reason given at the top of the
 #: file. These are the ones the application reaches for at the moment a
 #: service is called rather than when it starts, so a mistake here does not
 #: show up until somebody presses Transcribe.
 #:
-#: ``av`` is in the list for a different reason: it carries the FFmpeg
-#: libraries that Enhance Audio decodes with, and those are binaries rather
-#: than Python code.
+#: ``av`` is in the list for its own submodules, not for the FFmpeg libraries
+#: it decodes with. Those live in a folder of their own beside the package,
+#: ``av.libs``, which this collects nothing from; they arrive because
+#: PyInstaller ships a rule for PyAV that knows about that layout. Anybody
+#: chasing a missing codec on somebody else's machine should look there and
+#: not here.
 #:
 #: ``tests/test_packaging.py`` checks this list against ``requirements.txt``,
 #: so a library added to the application and forgotten here fails the test
@@ -74,41 +75,62 @@ DISTRIBUTION_NAMES = {"deepgram": "deepgram-sdk"}
 EXCLUDED_PACKAGES = ("tkinter", "pytest")
 
 
-def _application_version():
-    """Read the version out of the package without importing it.
+def _package_constant(name):
+    """Read one constant out of the package without importing it.
 
     Importing ``audio_transcriber`` would pull in PySide6 and the whole
     application while the build is still deciding what to build. Reading the
-    one line is enough, and it keeps the version in a single place: the
-    package states it, and the file properties of the built ``.exe`` follow.
+    one line is enough.
+
+    Everything the built ``.exe`` says about itself is read this way rather
+    than written down again here. The package is where the application's name,
+    its organisation and its version are decided; a second copy in this file
+    would be a second place to forget, and the two would disagree in the file
+    properties of something already sent to somebody.
     """
     init_file = os.path.join(REPOSITORY_ROOT, "audio_transcriber", "__init__.py")
     with open(init_file, encoding="utf-8") as handle:
         source = handle.read()
-    match = re.search(r'^__version__ = "([^"]+)"', source, re.MULTILINE)
+    match = re.search(rf'^{name} = "([^"]*)"', source, re.MULTILINE)
     if match is None:
         raise SystemExit(
-            "The version could not be found in audio_transcriber/__init__.py. "
-            'It is expected on a line of its own, as __version__ = "1.2.3".'
+            f"{name} could not be found in audio_transcriber/__init__.py. "
+            f'It is expected on a line of its own, as {name} = "something".'
         )
     return match.group(1)
+
+
+APPLICATION_NAME = _package_constant("APPLICATION_NAME")
+ORGANISATION_NAME = _package_constant("ORGANISATION_NAME")
 
 
 def _version_resource_file(version):
     """Write the Windows version resource and return where it was written.
 
-    This is what fills in the Details tab of the file properties dialog, so
-    that somebody who has been sent the application can see what it is and
-    which version they have. Windows wants four numbers; the project uses
-    three, so the fourth is zero.
+    This is what fills in the Details tab of the file properties dialog, and
+    it is also the name SmartScreen reads out when it stops the application
+    the first time. Without it, somebody being asked whether to trust a
+    program sees a file name where the name of the program should be.
 
-    The file is generated rather than kept in the repository because a second
-    written-down copy of the version number is a second place to forget.
+    Windows wants four numbers; the project uses three, so the fourth is
+    zero. Anything in the version that is not a number is dropped from those
+    four and kept in the version people read, so ``1.2.0rc1`` still builds.
+
+    The names and the numbers go in as Python literals rather than as text
+    dropped between quotation marks, so that an apostrophe in a name cannot
+    turn the resource into something PyInstaller fails to parse.
     """
-    numbers = [int(part) for part in version.split(".")[:3]]
+    numbers = []
+    for part in version.split(".")[:3]:
+        digits = re.match(r"\d+", part)
+        numbers.append(int(digits.group()) if digits else 0)
     while len(numbers) < 4:
         numbers.append(0)
     numbers = tuple(numbers)
+    company = repr(ORGANISATION_NAME)
+    application = repr(APPLICATION_NAME)
+    executable = repr(f"{APPLICATION_NAME}.exe")
+    readable_version = repr(version)
     resource = f"""VSVersionInfo(
   ffi=FixedFileInfo(
     filevers={numbers},
@@ -125,13 +147,13 @@ def _version_resource_file(version):
       StringTable(
         '040904B0',
         [
-          StringStruct('CompanyName', '{ORGANISATION_NAME}'),
-          StringStruct('FileDescription', '{APPLICATION_NAME}'),
-          StringStruct('FileVersion', '{version}'),
-          StringStruct('InternalName', '{APPLICATION_NAME}'),
-          StringStruct('OriginalFilename', '{APPLICATION_NAME}.exe'),
-          StringStruct('ProductName', '{APPLICATION_NAME}'),
-          StringStruct('ProductVersion', '{version}'),
+          StringStruct('CompanyName', {company}),
+          StringStruct('FileDescription', {application}),
+          StringStruct('FileVersion', {readable_version}),
+          StringStruct('InternalName', {application}),
+          StringStruct('OriginalFilename', {executable}),
+          StringStruct('ProductName', {application}),
+          StringStruct('ProductVersion', {readable_version}),
         ],
       ),
     ]),
@@ -151,17 +173,35 @@ binaries = []
 hidden_imports = []
 for package in BUNDLED_PACKAGES:
     distribution = DISTRIBUTION_NAMES.get(package, package)
+    # Ask whether the library is there before asking for its contents.
+    # ``collect_all`` does not complain about a name it cannot find: it logs
+    # a warning nobody reads in a thousand lines of build output and returns
+    # nothing. A misspelling, or an installed name written where an imported
+    # name belongs, would then produce a build that is quietly missing a
+    # service, which is the exact failure this file exists to prevent.
+    if importlib.util.find_spec(package) is None:
+        raise SystemExit(
+            f"{package} cannot be imported, so the build would silently "
+            f"leave it out. Either {distribution} is not installed in the "
+            "environment the build is running in, which publish.cmd takes "
+            f"care of, or {package!r} is not the name the library is "
+            "imported under. BUNDLED_PACKAGES holds imported names; "
+            "DISTRIBUTION_NAMES is where the two are joined up."
+        )
     try:
-        package_datas, package_binaries, package_hidden_imports = collect_all(package)
+        # ``include_py_files`` is off. The libraries' Python code is compiled
+        # into the archive inside the .exe, and collecting it again as data
+        # would put a second, readable copy of every source file into the
+        # folder that gets sent to people.
+        package_datas, package_binaries, package_hidden_imports = collect_all(
+            package, include_py_files=False
+        )
         # The installation record as well as the code. Several of these
         # libraries look up their own version while they run, and a library
         # that cannot find out how old it is tends to raise rather than
         # shrug.
         package_datas += copy_metadata(distribution, recursive=True)
     except Exception as error:
-        # Almost always the library is simply not installed, which happens
-        # when the build is started by hand rather than through publish.cmd.
-        # Saying so beats a page of stack trace from inside the build tool.
         raise SystemExit(
             f"{distribution} could not be collected: {error}\n"
             "The libraries the application needs must be installed in the "
@@ -172,7 +212,7 @@ for package in BUNDLED_PACKAGES:
     binaries += package_binaries
     hidden_imports += package_hidden_imports
 
-version = _application_version()
+version = _package_constant("__version__")
 
 analysis = Analysis(
     [os.path.join(SPECPATH, "launch.py")],
@@ -226,4 +266,11 @@ COLLECT(
     upx=False,
     upx_exclude=[],
     name=APPLICATION_NAME,
+    # ``contents_directory`` is deliberately left at its default of
+    # ``_internal``. That default is why the folder somebody receives holds
+    # three things rather than fifteen hundred: the program, one folder of
+    # supporting files, and the note. Setting it to "." would tip every DLL
+    # out into the top of the folder, and finding the program by arrowing
+    # down that list, with a screen reader reading each name, would be
+    # miserable. It is a tidiness setting with an accessibility cost.
 )

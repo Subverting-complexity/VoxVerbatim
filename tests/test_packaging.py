@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from audio_transcriber import APPLICATION_NAME, ORGANISATION_NAME
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SPEC_FILE = REPOSITORY_ROOT / "packaging" / "audio-transcriber.spec"
 PUBLISH_SCRIPT = REPOSITORY_ROOT / "publish.cmd"
@@ -117,17 +119,36 @@ def test_the_build_does_not_collect_libraries_that_are_no_longer_needed() -> Non
 @pytest.mark.parametrize(
     "expected",
     [
-        "packaging\\audio-transcriber.spec",
-        "packaging\\Read me first.txt",
-        "publish",
+        '"packaging\\audio-transcriber.spec"',
+        '"packaging\\Read me first.txt"',
+        'set "PUBLISH_DIR=publish"',
     ],
 )
 def test_the_publish_script_still_refers_to_the_files_it_needs(expected: str) -> None:
     """Catch a file renamed or moved without the script being changed.
 
-    A batch file names its files as text, so nothing else would notice.
+    A batch file names its files as text, so nothing else would notice. Each
+    of these is matched as it is written in the script rather than as a bare
+    word, so that the same word appearing in a comment cannot stand in for
+    the line that does the work.
     """
     assert expected in PUBLISH_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_the_publish_script_looks_for_the_program_the_build_produces() -> None:
+    """The built program is named from the package, and the script is not.
+
+    The specification takes the application's name from
+    ``audio_transcriber/__init__.py``, so the folder and the .exe are named
+    from there too. The batch file cannot read Python, so it has the name
+    written into it. Renaming the application would leave the script looking
+    for a program PyInstaller never produced, and it would report a failure
+    after a build that had in fact succeeded.
+    """
+    application_name = APPLICATION_NAME
+    script = PUBLISH_SCRIPT.read_text(encoding="utf-8")
+    assert f"{application_name}.exe" in script
+    assert f"PUBLISH_DIR%\\{application_name}" in script
 
 
 def test_the_published_folder_carries_a_note_for_whoever_receives_it() -> None:
@@ -139,4 +160,16 @@ def test_the_published_folder_carries_a_note_for_whoever_receives_it() -> None:
     """
     text = READ_ME.read_text(encoding="utf-8")
     assert "SmartScreen" in text
-    assert "Audio Transcriber.exe" in text
+    assert f"{APPLICATION_NAME}.exe" in text
+
+
+def test_the_note_sends_people_to_the_folder_their_settings_are_really_in() -> None:
+    """The note writes the settings path out, and the path is built from names.
+
+    Windows works out where per-user files go from the organisation name and
+    the application name. Changing either moves the folder, and a note that
+    still names the old one sends somebody looking for a folder that is not
+    there.
+    """
+    text = READ_ME.read_text(encoding="utf-8")
+    assert f"{ORGANISATION_NAME}\\{APPLICATION_NAME}" in text

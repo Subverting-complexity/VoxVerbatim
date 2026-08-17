@@ -1,0 +1,16 @@
+# Line endings.
+#
+# Two kinds of file here are read by Windows itself rather than by a
+# programmer's editor, and both must have Windows line endings whatever the
+# machine they were last edited on.
+#
+# The batch files are run by the command interpreter, which has a long
+# history of parsing oddly when a file arrives with Unix line endings.
+#
+# The plain text files include the note that travels inside the folder sent
+# to other people. Somebody on an older Windows opens it in Notepad and, with
+# Unix line endings, gets the whole note as one unbroken line. That is worse
+# than untidy for a screen reader, which loses every paragraph break the note
+# depends on to be readable.
+*.cmd text eol=crlf
+*.txt text eol=crlf

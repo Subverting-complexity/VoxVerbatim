@@ -575,8 +575,15 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dialog.exec()
-        self._remember_enhance_settings(dialog.chosen_settings())
+        chosen = dialog.chosen_settings()
         summary = dialog.summary
+        # The dialog belongs to this window, so closing it does not get rid
+        # of it. Left alone, every opening of Enhance Audio would add
+        # another one that lives as long as the application does, each with
+        # its own background runner attached. What it was left on is read
+        # out first, because after this it is on its way out.
+        dialog.deleteLater()
+        self._remember_enhance_settings(chosen)
         if summary is not None:
             self._set_status(summarise(summary), alert=True)
         else:

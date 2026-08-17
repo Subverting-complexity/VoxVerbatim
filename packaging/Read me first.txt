@@ -1,0 +1,51 @@
+Audio Transcriber
+=================
+
+This folder holds a complete copy of the application. Nothing needs to be
+installed. To start it, open "Audio Transcriber.exe" in this folder.
+
+Keep the folder together. The .exe needs the files beside it, so move or
+copy the whole folder rather than the .exe on its own. To start it from your
+desktop, right-click "Audio Transcriber.exe", choose "Show more options",
+then "Send to", then "Desktop (create shortcut)". The shortcut points back
+here, so leave this folder where it is.
+
+
+The first time you run it
+-------------------------
+
+Windows may show a blue box saying "Windows protected your PC". That is
+SmartScreen, and it appears for any program it has not seen many people run
+before. It is not a report that anything is wrong. Choose "More info" and
+then "Run anyway". Your virus scanner may pause over the program for the
+same reason.
+
+
+What it does
+------------
+
+Choose a folder of recordings and the application lists every .m4a, .mp3,
+.wav and .flac file in it. You can play them, make louder copies of the
+quiet ones with Enhance Audio, and transcribe them.
+
+Press F1 for the keyboard shortcuts. Everything can be done from the
+keyboard, and the application is built to work with JAWS, NVDA and ZoomText
+Magnifier/Reader.
+
+Transcription needs an account with at least one speech service, and the
+account's API key typed into the Settings dialog, which is in the File menu.
+Playing recordings and Enhance Audio need nothing and work straight away.
+
+
+Where it keeps your settings
+----------------------------
+
+In your own user folder, not in this one:
+
+    C:\Users\<you>\AppData\Local\JB Org\Audio Transcriber
+
+That holds what you chose in the dialogs, where you were when you last
+closed the application, and a log file. The File menu opens both the log
+file and that folder for you, which is the first place to look if something
+goes wrong. Replacing this folder with a newer copy of the application
+leaves all of it untouched.

@@ -27,6 +27,41 @@ If you would rather start it yourself from a command prompt:
 python -m audio_transcriber
 ```
 
+## Sending it to somebody else
+
+Everything above asks the person running the application to have Python,
+which is a great deal to ask of somebody who was simply sent a program to
+try. Double-click **publish.cmd** and you get a copy that does not.
+
+It builds the application into `publish\Audio Transcriber`, a folder holding
+the program and everything it needs, Python included. Copy that whole folder
+to another Windows computer and the person you sent it to opens
+**Audio Transcriber.exe** inside it. Nothing is installed on their machine;
+the folder is the application. Their settings still go to their own user
+folder rather than into it, so you can send them a newer folder later
+without disturbing anything they have chosen or taught it.
+
+The folder is about 230 MB, most of which is Qt. The first build takes
+several minutes, because it downloads the libraries in `requirements.txt`
+and the build tool before it starts, which is a few hundred megabytes
+between them. Later builds take about a minute and a half. The `publish` folder is not kept in the
+repository; it is rebuilt whenever you run the script, which begins by
+deleting the previous build, so close any copy of the application you have
+running from it.
+
+A short note travels inside the folder for whoever receives it, because
+there is one thing they will meet that needs explaining. The program is not
+signed with a certificate, so the first run brings up SmartScreen's "Windows
+protected your PC". That is a statement about how many people have run this
+particular program, not about what is in it, and the way past it is "More
+info" and then "Run anyway".
+
+Keep the repository somewhere with a reasonably short path. Some of the file
+names inside the ElevenLabs library are long enough that a deep folder
+carries them past the 260-character limit Windows still applies by default,
+and installing the libraries fails partway through with an error about a
+file it cannot find.
+
 ## What it does
 
 Choose a folder of recordings and the application lists every audio file in
@@ -485,6 +520,11 @@ audio_transcriber/
         help_dialogs.py    Keyboard shortcuts and About
         accessibility.py   Naming controls and announcing changes
         flow_layout.py     A row of buttons that wraps when space is short
+
+packaging/
+    audio-transcriber.spec  How the shareable build is put together
+    launch.py               What the built application starts from
+    Read me first.txt       The note that travels inside the built folder
 ```
 
 Nothing in `audio_transcriber/session.py`, `settings.py`, `formatting.py`,

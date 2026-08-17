@@ -5,3 +5,23 @@ mutagen>=1.47
 # PyAV carries the FFmpeg libraries with it, so nothing has to be installed
 # separately on the machine.
 av>=12.0
+
+# The transcription services. Each is the vendor's own library, so that a
+# change at their end arrives as a package upgrade rather than as a morning
+# spent reading somebody's HTTP traffic.
+#
+# Every one of these is imported only at the moment its service is called,
+# never when the application starts. A package that is missing or broken
+# therefore switches off one service and says so, which is the same thing
+# that happens when a service is simply unconfigured. The application still
+# starts, and a transcript still comes out of whatever else answered.
+openai>=1.60
+elevenlabs>=2.0
+assemblyai>=0.35
+deepgram-sdk>=4.0
+# Microsoft is called over plain HTTP rather than through its own library.
+# MAI-Transcribe is not a deployed model with an endpoint of its own; it is
+# a mode inside the ordinary Azure Speech endpoint, and the official package
+# does not expose the two fields that select it. See the note in
+# audio_transcriber/transcription/providers/microsoft.py.
+httpx>=0.27

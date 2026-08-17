@@ -38,11 +38,21 @@ Files
   Space               Check or clear the highlighted file.
   Ctrl+E              Enhance the checked files, or the highlighted one
                       if none are checked.
+  Ctrl+T              Transcribe the checked files, or the highlighted one
+                      if none are checked.
+  Ctrl+R              Review the transcript of the highlighted file.
 
-In the Enhance Audio dialog
+In the Enhance Audio and Transcribe dialogs
   Tab                 Move between the settings. The panel at the bottom
                       explains whichever one you are on.
   F1                  Explain every setting, in one window.
+
+In the review window
+  F2                  Correct the text of the highlighted word.
+  F3 and Shift+F3     Move to the next and previous word needing review.
+  F4                  Confirm the highlighted word as correct.
+  F5 and Shift+F5     Play the audio around it, and play a wider stretch.
+  F6                  Move to the next panel.
 
 Settings and closing
   Ctrl+comma          Open the Settings dialog.

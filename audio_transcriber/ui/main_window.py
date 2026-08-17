@@ -31,13 +31,27 @@ from audio_transcriber.settings import (
     Settings,
     SettingsStore,
 )
+from audio_transcriber.transcription.calibration import (
+    CALIBRATION_FILE_NAME,
+    CalibrationStore,
+)
+from audio_transcriber.transcription.model import Transcript
+from audio_transcriber.transcription.runner import summarise as summarise_transcription
+from audio_transcriber.transcription.store import TranscriptStore
+from audio_transcriber.transcription.vocabulary import (
+    VOCABULARY_FILE_NAME,
+    Vocabulary,
+    VocabularyStore,
+)
 from audio_transcriber.ui.accessibility import announce, describe
 from audio_transcriber.ui.enhance_dialog import EnhanceAudioDialog, summarise
 from audio_transcriber.ui.file_info_panel import FileInfoPanel
 from audio_transcriber.ui.file_table import AudioFileTableModel, AudioFileTableView
 from audio_transcriber.ui.folder_panel import FolderPanel
 from audio_transcriber.ui.help_dialogs import KeyboardShortcutsDialog, show_about
+from audio_transcriber.ui.review_window import ReviewWindow
 from audio_transcriber.ui.settings_dialog import SettingsDialog
+from audio_transcriber.ui.transcribe_dialog import TranscribeDialog
 from audio_transcriber.ui.player_panel import (
     STATUS_FINISHED,
     STATUS_PAUSED,
@@ -69,6 +83,8 @@ class MainWindow(QMainWindow):
         session_store: SessionStore,
         settings_store: SettingsStore | None = None,
         parent: QWidget | None = None,
+        vocabulary_store: VocabularyStore | None = None,
+        calibration_store: CalibrationStore | None = None,
     ) -> None:
         super().__init__(parent)
         self._session_store = session_store
@@ -80,6 +96,19 @@ class MainWindow(QMainWindow):
             session_store.path.parent / SETTINGS_FILE_NAME
         )
         self._settings = self._settings_store.load()
+        # The vocabulary and the record of how each service has performed sit
+        # beside the settings, and for the same two reasons: everything the
+        # application keeps for itself belongs in one folder, and a test that
+        # is given a temporary folder must not write into the real one. Both
+        # are read when they are needed rather than held open, because the
+        # review window adds to them while the main window is running.
+        self._vocabulary_store = vocabulary_store or VocabularyStore(
+            self._settings_store.path.parent / VOCABULARY_FILE_NAME
+        )
+        self._calibration_store = calibration_store or CalibrationStore(
+            self._settings_store.path.parent / CALIBRATION_FILE_NAME
+        )
+        self._review_window: ReviewWindow | None = None
         self._folder: Path | None = None
         self._pending_checked: list[str] = []
         self._pending_selected: str | None = None
@@ -145,6 +174,20 @@ class MainWindow(QMainWindow):
         )
         self._enhance_button.clicked.connect(self.show_enhance_audio)
 
+        # Alt+N has just gone to Enhance Audio and Alt+E is part of it, so
+        # Transcribe answers to Alt+T. Nothing else in this window uses it:
+        # the folder box has Alt+O, the file list Alt+S, the player Alt+L and
+        # Alt+U, and the details panel Alt+N, Alt+D, Alt+Z and Alt+I.
+        self._transcribe_button = QPushButton("&Transcribe...", self)
+        describe(
+            self._transcribe_button,
+            "Transcribe",
+            "Sends the recordings to the transcription services and builds a "
+            "transcript from what they all heard. It works on the checked files, or "
+            "on the highlighted file if none are checked.",
+        )
+        self._transcribe_button.clicked.connect(self.show_transcribe)
+
         left = QWidget(self)
         # Wide enough for the three columns of the file list to be readable
         # without scrolling sideways. Measured in characters of the current
@@ -158,6 +201,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._table, 1)
         left_layout.addWidget(self._summary_label)
         left_layout.addWidget(self._enhance_button)
+        left_layout.addWidget(self._transcribe_button)
 
         self._player_panel = PlayerPanel(self._player, self._settings, self)
         self._info_panel = FileInfoPanel(self)
@@ -213,6 +257,18 @@ class MainWindow(QMainWindow):
             "E&nhance Audio...",
             QKeySequence("Ctrl+E"),
             self.show_enhance_audio,
+        )
+        self._transcribe_action = self._add_action(
+            file_menu,
+            "&Transcribe...",
+            QKeySequence("Ctrl+T"),
+            self.show_transcribe,
+        )
+        self._review_action = self._add_action(
+            file_menu,
+            "&Review Transcript...",
+            QKeySequence("Ctrl+R"),
+            self.show_review,
         )
         file_menu.addSeparator()
         self._add_action(
@@ -544,18 +600,26 @@ class MainWindow(QMainWindow):
 
     # -- Enhancing audio --------------------------------------------------
 
-    def files_to_enhance(self) -> list[AudioFile]:
-        """The recordings an enhancement run would work on.
+    def _chosen_files(self) -> list[AudioFile]:
+        """The recordings a command in this window would work on.
 
         The checked files are what the check boxes are for, so they win.
         Where nothing is checked, the highlighted file is what the user is
         looking at and is taken to be what they mean.
+
+        Every command answers this the same way, deliberately. A window where
+        Enhance Audio acted on the checked files and Transcribe acted on the
+        highlighted one would be a window nobody could predict.
         """
         checked = self._model.checked_files()
         if checked:
             return checked
         selected = self._model.file_at(self._table.selected_row())
         return [selected] if selected is not None else []
+
+    def files_to_enhance(self) -> list[AudioFile]:
+        """The recordings an enhancement run would work on."""
+        return self._chosen_files()
 
     def show_enhance_audio(self) -> None:
         """Open the Enhance Audio dialog on the chosen files."""
@@ -604,6 +668,135 @@ class MainWindow(QMainWindow):
         self._settings = replace(self._settings, enhance=enhance)
         if not self._settings_store.save(self._settings):
             _log.warning("The Enhance Audio settings could not be saved.")
+
+    # -- Transcribing -----------------------------------------------------
+
+    def files_to_transcribe(self) -> list[AudioFile]:
+        """The recordings a transcription run would work on."""
+        return self._chosen_files()
+
+    def show_transcribe(self) -> None:
+        """Open the Transcribe dialog on the chosen recordings.
+
+        The vocabulary is read fresh each time rather than held, because
+        reviewing a transcript adds the corrections a person made to it, and a
+        copy loaded when the window opened would be out of date by the second
+        run.
+        """
+        files = self.files_to_transcribe()
+        if not files:
+            self._set_status(
+                "There is nothing to transcribe. Check the files you want, or "
+                "highlight one in the file list.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        dialog = TranscribeDialog(
+            files,
+            self._settings.transcription,
+            vocabulary=self._vocabulary_store.load(),
+            parent=self,
+        )
+        dialog.exec()
+        summary = dialog.summary
+        review = dialog.review_request
+        # The dialog belongs to this window, so closing it does not get rid of
+        # it. What it was left holding is read out first, because after this
+        # it is on its way out.
+        dialog.deleteLater()
+        if summary is not None:
+            self._set_status(summarise_transcription(summary), alert=True)
+        else:
+            self._set_status("Transcribe was closed without transcribing anything.")
+        if review is not None and review.transcript is not None:
+            # Asked for from inside the dialog, and answered out here. The
+            # dialog is modal, so a review window opened from within it would
+            # appear behind something the user cannot dismiss.
+            self.open_review(review.path, review.transcript)
+
+    def show_review(self) -> None:
+        """Open the review window on the highlighted recording's transcript.
+
+        The highlighted recording rather than the checked ones, because a
+        review window shows one transcript and there would be no sensible way
+        to choose between three checked files.
+        """
+        audio_file = self._model.file_at(self._table.selected_row())
+        if audio_file is None:
+            self._set_status(
+                "Highlight a recording in the file list to review its transcript.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        store = self._transcript_store(audio_file.path)
+        if not store.has_transcript:
+            self._set_status(
+                f"{audio_file.name} has not been transcribed yet, so there is nothing "
+                "to review.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        transcript = store.load()
+        if transcript is None:
+            self._set_status(
+                f"The transcript for {audio_file.name} could not be read. The file at "
+                f"{store.transcript_path} may be damaged.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        self.open_review(audio_file.path, transcript)
+
+    def open_review(self, recording: Path, transcript: Transcript) -> ReviewWindow:
+        """Show the words a transcript could not settle, and keep the corrections.
+
+        Only one review window is kept. Opening a second on another recording
+        closes the first, because two windows both driving the one audio
+        player would fight over it, and the user would hear whichever won.
+
+        The window is a child of this one so that Qt disposes of it when the
+        application closes, and the previous one is asked to go explicitly
+        rather than being left to the garbage collector, which would otherwise
+        keep it and its player connections alive indefinitely.
+        """
+        store = self._transcript_store(recording)
+        previous = self._review_window
+        self._review_window = ReviewWindow(
+            transcript,
+            self._player,
+            save_correction=lambda corrected: self._save_correction(store, corrected),
+            parent=self,
+        )
+        if previous is not None:
+            previous.close()
+            previous.deleteLater()
+        self._review_window.show()
+        self._set_status(f"Reviewing {recording.name}.", alert=True)
+        return self._review_window
+
+    def _transcript_store(self, recording: Path) -> TranscriptStore:
+        """The transcript folder beside one recording, named as the settings say."""
+        return TranscriptStore(
+            recording,
+            self._settings.transcription.processing.transcript_folder_suffix,
+        )
+
+    def _save_correction(self, store: TranscriptStore, transcript: Transcript) -> None:
+        """Write a corrected transcript back, and say so plainly if that failed.
+
+        A correction the user made and believes is saved, but is not, is the
+        one failure here that must never pass quietly, because they will only
+        find out about it after closing the window that still held the work.
+        """
+        if not store.save(transcript):
+            self._set_status(
+                f"The correction could not be saved to {store.transcript_path}.",
+                alert=True,
+                urgent=True,
+            )
 
     def _summary_text(self) -> str:
         total = self._model.rowCount()
@@ -660,11 +853,44 @@ class MainWindow(QMainWindow):
         return self._settings
 
     def show_settings(self) -> None:
-        """Open the Settings dialog and take what the user chose."""
-        dialog = SettingsDialog(self._settings, self)
+        """Open the Settings dialog and take what the user chose.
+
+        The vocabulary and the service statistics are handed in as well as the
+        settings, and the vocabulary is taken back out again. Without that the
+        Vocabulary page edits a blank list that is thrown away when the dialog
+        closes, which is worse than not offering the page at all: the user
+        types in a client's whole list of surnames, presses OK, and is given no
+        reason to think anything went wrong.
+
+        The statistics only go in. Nothing on that page changes them; they are
+        a record of what the services have actually done, built up by the
+        review window one correction at a time.
+        """
+        dialog = SettingsDialog(
+            self._settings,
+            self,
+            vocabulary=self._vocabulary_store.load(),
+            statistics=self._calibration_store.load(),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.apply_settings(dialog.chosen_settings())
+        self.save_vocabulary(dialog.chosen_vocabulary())
+
+    def save_vocabulary(self, vocabulary: Vocabulary) -> None:
+        """Keep the words the user has taught the application.
+
+        A failure is announced rather than logged. The settings are saved in
+        the same breath and report their own failure, and a user who was told
+        their settings were saved would otherwise reasonably assume their
+        vocabulary was too.
+        """
+        if not self._vocabulary_store.save(vocabulary):
+            self._set_status(
+                f"The vocabulary could not be saved to {self._vocabulary_store.path}.",
+                alert=True,
+                urgent=True,
+            )
 
     def apply_settings(self, settings: Settings) -> None:
         """Put new settings to work everywhere that uses them, and save them."""
@@ -776,6 +1002,12 @@ class MainWindow(QMainWindow):
         self._media_load_timer.stop()
         self._scanner.stop()
         self._player.stop()
+        # The review window is a separate window rather than a dialog, so
+        # closing this one does not close it. Left open it would keep the
+        # application running with no main window and a player that has just
+        # been stopped underneath it.
+        if self._review_window is not None:
+            self._review_window.close()
         self._save_session()
         super().closeEvent(event)
 

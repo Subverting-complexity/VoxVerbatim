@@ -8,13 +8,25 @@ these tests must not call a paid service or open a socket.
 
 from __future__ import annotations
 
+import inspect
+import shutil
+
 import pytest
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QWidget
 
+from audio_transcriber.audio.player import AudioPlayer
 from audio_transcriber.session import SessionStore
+from audio_transcriber.transcription import grouping
 from audio_transcriber.transcription.calibration import ProviderStatistics
-from audio_transcriber.transcription.model import FinalToken, ReviewStatus, Transcript
+from audio_transcriber.transcription.model import (
+    FinalToken,
+    ReviewReason,
+    ReviewStatus,
+    Transcript,
+)
+from audio_transcriber.transcription.normalise import normalise
+from audio_transcriber.transcription.project import ProjectStore, ReplacementRule
 from audio_transcriber.transcription.runner import RecordingOutcome, RunSummary
 from audio_transcriber.transcription.store import TranscriptStore
 from audio_transcriber.transcription.vocabulary import (
@@ -23,6 +35,7 @@ from audio_transcriber.transcription.vocabulary import (
     VocabularyProfile,
 )
 from audio_transcriber.ui import main_window as main_window_module
+from audio_transcriber.ui import review_lists
 from audio_transcriber.ui.main_window import MainWindow
 from audio_transcriber.ui.settings_dialog import SettingsDialog
 
@@ -362,26 +375,153 @@ def test_how_the_run_went_is_reported_in_the_status_bar(
         close_window(window)
 
 
-def test_asking_to_review_from_the_dialog_opens_the_review_window(
+def test_asking_to_review_from_the_dialog_opens_the_project_review_there(
     qapp, monkeypatch, store, audio_folder
 ):
-    """The dialog is modal, so the review window is opened once it has gone."""
-    transcript = make_transcript("alpha.m4a")
-    review = RecordingOutcome(path=audio_folder / "alpha.m4a", transcript=transcript)
-    fake_transcribe_dialog(
-        monkeypatch, run_summary=RunSummary(results=[review]), review=review
-    )
+    """The dialog is modal, so the review window is opened once it has gone.
+
+    What opens is the review of the whole folder, and the recording just
+    transcribed is where the person is put down in it. A word in the new file
+    is very often the same word as one already settled in an older file, so
+    opening on the new file alone would hide the decision already taken.
+    """
+    opened = fake_review_window(monkeypatch)
     window = loaded_window(qapp, store, audio_folder)
     try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        save_transcript(window, audio_folder / "beta.m4a", weak_transcript("beta.m4a"))
+        outcome = RecordingOutcome(
+            path=audio_folder / "alpha.m4a", transcript=make_transcript("alpha.m4a")
+        )
+        fake_transcribe_dialog(
+            monkeypatch, run_summary=RunSummary(results=[outcome]), review=outcome
+        )
+
         window.show_transcribe()
 
-        assert window._review_window is not None
-        assert window._review_window._transcript is transcript
+        assert len(opened) == 1
+        assert sorted(opened[0].recording_names) == ["alpha.m4a", "beta.m4a"]
+        # Put down on the recording that was just transcribed, and it found
+        # something there, so nothing is said about landing elsewhere.
+        assert opened[0].selected == ["alpha.m4a"]
+        assert "so the review opens where you last left it" not in window._status_label.text()
     finally:
         close_window(window)
 
 
-# -- Reviewing a transcript that is already there ------------------------
+def test_a_hand_off_to_a_recording_with_nothing_waiting_says_where_it_landed(
+    qapp, monkeypatch, store, audio_folder
+):
+    """A recording with no words waiting is not a failure, but it is worth saying.
+
+    Somebody who asked to review what they had just transcribed and was put
+    somewhere else entirely would reasonably think the window had opened on
+    the wrong thing.
+    """
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        # gamma has a transcript, but every word in it is settled, so the
+        # project holds nothing at all for that recording.
+        save_transcript(window, audio_folder / "gamma.m4a", strong_transcript("gamma.m4a"))
+        outcome = RecordingOutcome(
+            path=audio_folder / "gamma.m4a", transcript=make_transcript("gamma.m4a")
+        )
+        fake_transcribe_dialog(
+            monkeypatch, run_summary=RunSummary(results=[outcome]), review=outcome
+        )
+
+        window.show_transcribe()
+
+        assert opened[0].selected == ["gamma.m4a"]
+        assert "There is nothing waiting in gamma.m4a" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def announcements(monkeypatch) -> list[tuple[object, str, bool]]:
+    """Everything the main window asks a screen reader to read out.
+
+    The widget is collected as well as the words, because which window an
+    announcement is raised on decides whether it is heard at all: one raised
+    from a window that is not in front is unreliable across screen readers.
+    """
+    said: list[tuple[object, str, bool]] = []
+
+    def record(widget, message: str, urgent: bool = False) -> None:
+        said.append((widget, message, urgent))
+
+    monkeypatch.setattr(main_window_module, "announce", record)
+    return said
+
+
+def test_the_hand_off_says_one_thing_once_and_says_it_where_it_can_be_heard(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Two announcements used to race here, and the wrong one won.
+
+    Landing on the recording read the row out on the review window; the
+    sentence that followed was raised on the main window, which was behind it
+    by then, and arrived assertively whenever a transcript could not be read,
+    so it cut the row reading off. That sentence is the only place the person
+    is ever told how many words were corrected on their behalf, so it may not
+    be the one that loses, and it may not be the one that talks over anything
+    either.
+    """
+    opened = fake_review_window(monkeypatch)
+    said = announcements(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        outcome = RecordingOutcome(
+            path=audio_folder / "alpha.m4a", transcript=make_transcript("alpha.m4a")
+        )
+        fake_transcribe_dialog(
+            monkeypatch, run_summary=RunSummary(results=[outcome]), review=outcome
+        )
+        said.clear()
+
+        window.show_transcribe()
+
+        review = opened[0]
+        # The window landed silently, so the sentence below is the whole of
+        # what is said about the hand-over.
+        assert review.announced_arrival == [False]
+        opening = [item for item in said if "Reviewing " in item[1]]
+        assert len(opening) == 1
+        widget, message, urgent = opening[0]
+        assert widget is review
+        assert urgent is False
+        assert "You are on the first word waiting in alpha.m4a." in message
+        # And it is on the screen as well, for anybody who can look.
+        assert message == window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_the_focus_is_placed_in_the_review_rather_than_left_to_luck(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Where a window opens must be a decision, not the widget order.
+
+    The focus is asked for after the window is shown and before anything is
+    announced, so the screen reader reads the word the person has been put on
+    and the sentence follows it rather than across it.
+    """
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
+        window.open_project_review(land_on="alpha.m4a")
+
+        assert opened[0].focused == ["Word Groups"]
+    finally:
+        close_window(window)
+
+
+# -- Reviewing the folder ------------------------------------------------
 
 
 def save_transcript(window: MainWindow, recording, transcript: Transcript) -> TranscriptStore:
@@ -390,48 +530,668 @@ def save_transcript(window: MainWindow, recording, transcript: Transcript) -> Tr
     return store
 
 
-def test_reviewing_a_recording_that_has_a_transcript_opens_it(qapp, store, audio_folder):
+def load_transcript(window: MainWindow, recording) -> Transcript:
+    loaded = window._transcript_store(recording).load()
+    assert loaded is not None
+    return loaded
+
+
+def words_of(transcript: Transcript) -> list[str]:
+    return [token.text for token in transcript.tokens]
+
+
+def spoken_transcript(name: str, words) -> Transcript:
+    """A transcript of the given words, each with a saved composite confidence.
+
+    The strength is what the review sweep thresholds on: a word below the
+    project's minimum ends up in front of a person, and a word above it is one
+    the application treats as settled.
+    """
+    transcript = Transcript(recording_name=name)
+    for index, (text, strength) in enumerate(words):
+        token = FinalToken(text=text)
+        token.confidence_strength = strength
+        token.start = float(index)
+        token.end = float(index) + 0.5
+        transcript.tokens.append(token)
+    return transcript
+
+
+def weak_transcript(name: str, word: str = "Bosch") -> Transcript:
+    """A transcript with one shaky word in it, which the review will pick up."""
+    return spoken_transcript(name, [("the", 0.99), (word, 0.30), ("account", 0.99)])
+
+
+def strong_transcript(name: str, word: str = "Bosch") -> Transcript:
+    """A transcript the application is sure of, so nothing in it wants a person."""
+    return spoken_transcript(name, [("the", 0.99), (word, 0.95), ("account", 0.99)])
+
+
+def add_replacement_rule(
+    folder, matched: str = "Bosch", replacement: str = "Bosche"
+) -> ReplacementRule:
+    """Put into a folder's project what accepting a replacement there would leave.
+
+    The review window is what normally creates these. Writing one straight
+    into the project file is how a test can say "the person already decided
+    this last week" without driving the whole window to do it.
+    """
+    project_store = ProjectStore(folder)
+    state = project_store.load()
+    rule = ReplacementRule(
+        id=f"rule-{matched.lower()}",
+        matched_text=matched,
+        normalised_text=normalise(matched),
+        replacement=replacement,
+        language="unknown",
+        created_at="2026-01-01T09:00:00+02:00",
+    )
+    state.rules.append(rule)
+    assert project_store.save(state)
+    return rule
+
+
+def fake_review_window(monkeypatch) -> list:
+    """Put a stand-in in the review window's place, and collect what it was handed.
+
+    The review window is a large window of its own with its own tests. What
+    matters here is the hand-over: which folder, which recordings, which
+    project and which player the main window gives it, and whether it was
+    asked to land on a particular recording.
+
+    It also records how many transcripts were actually parsed while the window
+    was opened, which is the figure the whole lazy arrangement exists to keep
+    small, and which no other assertion would notice going wrong.
+    """
+    opened: list = []
+
+    class Fake(QWidget):
+        def __init__(
+            self,
+            folder,
+            recording_names,
+            load_transcript,
+            recording_paths,
+            project_store,
+            player,
+            save_correction=None,
+            parent=None,
+        ):
+            super().__init__(parent)
+            self.folder = folder
+            self.recording_names = list(recording_names)
+            self.load_transcript = load_transcript
+            self.recording_paths = recording_paths
+            self.project_store = project_store
+            self.player = player
+            self.save_correction = save_correction
+            self.selected: list[str] = []
+            self.announced_arrival: list[bool] = []
+            self.focused: list[str] = []
+            opened.append(self)
+
+        def select_recording(
+            self, recording_name: str, announce_arrival: bool = True
+        ) -> bool:
+            """Answer as the real window does: is there anything here for it?"""
+            self.selected.append(recording_name)
+            self.announced_arrival.append(announce_arrival)
+            state = self.project_store.load()
+            return any(item.recording_name == recording_name for item in state.occurrences)
+
+        def focus_word_list(self) -> None:
+            self.focused.append("Word Groups")
+
+    monkeypatch.setattr(main_window_module, "ReviewWindow", Fake)
+    return opened
+
+
+def beta_occurrences(folder) -> int:
+    """How many words of beta.m4a the project still holds a decision about."""
+    state = ProjectStore(folder).load()
+    return len([item for item in state.occurrences if item.recording_name == "beta.m4a"])
+
+
+def count_transcript_reads(monkeypatch) -> list[str]:
+    """Record every transcript actually parsed, in the order they were parsed.
+
+    Reading a transcript is the expensive thing this whole arrangement exists
+    to avoid, and it is invisible to every other assertion: a review that
+    quietly read the entire folder would look exactly like one that read
+    nothing. So it is counted.
+    """
+    read: list[str] = []
+    real = TranscriptStore.load
+
+    def counted(self):
+        read.append(self.recording_path.name)
+        return real(self)
+
+    monkeypatch.setattr(TranscriptStore, "load", counted)
+    return read
+
+
+def test_opening_a_folder_again_reads_no_transcripts_at_all(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The whole point of naming recordings rather than handing them over.
+
+    A folder of fifty hour-long interviews is more than a gigabyte of
+    transcripts, and pressing Ctrl+R must not mean reading it. Everything the
+    two lists in the review window need is already in the project file, so a
+    second opening of an unchanged folder reads nothing.
+    """
+    fake_review_window(monkeypatch)
     window = loaded_window(qapp, store, audio_folder)
     try:
-        save_transcript(window, audio_folder / "beta.m4a", make_transcript("beta.m4a"))
-        window._table.select_row(1)
+        for name in ("alpha.m4a", "beta.m4a", "gamma.m4a"):
+            save_transcript(window, audio_folder / name, weak_transcript(name))
+        window.show_review()
+
+        read = count_transcript_reads(monkeypatch)
+        window.show_review()
+
+        assert read == []
+    finally:
+        close_window(window)
+
+
+def flagged_transcript(name: str, flagged: str = "15,000") -> Transcript:
+    """A transcript with one shaky word and one the pipeline flagged by rule.
+
+    The two reach the review by different roads and both have to survive the
+    folder being closed. The shaky word is found by the low-confidence sweep,
+    which saves an occurrence for it. The flagged word is strong and the sweep
+    never looks at it; a rule objected to it, and the only place that objection
+    is written down is the transcript.
+    """
+    transcript = spoken_transcript(name, [("the", 0.99), ("Bosch", 0.30), (flagged, 0.99)])
+    transcript.tokens[2].flag(ReviewReason.NUMERIC_DISAGREEMENT)
+    return transcript
+
+
+def flagged_rows(review) -> list[str]:
+    """The words in the second block of the review window's first list."""
+    return [
+        row.word
+        for row in review._group_model.rows()
+        if row.key.startswith(review_lists.UNCERTAINTY_KEY_PREFIX)
+    ]
+
+
+def test_reopening_a_folder_keeps_its_flagged_words_and_reads_nothing(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The gap this closed: they used to be found only while a transcript was read.
+
+    A folder that has not changed is not read again, which is what makes
+    opening it quick. Before the flagged words were saved, that meant the first
+    review of a folder showed them and every later one showed an empty second
+    block, which reads as a folder with nothing wrong in it. They are now in
+    the project file for the same reason the shaky words are, so a reopening
+    has them all without opening a single transcript.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        for name in ("alpha.m4a", "beta.m4a", "gamma.m4a"):
+            save_transcript(window, audio_folder / name, flagged_transcript(name))
+        window.show_review()
+
+        read = count_transcript_reads(monkeypatch)
+        window.show_review()
+
+        assert read == []
+        saved = ProjectStore(audio_folder).load()
+        assert sorted(item.recording_name for item in saved.flagged) == [
+            "alpha.m4a",
+            "beta.m4a",
+            "gamma.m4a",
+        ]
+        assert {item.text for item in saved.flagged} == {"15,000"}
+        assert saved.flagged[0].reasons == ["numeric_disagreement"]
+    finally:
+        close_window(window)
+
+
+def test_a_recording_deleted_from_the_folder_leaves_the_review_altogether(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Reproduces the defect exactly, from the outside.
+
+    Two recordings, both with the same shaky word, so the analysis puts them
+    in one group. One of the recordings is then deleted and the folder read
+    again. The occurrence of the deleted recording used to stay in the
+    project for ever, because nothing pruned it and the analysis deliberately
+    keeps the occurrences of a recording it could not read. The visible harm
+    was the sentence the review reads out to somebody who cannot see the list:
+    "applies to 2 occurrences across 2 files", one of which no longer exists.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        for name in ("alpha.m4a", "beta.m4a"):
+            save_transcript(window, audio_folder / name, weak_transcript(name))
+        window.show_review()
+        first = ProjectStore(audio_folder).load()
+        assert sorted({item.recording_name for item in first.occurrences}) == [
+            "alpha.m4a",
+            "beta.m4a",
+        ]
+        group = first.groups[0]
+        assert "across 2 files" in grouping.affected_summary(first, group.id)
+
+        transcripts = window._transcript_store(audio_folder / "beta.m4a").transcript_path
+        shutil.rmtree(transcripts.parent)
+        (audio_folder / "beta.m4a").unlink()
+        window.refresh()
+        assert wait_until(qapp, lambda: window._model.rowCount() == 2)
+        window.show_review()
+
+        second = ProjectStore(audio_folder).load()
+        assert {item.recording_name for item in second.occurrences} == {"alpha.m4a"}
+        assert second.flagged == []
+        remaining = second.groups[0]
+        assert grouping.affected_summary(second, remaining.id) == (
+            "This replacement applies to 1 occurrence in 1 file."
+        )
+    finally:
+        close_window(window)
+
+
+def test_a_transcript_that_cannot_be_read_keeps_its_place_in_the_review(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The distinction the pruning turns on, from the other side.
+
+    A recording whose transcript is damaged, or busy, or on a drive that is
+    not connected, is still in the folder. Its words and everything decided
+    about them must survive, which is the behaviour the analysis already had
+    and which pruning must not undo.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        for name in ("alpha.m4a", "beta.m4a"):
+            save_transcript(window, audio_folder / name, weak_transcript(name))
+        window.show_review()
+
+        damaged = window._transcript_store(audio_folder / "beta.m4a").transcript_path
+        damaged.write_text("this is not a transcript", encoding="utf-8")
+        window.show_review()
+
+        saved = ProjectStore(audio_folder).load()
+        assert sorted({item.recording_name for item in saved.occurrences}) == [
+            "alpha.m4a",
+            "beta.m4a",
+        ]
+    finally:
+        close_window(window)
+
+
+def test_the_second_block_is_drawn_from_the_project_rather_than_the_transcripts(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The same thing again, but looking at the list the person actually sees.
+
+    The one transcript that is read is the one holding the word the window
+    lands on, whose detail panel genuinely needs it. The other two are never
+    opened, and two of the three flagged words on the list come out of them.
+    """
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        for name in ("alpha.m4a", "beta.m4a", "gamma.m4a"):
+            save_transcript(window, audio_folder / name, flagged_transcript(name))
+        first = window.open_project_review()
+        assert first is not None
+        assert flagged_rows(first) == ["15,000", "15,000", "15,000"]
+
+        read = count_transcript_reads(monkeypatch)
+        second = window.open_project_review()
+
+        assert second is not None
+        assert flagged_rows(second) == ["15,000", "15,000", "15,000"]
+        assert read == ["alpha.m4a"]
+        # And the block does not claim to be waiting for anything.
+        assert "found when the folder is processed" not in second._count_label.text()
+    finally:
+        close_window(window)
+
+
+def test_a_flagged_word_that_has_gone_from_a_new_transcript_is_not_still_listed(
+    qapp, monkeypatch, store, audio_folder
+):
+    """A saved item must never outlive the word it points at.
+
+    Transcribing a recording again gives every word a fresh identifier, so a
+    saved flagged item then points at nothing. Nothing re-matches it: the
+    recording is read because its transcript is newer than the analysis, and
+    everything the project remembered about its flagged words is replaced by
+    what it now says. A word the new transcript does not flag is therefore
+    simply gone, rather than sitting in the list as a row that can be selected
+    but not played, corrected or confirmed.
+    """
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", flagged_transcript("alpha.m4a"))
+        first = window.open_project_review()
+        assert first is not None
+        assert flagged_rows(first) == ["15,000"]
+        gone = ProjectStore(audio_folder).load().flagged[0].token_id
+
+        # Transcribed again. The words are the same words, but they are new
+        # objects with new identifiers, and this time nothing objects to the
+        # number.
+        again = spoken_transcript(
+            "alpha.m4a", [("the", 0.99), ("Bosch", 0.30), ("15,000", 0.99)]
+        )
+        save_transcript(window, audio_folder / "alpha.m4a", again)
+        second = window.open_project_review()
+
+        assert second is not None
+        assert flagged_rows(second) == []
+        saved = ProjectStore(audio_folder).load()
+        assert [item.token_id for item in saved.flagged] == []
+        assert gone not in [token.id for token in again.tokens]
+    finally:
+        close_window(window)
+
+
+def test_a_transcript_written_since_the_last_review_is_read_again(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Skipping this one would be the failure the whole feature exists to prevent."""
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+
+        read = count_transcript_reads(monkeypatch)
+        # A recording transcribed after the last review, which the project has
+        # never seen a single word of.
+        save_transcript(window, audio_folder / "beta.m4a", weak_transcript("beta.m4a"))
+        window.show_review()
+
+        assert "beta.m4a" in read
+        assert "alpha.m4a" not in read
+        state = ProjectStore(audio_folder).load()
+        assert sorted({item.recording_name for item in state.occurrences}) == [
+            "alpha.m4a",
+            "beta.m4a",
+        ]
+    finally:
+        close_window(window)
+
+
+def test_a_transcript_replaced_by_a_newer_one_is_read_again(
+    qapp, monkeypatch, store, audio_folder
+):
+    """A recording already in the project can still have been transcribed again."""
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+
+        read = count_transcript_reads(monkeypatch)
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a", "Bosh"))
+        window.show_review()
+
+        assert read.count("alpha.m4a") >= 1
+        state = ProjectStore(audio_folder).load()
+        assert [item.detected_text for item in state.occurrences] == ["Bosh"]
+    finally:
+        close_window(window)
+
+
+def test_the_review_window_constructor_matches_the_shared_contract(qapp):
+    """The one place the two halves of this feature have to agree exactly.
+
+    The main window and the review window are built separately against a
+    written contract, so the signature is worth asserting rather than
+    discovering at run time in front of a user.
+    """
+    from audio_transcriber.ui.review_window import ReviewWindow
+
+    parameters = list(inspect.signature(ReviewWindow.__init__).parameters)
+    assert parameters[:7] == [
+        "self",
+        "folder",
+        "recording_names",
+        "load_transcript",
+        "recording_paths",
+        "project_store",
+        "player",
+    ]
+    assert "save_correction" in parameters
+    assert "parent" in parameters
+    assert hasattr(ReviewWindow, "select_recording")
+
+
+def test_reviewing_covers_the_folder_with_no_recording_highlighted(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Which file the highlight is on decides nothing about what is reviewed."""
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        save_transcript(window, audio_folder / "gamma.m4a", weak_transcript("gamma.m4a"))
+        window._clear_selection()
 
         window.show_review()
 
         assert window._review_window is not None
-        assert window._review_window._transcript.recording_name == "beta.m4a"
-        assert "Reviewing beta.m4a" in window._status_label.text()
+        assert sorted(opened[0].recording_names) == ["alpha.m4a", "gamma.m4a"]
+        assert opened[0].folder == audio_folder
+        assert opened[0].recording_paths["alpha.m4a"] == audio_folder / "alpha.m4a"
+        assert "Reviewing 2 recordings" in window._status_label.text()
     finally:
         close_window(window)
 
 
-def test_reviewing_a_recording_with_no_transcript_says_so(qapp, store, audio_folder):
+def test_an_untranscribed_highlight_does_not_stop_the_review(
+    qapp, monkeypatch, store, audio_folder
+):
+    """A file with no transcript is not reviewable content, so it is left out.
+
+    It is emphatically not a reason to refuse. The person may well be standing
+    on the one recording nobody has transcribed while the other two are full of
+    words waiting.
+    """
+    opened = fake_review_window(monkeypatch)
     window = loaded_window(qapp, store, audio_folder)
     try:
-        window._table.select_row(0)
+        save_transcript(window, audio_folder / "gamma.m4a", weak_transcript("gamma.m4a"))
+        window._table.select_row(0)  # alpha.m4a, which has never been transcribed
 
         window.show_review()
 
-        assert window._review_window is None
-        assert "has not been transcribed yet" in window._status_label.text()
+        assert window._review_window is not None
+        assert opened[0].recording_names == ["gamma.m4a"]
+        assert "Reviewing 1 recording" in window._status_label.text()
     finally:
         close_window(window)
 
 
-def test_only_one_review_window_is_kept_open(qapp, store, audio_folder):
+def test_a_folder_with_nothing_transcribed_refuses_and_says_so(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The wording leads with the project, because that is what was asked about."""
+    opened = fake_review_window(monkeypatch)
     window = loaded_window(qapp, store, audio_folder)
     try:
-        save_transcript(window, audio_folder / "alpha.m4a", make_transcript("alpha.m4a"))
-        save_transcript(window, audio_folder / "beta.m4a", make_transcript("beta.m4a"))
+        window._table.select_row(1)
 
-        window._table.select_row(0)
+        window.show_review()
+
+        assert opened == []
+        assert window._review_window is None
+        message = window._status_label.text()
+        assert "There is nothing in this project to review." in message
+        assert "has been transcribed yet" in message
+        # It is announced, as the other refusals in this window are.
+        assert "nothing in this project" in message
+    finally:
+        close_window(window)
+
+
+def test_a_folder_whose_only_transcript_cannot_be_read_says_it_may_be_damaged(
+    qapp, monkeypatch, store, audio_folder
+):
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        damaged = window._transcript_store(audio_folder / "beta.m4a")
+        damaged.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        damaged.transcript_path.write_text("{ this is not json", encoding="utf-8")
+
+        window.show_review()
+
+        assert opened == []
+        message = window._status_label.text()
+        assert "There is nothing in this project to review." in message
+        assert "may be damaged" in message
+        assert "beta.m4a" in message
+    finally:
+        close_window(window)
+
+
+def test_a_damaged_transcript_beside_a_good_one_is_named_rather_than_fatal(
+    qapp, monkeypatch, store, audio_folder
+):
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        damaged = window._transcript_store(audio_folder / "beta.m4a")
+        damaged.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        damaged.transcript_path.write_text("{ this is not json", encoding="utf-8")
+
+        window.show_review()
+
+        assert opened[0].recording_names == ["alpha.m4a"]
+        assert "1 transcript could not be read" in window._status_label.text()
+        assert "beta.m4a" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_a_transcript_that_goes_bad_later_is_announced_when_it_is_reached(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The price of not reading the folder in advance, paid honestly.
+
+    Nothing knows a transcript is damaged until something tries to read it, so
+    a file that cannot be read is reported at the moment that is discovered
+    rather than being swallowed because the window has already opened.
+
+    What it must not say is that the recording has left the review. Its words
+    are still there and still carry every decision made about them, and the
+    review window says as much in its own panels, so the status bar has to
+    agree with it rather than frighten somebody into doing the work again.
+    """
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        save_transcript(window, audio_folder / "beta.m4a", weak_transcript("beta.m4a"))
+        window.show_review()
+        assert "could not be read" not in window._status_label.text()
+
+        broken = window._transcript_store(audio_folder / "beta.m4a")
+        broken.transcript_path.write_text("{ this is not json", encoding="utf-8")
+        # Read the other recording first, so that the one transcript the
+        # reader holds is no longer the one about to be broken.
+        assert opened[0].load_transcript("alpha.m4a") is not None
+
+        assert opened[0].load_transcript("beta.m4a") is None
+
+        message = window._status_label.text()
+        assert "The transcript for beta.m4a could not be read" in message
+        assert "Nothing you have decided about them has been lost" in message
+        # The recording is still in the review, so nothing may suggest it has
+        # been dropped out of it.
+        assert "not in this review" not in message
+        assert beta_occurrences(audio_folder) == 1
+    finally:
+        close_window(window)
+
+
+def test_the_review_window_gets_a_player_of_its_own(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Two windows driving one player would fight over what is loaded."""
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
+        window.show_review()
+
+        player = opened[0].player
+        assert isinstance(player, AudioPlayer)
+        assert player is not window._player
+        # It belongs to the review window, so Qt disposes of it with the window.
+        assert player.parent() is opened[0]
+    finally:
+        close_window(window)
+
+
+def test_only_one_review_window_is_kept_open(qapp, monkeypatch, store, audio_folder):
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
         window.show_review()
         first = window._review_window
-        window._table.select_row(1)
         window.show_review()
 
+        assert len(opened) == 2
         assert window._review_window is not first
-        assert window._review_window._transcript.recording_name == "beta.m4a"
+    finally:
+        close_window(window)
+
+
+def test_changing_folder_closes_the_review_window(
+    qapp, monkeypatch, store, audio_folder, tmp_path
+):
+    """A review belongs to one folder, and its player is loading files from it."""
+    fake_review_window(monkeypatch)
+    other = tmp_path / "other"
+    other.mkdir()
+    write_fake_audio(other / "one.m4a")
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+        assert window._review_window is not None
+
+        window._folder_panel.folderChosen.emit(str(other))
+
+        assert window._review_window is None
+        assert wait_until(qapp, lambda: window._model.rowCount() == 1)
+    finally:
+        close_window(window)
+
+
+def test_refreshing_the_file_list_leaves_the_review_window_alone(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Reading the same folder again is not a change of folder."""
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+        review = window._review_window
+
+        window.refresh()
+        assert wait_until(qapp, lambda: window._model.rowCount() == 3)
+
+        assert window._review_window is review
     finally:
         close_window(window)
 
@@ -440,7 +1200,7 @@ def test_a_correction_that_could_not_be_saved_is_reported(qapp, store, audio_fol
     """The one failure here that must never pass quietly."""
     window = loaded_window(qapp, store, audio_folder)
     try:
-        transcript = make_transcript("alpha.m4a")
+        transcript = weak_transcript("alpha.m4a")
         transcript_store = save_transcript(window, audio_folder / "alpha.m4a", transcript)
 
         class RefusingStore:
@@ -449,9 +1209,229 @@ def test_a_correction_that_could_not_be_saved_is_reported(qapp, store, audio_fol
             def save(self, _transcript) -> bool:
                 return False
 
-        window._save_correction(RefusingStore(), transcript)
+        reader = main_window_module._TranscriptReader({"alpha.m4a": RefusingStore()})
+        window._save_correction(reader, "alpha.m4a", transcript)
 
         assert "could not be saved" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_a_saved_correction_is_what_the_next_read_of_that_recording_sees(
+    qapp, store, audio_folder
+):
+    """Otherwise the person is shown the word they have just changed.
+
+    Only one transcript is held at a time, so a correction written straight to
+    the file would leave the reader holding the version from before it.
+    """
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        transcript_store = save_transcript(
+            window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a")
+        )
+        reader = main_window_module._TranscriptReader({"alpha.m4a": transcript_store})
+        assert words_of(reader.load("alpha.m4a")) == ["the", "Bosch", "account"]
+
+        window._save_correction(reader, "alpha.m4a", strong_transcript("alpha.m4a", "Bosche"))
+
+        assert words_of(reader.load("alpha.m4a")) == ["the", "Bosche", "account"]
+    finally:
+        close_window(window)
+
+
+def test_a_correction_to_a_recording_this_review_does_not_know_is_refused(
+    qapp, store, audio_folder
+):
+    """Guessing a path from a name is how a correction lands in the wrong folder."""
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        reader = main_window_module._TranscriptReader({})
+        window._save_correction(reader, "stranger.m4a", weak_transcript("stranger.m4a"))
+
+        assert "not one of the ones being reviewed" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+# -- The project a folder remembers --------------------------------------
+
+
+def test_opening_a_folder_builds_and_saves_its_own_project(
+    qapp, monkeypatch, store, audio_folder
+):
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
+        window.show_review()
+
+        project_store = ProjectStore(audio_folder)
+        assert project_store.path.is_file()
+        assert project_store.path.parent == audio_folder
+        state = project_store.load()
+        assert [item.detected_text for item in state.occurrences] == ["Bosch"]
+        # Every weak word gets a group, even a group of one, or it would be
+        # unreachable in the window's first list.
+        assert len(state.groups) == 1
+        assert opened[0].project_store.path == project_store.path
+    finally:
+        close_window(window)
+
+
+def test_two_folders_keep_their_projects_entirely_apart(
+    qapp, monkeypatch, store, tmp_path
+):
+    """The property most likely to break silently, so it is tested directly.
+
+    A replacement accepted while reviewing one client's interviews has no
+    business rewriting another client's, even though the two folders hold the
+    very same shaky word.
+    """
+    fake_review_window(monkeypatch)
+    first = tmp_path / "client one"
+    second = tmp_path / "client two"
+    first.mkdir()
+    second.mkdir()
+    write_fake_audio(first / "one.m4a")
+    write_fake_audio(first / "later.m4a")
+    write_fake_audio(second / "two.m4a")
+
+    window = open_window(qapp, store)
+    try:
+        window._folder_panel.folderChosen.emit(str(first))
+        assert wait_until(qapp, lambda: window._model.rowCount() == 2)
+        save_transcript(window, first / "one.m4a", weak_transcript("one.m4a"))
+        window.show_review()
+        # The person accepts "Bosche" while reviewing the first folder, and a
+        # recording transcribed afterwards there is answered by it.
+        add_replacement_rule(first)
+        save_transcript(window, first / "later.m4a", weak_transcript("later.m4a"))
+        window.show_review()
+        assert words_of(load_transcript(window, first / "later.m4a")) == [
+            "the",
+            "Bosche",
+            "account",
+        ]
+
+        window._folder_panel.folderChosen.emit(str(second))
+        assert wait_until(qapp, lambda: window._model.rowCount() == 1)
+        save_transcript(window, second / "two.m4a", weak_transcript("two.m4a"))
+        window.show_review()
+
+        # Nothing at all crossed over: not the rule, not the correction, and
+        # not the occurrences.
+        second_state = ProjectStore(second).load()
+        assert second_state.rules == []
+        assert words_of(load_transcript(window, second / "two.m4a")) == [
+            "the",
+            "Bosch",
+            "account",
+        ]
+        assert ProjectStore(second).path.parent == second
+        assert [item.recording_name for item in second_state.occurrences] == ["two.m4a"]
+
+        # And the first folder was left exactly as it was found.
+        first_state = ProjectStore(first).load()
+        assert [rule.replacement for rule in first_state.rules] == ["Bosche"]
+        assert sorted({item.recording_name for item in first_state.occurrences}) == [
+            "later.m4a",
+            "one.m4a",
+        ]
+    finally:
+        close_window(window)
+
+
+def test_a_file_transcribed_later_is_answered_by_what_the_project_knows(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The point of remembering a replacement at all.
+
+    The new file's "Bosch" is one the services were confident about, which is
+    the case this exists for: the words a service gets confidently wrong are
+    the proper names, so a correction that only reached words already in doubt
+    would miss it.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+        rule = add_replacement_rule(audio_folder)
+
+        # A recording transcribed afterwards, whose "Bosch" nothing doubts.
+        save_transcript(window, audio_folder / "beta.m4a", strong_transcript("beta.m4a"))
+        window.show_review()
+
+        beta = load_transcript(window, audio_folder / "beta.m4a")
+        assert words_of(beta) == ["the", "Bosche", "account"]
+        corrected = beta.tokens[1]
+        # What the services really said is kept, so the change can be explained
+        # and undone.
+        assert corrected.original_text == "Bosch"
+
+        state = ProjectStore(audio_folder).load()
+        answered = [item for item in state.occurrences if item.recording_name == "beta.m4a"]
+        assert len(answered) == 1
+        assert answered[0].auto_applied is True
+        assert answered[0].reviewed is True
+        assert answered[0].applied_rule_id == rule.id
+        assert answered[0].detected_text == "Bosch"
+        assert [item.occurrence_count for item in state.rules] == [1]
+
+        assert "1 word was corrected automatically" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_a_word_a_rule_has_already_answered_is_not_answered_twice(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Correcting it again would record the correction as what was really said."""
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+        add_replacement_rule(audio_folder)
+        save_transcript(window, audio_folder / "beta.m4a", strong_transcript("beta.m4a"))
+        window.show_review()
+
+        window.show_review()
+
+        beta = load_transcript(window, audio_folder / "beta.m4a")
+        assert words_of(beta) == ["the", "Bosche", "account"]
+        assert beta.tokens[1].original_text == "Bosch"
+        state = ProjectStore(audio_folder).load()
+        assert [item.occurrence_count for item in state.rules] == [1]
+        assert "corrected automatically" not in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_a_correction_a_rule_could_not_be_saved_is_reported(
+    qapp, monkeypatch, store, audio_folder
+):
+    """A rule's correction that never reached the disk must not pass quietly.
+
+    The project file records it as having happened, so silence here would
+    leave the person with a project and a transcript telling different stories
+    and nothing to say which one to believe.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+        add_replacement_rule(audio_folder)
+        save_transcript(window, audio_folder / "beta.m4a", strong_transcript("beta.m4a"))
+
+        monkeypatch.setattr(TranscriptStore, "save", lambda self, transcript: False)
+        window.show_review()
+
+        assert "could not be saved" in window._status_label.text()
+        assert "beta.m4a" in window._status_label.text()
     finally:
         close_window(window)
 

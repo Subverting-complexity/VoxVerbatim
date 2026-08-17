@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QModelIndex, Qt, QTimer, QUrl
@@ -31,11 +33,18 @@ from audio_transcriber.settings import (
     Settings,
     SettingsStore,
 )
+from audio_transcriber.transcription import grouping
 from audio_transcriber.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     CalibrationStore,
 )
 from audio_transcriber.transcription.model import Transcript
+from audio_transcriber.transcription.project import (
+    FlaggedItem,
+    Occurrence,
+    ProjectState,
+    ProjectStore,
+)
 from audio_transcriber.transcription.runner import summarise as summarise_transcription
 from audio_transcriber.transcription.store import TranscriptStore
 from audio_transcriber.transcription.vocabulary import (
@@ -49,6 +58,7 @@ from audio_transcriber.ui.file_info_panel import FileInfoPanel
 from audio_transcriber.ui.file_table import AudioFileTableModel, AudioFileTableView
 from audio_transcriber.ui.folder_panel import FolderPanel
 from audio_transcriber.ui.help_dialogs import KeyboardShortcutsDialog, show_about
+from audio_transcriber.ui.review_lists import flagged_in
 from audio_transcriber.ui.review_window import ReviewWindow
 from audio_transcriber.ui.settings_dialog import SettingsDialog
 from audio_transcriber.ui.transcribe_dialog import TranscribeDialog
@@ -109,6 +119,10 @@ class MainWindow(QMainWindow):
             self._settings_store.path.parent / CALIBRATION_FILE_NAME
         )
         self._review_window: ReviewWindow | None = None
+        # The review window's player, kept here only so that it can be
+        # stopped the moment the window is asked to go. It belongs to the
+        # window and Qt destroys it with the window; see _close_review_window.
+        self._review_player: AudioPlayer | None = None
         self._folder: Path | None = None
         self._pending_checked: list[str] = []
         self._pending_selected: str | None = None
@@ -425,6 +439,16 @@ class MainWindow(QMainWindow):
         checked: list[str] | None = None,
         selected: str | None = None,
     ) -> None:
+        # A review window belongs to the folder it was opened on: its project
+        # file, its transcripts and its player all live there. Leaving it open
+        # over a different folder would put two projects in front of the person
+        # at once with one status bar between them, and no way to tell which
+        # folder a message was about. Nothing is lost by closing it, because
+        # the review window writes each decision away as it is made. Reading
+        # the same folder again is not a change of folder and leaves it alone,
+        # so refreshing the file list does not take a review away.
+        if self._folder is not None and folder != self._folder:
+            self._close_review_window()
         self._folder = folder
         self._pending_checked = list(checked or [])
         self._pending_selected = selected
@@ -713,69 +737,662 @@ class MainWindow(QMainWindow):
             # Asked for from inside the dialog, and answered out here. The
             # dialog is modal, so a review window opened from within it would
             # appear behind something the user cannot dismiss.
-            self.open_review(review.path, review.transcript)
+            #
+            # The review covers the whole folder, as it always does, and the
+            # recording just transcribed is only where the person is put down
+            # in it. That matters more than it sounds: a word in the new file
+            # is very likely the same word as one already settled in an older
+            # file, and opening on the new file alone would hide exactly the
+            # decision that has already been taken.
+            self.open_project_review(land_on=review.path.name)
+
+    # -- Reviewing --------------------------------------------------------
+    #
+    # A folder is a project, and reviewing is a thing done to the project
+    # rather than to one recording. That is the whole shape of what follows,
+    # and it is worth saying why, because the obvious design is the other one.
+    #
+    # The same surname comes out of the services spelled three ways across
+    # four interviews. Reviewed one recording at a time, the person decides
+    # that surname four times and has no way of knowing they are the same
+    # decision. Reviewed as a folder, it is one decision that lands
+    # everywhere, and what they accepted is remembered so that the interview
+    # transcribed next week is answered without asking them again.
+    #
+    # Nothing crosses between folders. Everything the project remembers lives
+    # in a file in the audio folder itself, so two folders are two projects
+    # with nothing shared, and a correction accepted for one client's
+    # interviews can never rewrite another client's. That is the point of the
+    # design rather than a side effect of where the file sits.
 
     def show_review(self) -> None:
-        """Open the review window on the highlighted recording's transcript.
+        """Open the review window on the current folder's project.
 
-        The highlighted recording rather than the checked ones, because a
-        review window shows one transcript and there would be no sensible way
-        to choose between three checked files.
+        Which recording the highlight happens to be on decides nothing here,
+        and that is deliberate rather than an oversight. A person who has
+        arrowed down to the third file has not thereby said that they want to
+        review only the third file, and a review that covered one recording
+        would make them take the same decision once per file.
         """
-        audio_file = self._model.file_at(self._table.selected_row())
-        if audio_file is None:
-            self._set_status(
-                "Highlight a recording in the file list to review its transcript.",
-                alert=True,
-                urgent=True,
-            )
-            return
-        store = self._transcript_store(audio_file.path)
-        if not store.has_transcript:
-            self._set_status(
-                f"{audio_file.name} has not been transcribed yet, so there is nothing "
-                "to review.",
-                alert=True,
-                urgent=True,
-            )
-            return
-        transcript = store.load()
-        if transcript is None:
-            self._set_status(
-                f"The transcript for {audio_file.name} could not be read. The file at "
-                f"{store.transcript_path} may be damaged.",
-                alert=True,
-                urgent=True,
-            )
-            return
-        self.open_review(audio_file.path, transcript)
+        self.open_project_review()
 
-    def open_review(self, recording: Path, transcript: Transcript) -> ReviewWindow:
-        """Show the words a transcript could not settle, and keep the corrections.
+    def open_project_review(self, land_on: str | None = None) -> ReviewWindow | None:
+        """Open the review window on this folder, or say why it cannot be opened.
 
-        Only one review window is kept. Opening a second on another recording
-        closes the first, because two windows both driving the one audio
-        player would fight over it, and the user would hear whichever won.
+        ``land_on`` is the file name of a recording to put the person on when
+        the window appears, which is how finishing a transcription hands over.
+        They asked to review what has just been transcribed, so they should
+        arrive on a word from it rather than wherever they left off last week.
+        Nothing is lost when that recording has no words waiting: the window
+        opens where the project says the person had got to, and says so.
 
-        The window is a child of this one so that Qt disposes of it when the
-        application closes, and the previous one is asked to go explicitly
-        rather than being left to the garbage collector, which would otherwise
-        keep it and its player connections alive indefinitely.
+        Returns the window, or ``None`` when there was nothing to open it on.
         """
-        store = self._transcript_store(recording)
-        previous = self._review_window
-        self._review_window = ReviewWindow(
-            transcript,
-            self._player,
-            save_correction=lambda corrected: self._save_correction(store, corrected),
+        if self._folder is None:
+            self._set_status(
+                "Select a folder before reviewing. A review covers the whole folder "
+                "rather than one recording.",
+                alert=True,
+                urgent=True,
+            )
+            return None
+        if not self._file_list_is_current:
+            # The folder has not been read this run, so the file list says
+            # nothing about what is in it. Refusing on that basis would be
+            # telling the person their folder is empty when the truth is only
+            # that we have not looked yet.
+            self._set_status(
+                f"{self._folder} has not been read yet, so there is nothing to review "
+                "from. Try again once the file list has filled in.",
+                alert=True,
+                urgent=True,
+            )
+            return None
+
+        recording_names, recording_paths, stores = self._folder_recordings()
+        if not recording_names:
+            self._refuse_empty_review([])
+            return None
+
+        # Any review already open goes now, before this one reads the project
+        # file, and the order is the whole point rather than tidiness. A review
+        # window writes the project as it closes, to record where the person
+        # had got to. Closing it after this opening had read, analysed and
+        # saved the project would put the window's older copy back over the
+        # top, and the new window would then load that: the analysis just run
+        # would be silently undone, and a recording transcribed since the last
+        # review would show none of its words. Closing first means the two
+        # writes happen in the order they were caused in.
+        self._close_review_window()
+        reader = _TranscriptReader(stores)
+        project_store = ProjectStore(self._folder)
+        # Loading this folder's own project is what resumes it: the groups,
+        # the decisions, the rules, the settings and the marker saying where
+        # the person had got to all come from the file in this folder and from
+        # nowhere else. A folder that has never been reviewed comes back as an
+        # empty project rather than as a failure.
+        state = project_store.load()
+        analysing = self._recordings_to_analyse(state, recording_names, stores)
+        corrected, problems = self._answer_with_project_rules(state, analysing, reader)
+        gathered: dict[str, list[FlaggedItem]] = {}
+        # The folder listing is handed over as well as the shorter list of
+        # recordings to read, and the two are different questions. The second
+        # says which transcripts have to be parsed on this run; the first says
+        # which recordings the folder still holds at all, which is the only
+        # way the analysis can tell a file somebody deleted from one that
+        # could not be read just now. Both look identical to the loader.
+        state = grouping.reprocess(
+            state,
+            analysing,
+            self._reading_and_noting(reader, gathered),
+            present_recordings=recording_names,
+        )
+        state.flagged = _flagged_after(state.flagged, analysing, gathered)
+        written, unwritten_problems = self._write_recorded_answers(state, analysing, reader)
+        corrected += written
+        problems.extend(unwritten_problems)
+
+        damaged = set(reader.damaged)
+        if damaged == set(recording_names):
+            # Everything this folder had was tried and none of it could be
+            # read. Opening a window on it would show an empty review of five
+            # recordings and say nothing about why, which is worse than saying
+            # plainly that there is nothing here.
+            self._refuse_empty_review(reader.damaged)
+            return None
+        # The window is given the recordings whose transcripts can be read. A
+        # file already known to be damaged is left out of the list rather than
+        # offered and then refused, so that nothing in the window stands for a
+        # recording there is nothing to show for. One that goes bad later is a
+        # different matter and cannot be foreseen: the loader answers with
+        # nothing and says so at the time.
+        readable = [name for name in recording_names if name not in damaged]
+
+        # Stamped here rather than left as the analysis wrote it, and the
+        # reason is precision rather than pedantry. The analysis records whole
+        # seconds, and the corrections above are written in the same second it
+        # records, so every file this opening touched would look newer than the
+        # analysis that produced it and be read again pointlessly on the next
+        # opening. Stamping after the last write, to the microsecond, makes the
+        # comparison in _recordings_to_analyse mean exactly what it says.
+        state.processed_at = datetime.now().astimezone().isoformat()
+        if not project_store.save(state):
+            problems.append(
+                f"The review of this folder could not be saved to {project_store.path}."
+            )
+
+        # The review window gets a player of its own rather than sharing this
+        # window's. Two windows driving one player fight over what is loaded:
+        # this window loads whatever the highlight is on, the review window
+        # loads whichever recording the selected occurrence belongs to, and
+        # whichever moved last wins, so the person hears the wrong recording
+        # roughly half the time. It also keeps reviewing out of the player
+        # panel, whose position, duration and transport buttons would
+        # otherwise follow words the person is not looking at.
+        player = AudioPlayer()
+        window = ReviewWindow(
+            self._folder,
+            readable,
+            reader.load,
+            recording_paths,
+            project_store,
+            player,
+            save_correction=(
+                lambda name, changed: self._save_correction(reader, name, changed)
+            ),
             parent=self,
         )
-        if previous is not None:
-            previous.close()
-            previous.deleteLater()
-        self._review_window.show()
-        self._set_status(f"Reviewing {recording.name}.", alert=True)
-        return self._review_window
+        # Given its parent after the window exists rather than before, so that
+        # Qt destroys the player along with the window it belongs to. A player
+        # parented to this window instead would outlive every review and go on
+        # holding an open media handle on a file the person has finished with.
+        player.setParent(window)
+        self._review_window = window
+        self._review_player = player
+        window.show()
+
+        # Landed silently, because the sentence below has more to say than the
+        # row does and used to be cut across by it. The window's own
+        # announcement is the right thing everywhere else, and this is the one
+        # caller with something better.
+        landed = land_on is not None and window.select_recording(
+            land_on, announce_arrival=False
+        )
+        message = self._review_opening_message(
+            len(readable), corrected, reader.damaged, land_on, landed, problems
+        )
+        # On the screen only. The main window is behind the review window by
+        # now, and an announcement raised from a window that is not in front is
+        # unreliable across screen readers -- and this one used to arrive
+        # assertively, on top of the review window's own, so the two facts a
+        # person most needed fought each other. The sentence is still written
+        # here for anyone who can look at it.
+        self._set_status(message)
+        self._land_in_review(window, message, urgent=bool(problems))
+        # Only now, so that damage found while opening is reported once, in the
+        # sentence above, rather than twice. From here on a transcript that
+        # turns out to be unreadable is found when the person reaches it, which
+        # is the price of not reading the folder in advance, and it is said out
+        # loud at that moment rather than being swallowed.
+        reader.on_damaged = self._report_damaged_transcript
+        return window
+
+    @staticmethod
+    def _land_in_review(window: ReviewWindow, message: str, urgent: bool) -> None:
+        """Put the person into the review window, in one place and with one sentence.
+
+        Two things happen here and the order between them is the whole point.
+
+        The focus is placed first, on the first list, so that the screen
+        reader reads out the word the person has been put on. Left to itself,
+        the focus lands on whichever control Qt decides is first in a window
+        that has just been shown, which happens to be that list today and is
+        nobody's decision. A window whose starting point depends on the widget
+        order is a window that will one day open somewhere else because
+        somebody added a control.
+
+        The sentence is announced second, so that it follows the row rather
+        than talking over it. It carries every fact the person cannot see and
+        cannot get anywhere else: how many recordings are in the review, how
+        many words a rule they accepted earlier has already corrected on their
+        behalf in files nobody has opened, which transcripts could not be read,
+        and where they have been put down. It is raised on the review window
+        because that is the window in front.
+
+        It interrupts only when something went wrong. A problem is worth
+        cutting a row reading short for; a count is not.
+        """
+        window.focus_word_list()
+        announce(window, message, urgent=urgent)
+
+    def _report_damaged_transcript(self, recording_name: str) -> None:
+        """Say that a transcript could not be read, at the moment that is found.
+
+        The last sentence is the important one and it is not padding. A
+        transcript that could not be read is a transcript that could not be
+        read, and nothing more: the words of that recording are still in the
+        review, still in their groups, and still carrying every decision the
+        person has made about them. Somebody hearing only that a file could not
+        be read would reasonably conclude their work on it had gone, and would
+        either redo it or stop trusting the window, so the message says plainly
+        that it has not.
+
+        This is deliberately different from what is said at the top of the
+        opening, where a recording found unreadable really is left out of the
+        review before the window is given anything. Here the window is already
+        open and the recording is in it.
+        """
+        self._set_status(
+            f"The transcript for {recording_name} could not be read just now, so its "
+            "words cannot be shown or played. Nothing you have decided about them has "
+            "been lost.",
+            alert=True,
+            urgent=True,
+        )
+
+    def _folder_recordings(
+        self,
+    ) -> tuple[list[str], dict[str, Path], dict[str, TranscriptStore]]:
+        """Every recording in this folder that has a transcript, named not read.
+
+        Asking whether a transcript file exists costs one look at the file
+        system; reading it costs tens of megabytes. So this settles which
+        recordings are in the review and reads none of them, and whether a
+        transcript is actually readable is found out later, by whoever first
+        needs its contents.
+
+        That is a real loss and it is worth naming rather than glossing over.
+        A damaged transcript used to be caught here, before the window opened,
+        and now it cannot be, because catching it means parsing every file in
+        the folder and parsing every file in the folder is the cost being
+        removed. What replaces it is honesty about the order of events: the
+        opening message reports the damage found while opening, and anything
+        found afterwards is announced the moment it is found. Nothing claims
+        the folder is sound.
+
+        A recording that has never been transcribed is simply not reviewable
+        content and is left out. It is emphatically not a reason to refuse:
+        the person may well be standing on the one file nobody has transcribed
+        while the other forty in the folder are full of words waiting.
+        """
+        recording_names: list[str] = []
+        recording_paths: dict[str, Path] = {}
+        stores: dict[str, TranscriptStore] = {}
+        for audio_file in self._model.files():
+            store = self._transcript_store(audio_file.path)
+            if not store.has_transcript:
+                continue
+            # Keyed on the file name with its extension, which is what an
+            # occurrence records as the recording it belongs to, and which
+            # keeps meeting.m4a and meeting.wav apart.
+            name = audio_file.path.name
+            recording_names.append(name)
+            recording_paths[name] = audio_file.path
+            stores[name] = store
+        return recording_names, recording_paths, stores
+
+    def _recordings_to_analyse(
+        self,
+        state: ProjectState,
+        recording_names: list[str],
+        stores: dict[str, TranscriptStore],
+    ) -> list[str]:
+        """Which recordings this opening has to read, and why the rest are spared.
+
+        Reading one transcript at a time made the memory affordable but did
+        nothing about the time: analysing fifty recordings still means parsing
+        fifty transcripts, which is most of a minute of somebody waiting for a
+        window. What makes opening quick is not reading them faster but not
+        reading the ones that cannot have changed, and the project file already
+        holds every occurrence found in those.
+
+        A recording is read again when either of two things is true. Its
+        transcript has been written since the analysis last ran, so whatever it
+        says now may not be what was analysed. Or the project saves nothing
+        about it at all, which is the only honest reading of a recording it has
+        never recorded a word of: it may be one transcribed this morning whose
+        shaky words have never been seen, and it may equally be one that was
+        analysed and had nothing in it worth saving. Telling those two apart is
+        not possible without reading the file, and getting it wrong in the
+        first direction means a recording's shaky words never reach the person
+        at all, silently, which is the one failure this feature exists to
+        prevent. So the ambiguous case is always read, and the cost of that is
+        re-reading the handful of recordings that genuinely had nothing to say.
+
+        Both a weak word and a flagged one count as the project having a record
+        of a recording. They are two different lists for good reasons, but the
+        question here is only whether anything has ever looked at the file, and
+        either of them answers it. Leaving the flagged words out would re-read
+        every recording whose words are all strong and some of which some rule
+        objected to, on every single opening, for no gain.
+
+        Where the project has never been analysed, or its stamp cannot be
+        understood, everything is read. That is the first opening of a folder,
+        and it is the one that is honestly expensive.
+
+        The recordings written during this very opening, by a rule correcting a
+        word, come back newer than the stamp and are therefore read once more
+        on the next opening. That settles itself after that one run, because
+        the next analysis stamps a time later than the files and writes nothing
+        further to them.
+        """
+        processed = _analysis_time(state.processed_at)
+        if processed is None:
+            return list(recording_names)
+        analysed = {occurrence.recording_name for occurrence in state.occurrences} | {
+            item.recording_name for item in state.flagged
+        }
+        wanted: list[str] = []
+        for name in recording_names:
+            if name not in analysed:
+                wanted.append(name)
+                continue
+            store = stores.get(name)
+            try:
+                written = store.transcript_path.stat().st_mtime
+            except OSError:
+                # The file cannot even be asked about. Read it, so that the
+                # trouble is reported by whoever tries rather than becoming a
+                # recording quietly left out of the review.
+                wanted.append(name)
+                continue
+            if written >= processed:
+                wanted.append(name)
+        return wanted
+
+    @staticmethod
+    def _reading_and_noting(
+        reader: _TranscriptReader,
+        gathered: dict[str, list[FlaggedItem]],
+    ) -> Callable[[str], Transcript | None]:
+        """A loader that also takes the flagged words out of what it reads.
+
+        The analysis walks the folder one recording at a time and lets each
+        transcript go, which is the only pass over the folder anything makes.
+        The words some rule in the pipeline flagged can be found nowhere but in
+        a transcript, so they are taken here, on the way past, and saved into
+        the project. It is worth being blunt about what the alternative costs,
+        because the alternative looks so much simpler: reading the folder when
+        the review window opens, to pick these words out, is 37 seconds and
+        1.6 GB on fifty hour-long recordings, and it is paid every time
+        somebody presses Ctrl+R rather than once when the folder is analysed.
+
+        A recording that could not be read leaves nothing here, and
+        :func:`_flagged_after` is what makes sure that means "keep what was
+        already known about it" rather than "it has no flagged words".
+
+        The loader must still read one recording only when it is asked for it.
+        Anything that reads them all in advance has undone the whole
+        arrangement, whatever it is spelled like.
+        """
+
+        def load(recording_name: str) -> Transcript | None:
+            transcript = reader.load(recording_name)
+            if transcript is not None:
+                gathered[recording_name] = flagged_in(recording_name, transcript)
+            return transcript
+
+        return load
+
+    def _answer_with_project_rules(
+        self,
+        state: ProjectState,
+        recording_names: list[str],
+        reader: _TranscriptReader,
+    ) -> tuple[int, list[str]]:
+        """Answer this folder's transcripts with the replacements already accepted.
+
+        A file transcribed this morning is answered by every replacement the
+        person accepted last week, without their being asked the same question
+        twice. That is what this does, and it runs before the analysis rather
+        than after it for one reason worth stating: a rule fires on a word the
+        services were *confident* about as readily as on a weak one, and the
+        analysis only ever looks at the weak ones.
+
+        That is not an oversight in the analysis. The words a service gets
+        confidently wrong are precisely the proper names, so a correction that
+        only reached words already in doubt would miss the whole case for
+        remembering corrections at all. What makes it safe to rewrite a word
+        nobody has questioned is that nothing is lost: the word keeps what it
+        originally said, the occurrence records which rule changed it, and
+        rules never leave this folder.
+
+        The occurrences that come back are put into the project before the
+        analysis runs, so that the analysis knows those words are already
+        spoken for and does not find them a second time.
+
+        Only recordings the project has never analysed are offered here, and
+        that restriction is the important part rather than an optimisation.
+        This step judges a word on the transcript alone: it protects a word a
+        person corrected by hand, because the transcript records that, and it
+        can see nothing else the person decided. A recording the project
+        already holds occurrences for is full of things it cannot see: a word
+        somebody looked at and confirmed was right as detected, or one they
+        took out of its group on purpose. Rewriting those would overrule a
+        person's decision with a general rule, which is the wrong way round.
+        They belong to the analysis, which leaves settled work alone. A
+        recording with nothing saved against it is either genuinely new or held
+        nothing worth saving, and in neither case is there a decision here to
+        overrule.
+
+        A folder with no rules yet is the ordinary case and is skipped
+        outright, so that a first review does not walk every word of every
+        recording to discover that there was nothing to say about any of them.
+        """
+        if not state.rules:
+            return 0, []
+        analysed = {occurrence.recording_name for occurrence in state.occurrences}
+        answered_count = 0
+        problems: list[str] = []
+        for name in recording_names:
+            if name in analysed:
+                continue
+            transcript = reader.load(name)
+            if transcript is None:
+                continue
+            corrected, answered, _queued = grouping.apply_rules(state, transcript, name)
+            if not answered:
+                continue
+            state.occurrences.extend(answered)
+            answered_count += len(answered)
+            # Written and let go one recording at a time, rather than gathered
+            # up and saved at the end, because gathering them up is holding the
+            # folder in memory by another name.
+            if not reader.save(name, corrected):
+                problems.append(self._unsaved_corrections(name, reader))
+        return answered_count, problems
+
+    def _write_recorded_answers(
+        self,
+        state: ProjectState,
+        recording_names: list[str],
+        reader: _TranscriptReader,
+    ) -> tuple[int, list[str]]:
+        """Make in the transcripts any correction the analysis only wrote down.
+
+        The analysis records that a rule answered a word and deliberately stops
+        there; writing the word is left to whoever called it. This is the
+        easiest thing in the whole feature to get wrong, because an occurrence
+        that says a rule answered it looks exactly like a job that has been
+        done, and it is a job still to do. Read the other way round, the person
+        ends up with a project insisting a word was corrected and a transcript
+        that still says the old thing.
+
+        Only the recordings just analysed are considered, and that is what
+        keeps this cheap rather than a second pass over the folder. An answer
+        that has not been written can only have come from an analysis, and the
+        project is saved after the writing here, so a run that stopped part way
+        through never reached the disk at all and left no contradiction behind
+        it. What this does catch is a contradiction written by something else,
+        and that recording is looked at again the next time anything analyses
+        it.
+
+        Whether the work has already been done is read from the transcript
+        rather than from a flag, because the transcript is the only thing that
+        really knows. A word that already reads as its replacement was
+        corrected on some earlier opening, and correcting it a second time
+        would record the correction itself as what the services originally
+        said, which is the one piece of evidence that cannot be recovered.
+        """
+        waiting: dict[str, list[Occurrence]] = {}
+        wanted = set(recording_names)
+        for occurrence in state.occurrences:
+            if not occurrence.auto_applied or occurrence.replacement is None:
+                continue
+            if occurrence.recording_name not in wanted:
+                continue
+            waiting.setdefault(occurrence.recording_name, []).append(occurrence)
+
+        applied = 0
+        problems: list[str] = []
+        # In the order the recordings were named, so that two openings over the
+        # same folder do the same things in the same order.
+        for name in recording_names:
+            outstanding = waiting.get(name)
+            if not outstanding:
+                continue
+            transcript = reader.load(name)
+            if transcript is None:
+                continue
+            changed = False
+            for occurrence in outstanding:
+                token = next(
+                    (item for item in transcript.tokens if item.id == occurrence.token_id),
+                    None,
+                )
+                if token is None or token.text == occurrence.replacement:
+                    continue
+                transcript = transcript.with_correction(
+                    occurrence.token_id, text=occurrence.replacement
+                )
+                changed = True
+                applied += 1
+                # The rule's tally is raised here rather than where the answer
+                # was decided, because here is where it took effect. A rule
+                # credited with a correction that was never written would tell
+                # the person it had done work it had not done.
+                #
+                # Counted through the grouping module rather than by hand,
+                # because the Review window writes a rule's correction too and
+                # the tally must say the same thing whichever of the two did
+                # the work. It said different things until it was made one
+                # function, and which answer the person saw depended on a path
+                # through the code that nothing on the screen mentions.
+                if occurrence.applied_rule_id is not None:
+                    grouping.note_rule_applied(state, occurrence.applied_rule_id)
+            if changed and not reader.save(name, transcript):
+                problems.append(self._unsaved_corrections(name, reader))
+        return applied, problems
+
+    def _unsaved_corrections(self, recording_name: str, reader: _TranscriptReader) -> str:
+        """How to say that a rule's correction did not reach the disk.
+
+        This is the worst outcome available in the whole opening sequence,
+        because the project file is about to record the correction as having
+        happened. So it becomes a sentence the person hears rather than a line
+        in a log nobody opens.
+        """
+        path = reader.transcript_path(recording_name)
+        where = "its transcript file" if path is None else str(path)
+        return f"The automatic corrections to {recording_name} could not be saved to {where}."
+
+    def _review_opening_message(
+        self,
+        recordings: int,
+        corrected: int,
+        damaged: list[str],
+        land_on: str | None,
+        landed: bool,
+        problems: list[str],
+    ) -> str:
+        """What to say about a review that has just opened.
+
+        Every part of this is something the person cannot see for themselves
+        and would have to be told. The automatic corrections matter most: words
+        have been rewritten in files nobody has opened, and a change made on
+        somebody's behalf that is never mentioned is indistinguishable from a
+        transcript that was always wrong.
+
+        This is the whole of what is said, rather than one of two sentences
+        racing each other, so it also has to say where the person has been put
+        down. Landing on the recording they asked about is silent now, and a
+        review that opened somewhere without saying so would leave somebody
+        working out where they are from the first row they hear.
+        """
+        parts = [f"Reviewing {_count(recordings, 'recording')} in {self._folder}."]
+        if corrected:
+            was = "was" if corrected == 1 else "were"
+            parts.append(
+                f"{_count(corrected, 'word')} {was} corrected automatically from "
+                "replacements you have already accepted in this folder."
+            )
+        if damaged:
+            is_are = "is" if len(damaged) == 1 else "are"
+            # What was found while opening, not a verdict on the folder.
+            # Transcripts are read one at a time as they are wanted, so a file
+            # nothing has needed yet has not been looked at, and saying the
+            # rest are sound would be a claim nobody has checked.
+            parts.append(
+                f"{_count(len(damaged), 'transcript')} could not be read and {is_are} "
+                f"not in this review: {', '.join(damaged)}."
+            )
+        if land_on is not None and landed:
+            parts.append(f"You are on the first word waiting in {land_on}.")
+        elif land_on is not None:
+            parts.append(
+                f"There is nothing waiting in {land_on}, so the review opens where you "
+                "last left it."
+            )
+        parts.extend(problems)
+        return " ".join(parts)
+
+    def _refuse_empty_review(self, damaged: list[str]) -> None:
+        """Say that the folder holds nothing to review, and why.
+
+        The wording leads with the project rather than with a file. The person
+        did not ask about the recording the highlight happens to be on, so
+        telling them that recording has not been transcribed would answer a
+        question they did not ask and send them off to transcribe one file when
+        the folder needs all of them.
+        """
+        if damaged:
+            message = (
+                "There is nothing in this project to review. Every transcript in "
+                f"{self._folder} could not be read, so the files may be damaged: "
+                f"{', '.join(damaged)}."
+            )
+        else:
+            message = (
+                "There is nothing in this project to review. Nothing in "
+                f"{self._folder} has been transcribed yet."
+            )
+        self._set_status(message, alert=True, urgent=True)
+
+    def _close_review_window(self) -> None:
+        """Get rid of the review window and its player, in that order.
+
+        Only one review window is kept. Two of them would be two views of one
+        project file, each writing over the other's idea of what the person had
+        decided, and the loser of that race is a decision that quietly did not
+        happen.
+
+        The window is asked to go explicitly rather than being left to the
+        garbage collector, which would otherwise keep it, its player and their
+        signal connections alive indefinitely. The player is stopped before the
+        window is closed, because deletion only takes effect the next time the
+        event loop runs and the audio would otherwise carry on playing until
+        it did.
+        """
+        window = self._review_window
+        player = self._review_player
+        self._review_window = None
+        self._review_player = None
+        if player is not None:
+            player.stop()
+        if window is not None:
+            window.close()
+            # The player is a child of the window, so it goes with it.
+            window.deleteLater()
 
     def _transcript_store(self, recording: Path) -> TranscriptStore:
         """The transcript folder beside one recording, named as the settings say."""
@@ -784,16 +1401,40 @@ class MainWindow(QMainWindow):
             self._settings.transcription.processing.transcript_folder_suffix,
         )
 
-    def _save_correction(self, store: TranscriptStore, transcript: Transcript) -> None:
+    def _save_correction(
+        self,
+        reader: _TranscriptReader,
+        recording_name: str,
+        transcript: Transcript,
+    ) -> None:
         """Write a corrected transcript back, and say so plainly if that failed.
 
-        A correction the user made and believes is saved, but is not, is the
+        A correction the person made and believes is saved, but is not, is the
         one failure here that must never pass quietly, because they will only
         find out about it after closing the window that still held the work.
+
+        It goes through the same reader the review is reading from, so the
+        corrected transcript is the one in hand afterwards. Saving straight to
+        the file instead would leave the reader holding the version from before
+        the correction, and the next glance at that recording would show the
+        person the word they had just changed.
+
+        A recording this review does not know is reported rather than turned
+        into a path, because guessing a path from a name is how a correction
+        ends up in the wrong folder.
         """
-        if not store.save(transcript):
+        path = reader.transcript_path(recording_name)
+        if path is None:
             self._set_status(
-                f"The correction could not be saved to {store.transcript_path}.",
+                f"The correction to {recording_name} could not be saved, because that "
+                "recording is not one of the ones being reviewed.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        if not reader.save(recording_name, transcript):
+            self._set_status(
+                f"The correction could not be saved to {path}.",
                 alert=True,
                 urgent=True,
             )
@@ -1004,12 +1645,162 @@ class MainWindow(QMainWindow):
         self._player.stop()
         # The review window is a separate window rather than a dialog, so
         # closing this one does not close it. Left open it would keep the
-        # application running with no main window and a player that has just
-        # been stopped underneath it.
-        if self._review_window is not None:
-            self._review_window.close()
+        # application running with no main window, with a player of its own
+        # still holding a file open.
+        self._close_review_window()
         self._save_session()
         super().closeEvent(event)
+
+
+class _TranscriptReader:
+    """Reads a folder's transcripts one at a time, and never more than one.
+
+    This exists because of a measurement. Handing the Review window every
+    transcript of a folder at once was tried first, and on fifty hour-long
+    recordings it took 37 seconds and held about 1.6 GB of live objects, every
+    time somebody pressed Ctrl+R. A transcript carries every service's answer
+    for every word and every candidate that was weighed, so tens of megabytes
+    an hour is what it genuinely costs; the mistake was reading fifty of them
+    to show a list the project file already describes.
+
+    So nothing here reads anything until it is asked for a particular
+    recording, and the whole point is lost the moment somebody finds that
+    awkward and reads them all into a dictionary in advance. Whatever it is
+    spelled like, that is the 1.6 GB coming back.
+
+    Exactly one transcript is held, the one last read. That is not a cache in
+    any interesting sense and it is not meant to grow into one: holding two
+    doubles the peak, and holding the folder is where this started. What the
+    one buys is the inner loop of reviewing, where a person moves between
+    several occurrences of the same recording in a row and would otherwise
+    re-read tens of megabytes on every arrow key.
+
+    A transcript that cannot be read is reported rather than hidden, but only
+    once and only when it is actually reached, because under this arrangement
+    nobody knows a file is damaged until they try to read it. The name is kept
+    in :attr:`damaged` for whoever is composing a message, and ``on_damaged``
+    is called so that damage found long after the window opened can still be
+    said out loud.
+    """
+
+    def __init__(
+        self,
+        stores: dict[str, TranscriptStore],
+        on_damaged=None,
+    ) -> None:
+        self._stores = stores
+        self.on_damaged = on_damaged
+        self._name: str | None = None
+        self._transcript: Transcript | None = None
+        self._damaged: list[str] = []
+
+    @property
+    def damaged(self) -> list[str]:
+        """The recordings whose transcripts turned out not to be readable.
+
+        This is what has been found so far and nothing more, because a file is
+        only known to be damaged once something has tried to read it. It must
+        never be read as "and the rest are fine".
+        """
+        return list(self._damaged)
+
+    def load(self, recording_name: str) -> Transcript | None:
+        """The transcript of one recording, or ``None`` if it cannot be read."""
+        if recording_name == self._name:
+            return self._transcript
+        store = self._stores.get(recording_name)
+        transcript = None if store is None else store.load()
+        if transcript is None and recording_name not in self._damaged:
+            self._damaged.append(recording_name)
+            if self.on_damaged is not None:
+                self.on_damaged(recording_name)
+        self._name = recording_name
+        self._transcript = transcript
+        return transcript
+
+    def save(self, recording_name: str, transcript: Transcript) -> bool:
+        """Write a corrected transcript back, and hold it as the one in hand.
+
+        Holding it matters as much as writing it. Whoever reads this recording
+        next has to see the correction, and a reader that answered from the
+        disk while the corrected copy sat in memory would show a person the
+        word they had just changed.
+        """
+        store = self._stores.get(recording_name)
+        if store is None or not store.save(transcript):
+            return False
+        self._name = recording_name
+        self._transcript = transcript
+        return True
+
+    def transcript_path(self, recording_name: str) -> Path | None:
+        store = self._stores.get(recording_name)
+        return None if store is None else store.transcript_path
+
+
+def _flagged_after(
+    remembered: list[FlaggedItem],
+    analysed: list[str],
+    gathered: dict[str, list[FlaggedItem]],
+) -> list[FlaggedItem]:
+    """The project's flagged words after one analysis, kept honest both ways.
+
+    A recording that was read is described entirely by what it was just found
+    to say. Its old entries are dropped rather than merged with the new ones,
+    and that is the whole answer to a word that has gone from a regenerated
+    transcript: it is not carried forward, so it can never become a row
+    pointing at a word nobody can play or correct. Merging would keep it for
+    ever, because nothing later would ever have a reason to look for it again.
+
+    A recording that was not read keeps exactly what the project already knew
+    about it. That covers two quite different cases and is right for both. One
+    was skipped because nothing about it can have changed since it was last
+    analysed, so what is remembered is current. The other could not be read at
+    all just now -- a file being written by another program, a disconnected
+    drive -- and throwing its words away would tell the person a recording had
+    nothing wrong in it when the truth is that nobody could look. That is the
+    same rule the analysis itself follows for the occurrences of a recording it
+    could not read, and for the same reason.
+
+    It does not cover a recording that has left the folder, and it must not be
+    asked to. That case is settled by the analysis, which is the only place
+    that has been told what the folder now holds, so what arrives here has
+    already had the deleted recordings taken out of it. ``remembered`` is
+    therefore the analysis's own list rather than a copy taken before it ran.
+    """
+    read = set(gathered)
+    kept = [item for item in remembered if item.recording_name not in read]
+    # In the order the recordings were analysed, so that two openings over one
+    # folder leave the file in the same order and it does not churn.
+    fresh = [item for name in analysed for item in gathered.get(name, ())]
+    return kept + fresh
+
+
+def _analysis_time(processed_at: str) -> float | None:
+    """When the analysis last ran, in seconds, or ``None`` if that is not known.
+
+    An empty or unreadable stamp comes back as ``None``, which the caller
+    reads as "no idea, so look at everything". Guessing a time here would mean
+    quietly skipping a recording on the strength of a date nobody could
+    justify, and a recording skipped is a set of shaky words that never reach
+    the person at all.
+    """
+    if not processed_at:
+        return None
+    try:
+        return datetime.fromisoformat(processed_at).timestamp()
+    except ValueError:
+        return None
+
+
+def _count(number: int, noun: str) -> str:
+    """Say "1 recording" or "3 recordings", so a count reads as English.
+
+    A sentence that reads as though it were assembled by a machine invites
+    the listener to distrust the number in it, and these numbers are read out
+    to somebody who cannot see the window they describe.
+    """
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
 def _encode(data: QByteArray) -> str | None:

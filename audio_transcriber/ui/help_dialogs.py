@@ -22,6 +22,25 @@ def keyboard_shortcuts_text(settings: Settings | None = None) -> str:
     The six skip commands move as far as the settings say, so the list is
     written out from the settings rather than fixed, and never tells the
     user something the buttons no longer do.
+
+    This text is not a documentation nicety. It is how somebody working by
+    ear finds out what the application can do, so a line that describes
+    behaviour the application no longer has is a defect of the same kind as a
+    button that does the wrong thing. Two things here are worth guarding when
+    this list is next edited.
+
+    The review window's two lists are the thing most easily described wrongly.
+    ``F3`` moves between the *occurrences* of one word, which is to say
+    between moments in different recordings, and ``Ctrl+F3`` moves between
+    words. Saying it the other way round -- which this list did say, before
+    the review became a thing done to a whole folder -- leaves somebody
+    pressing ``F3`` eight times, hearing the same surname eight times, and
+    concluding the window is stuck.
+
+    And the word is "word", not "group". The menus say "Next Word", the first
+    list is named "Word Groups", and a screen reader user hears "word", so
+    help text calling the same thing a group sends them looking for a control
+    that is not there.
     """
     settings = settings or Settings()
     short, medium, long = settings.skip_seconds
@@ -40,7 +59,9 @@ Files
                       if none are checked.
   Ctrl+T              Transcribe the checked files, or the highlighted one
                       if none are checked.
-  Ctrl+R              Review the transcript of the highlighted file.
+  Ctrl+R              Review the whole folder, not just the highlighted
+                      file. The same word is often said in several
+                      recordings, so a review covers all of them at once.
 
 In the Enhance Audio and Transcribe dialogs
   Tab                 Move between the settings. The panel at the bottom
@@ -48,11 +69,33 @@ In the Enhance Audio and Transcribe dialogs
   F1                  Explain every setting, in one window.
 
 In the review window
-  F2                  Correct the text of the highlighted word.
-  F3 and Shift+F3     Move to the next and previous word needing review.
-  F4                  Confirm the highlighted word as correct.
-  F5 and Shift+F5     Play the audio around it, and play a wider stretch.
-  F6                  Move to the next panel.
+  The review window holds two lists. The first is the words that need you.
+  The second is the occurrences of the word you are on, which is every
+  moment that word was said, in every recording in the folder. Deciding a
+  word once settles all of its occurrences.
+
+  Ctrl+F3             Go to the next word.
+  Ctrl+Shift+F3       Go to the previous word.
+  F3 and Shift+F3     Go to the next and previous occurrence of that word.
+  F2                  Move to the Replacement box for the word.
+  F4                  Confirm this one occurrence as correct.
+  Ctrl+I              Isolate this occurrence, which takes it out of its
+                      word and keeps it out when the folder is looked at
+                      again.
+  F5 and Shift+F5     Play the word again, and play a wider stretch around
+                      it. In this window F5 plays; in the file list it reads
+                      the folder again.
+  Ctrl+L              Process the low confidence words of the whole folder.
+  Ctrl+G              Group the words again, using the minimum confidence
+                      and the grouping tolerance as they now stand.
+  F6 and Shift+F6     Move to the next and previous panel.
+  Ctrl+Shift+Left     Give the lists more of the window.
+  Ctrl+Shift+Right    Give the details more of the window.
+  Everything else is on the menu bar: applying the replacement to the word or
+  to this occurrence only, marking a word correct as detected, applying the
+  speaker, confirming or rejecting the timing, setting the minimum
+  confidence, the grouping tolerance and the wait before playing, playing
+  automatically, and showing reviewed words and other uncertainties.
 
 Settings and closing
   Ctrl+comma          Open the Settings dialog.

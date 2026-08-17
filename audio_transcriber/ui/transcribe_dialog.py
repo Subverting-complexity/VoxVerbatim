@@ -28,7 +28,14 @@ it. A finished transcript usually has words in it that no service could
 settle, and those words are what the user actually has to do something
 about. The dialog therefore ends by saying how many there are and offering
 the two things worth doing next: opening the transcript folder, and opening
-the review window on the recording that needs it.
+the review window at the recording that needs it.
+
+That last one is worth being precise about, because it changed. The review
+covers the whole folder rather than the one recording just transcribed, and
+the recording named here is only where the person is put down in it. A shaky
+word in a file transcribed this morning is very often the same word as one
+already settled in a file transcribed last week, and a review that could see
+only the new file would hide the very decision that has already been taken.
 """
 
 from __future__ import annotations
@@ -775,8 +782,8 @@ class TranscribeDialog(QDialog):
         describe(
             self._review_button,
             "Open review window",
-            "Closes this dialog and opens the review window on the first recording "
-            "with words waiting to be settled.",
+            "Closes this dialog and opens the review window on this folder, starting "
+            "at the first recording with words waiting to be settled.",
         )
 
         self._close_button = self._buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
@@ -1056,6 +1063,10 @@ class TranscribeDialog(QDialog):
         on top of it would put the review window behind a dialog that cannot
         be dismissed. The request is recorded instead, this dialog closes, and
         the main window opens the review.
+
+        What the main window opens is the review of the whole folder. This
+        recording is where the person is put down in it, not the extent of
+        what they are shown.
         """
         return self._review_request
 
@@ -1237,7 +1248,8 @@ class TranscribeDialog(QDialog):
         # change as later ones finish.
         if self._summary is not None and chosen is not None:
             paragraphs.append(
-                f"The transcript folder and review window buttons act on {chosen.name}."
+                f"The transcript folder and review window buttons act on {chosen.name}. "
+                "The review covers the whole folder and simply starts there."
             )
         self._report_text.setPlainText("\n\n".join(paragraphs) or "Nothing was transcribed.")
         self._report_group.setVisible(True)

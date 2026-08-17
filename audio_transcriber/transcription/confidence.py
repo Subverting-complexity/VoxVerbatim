@@ -268,6 +268,64 @@ def assess_text(signals: TextSignals) -> ConfidenceAssessment:
     return ConfidenceAssessment(category, strength, components, tuple(reasons))
 
 
+# -- Saying the strength out loud ----------------------------------------
+
+#: What stands in for the strength of a word that has none. A sentence
+#: rather than a dash, a blank cell or a zero, and for three separate
+#: reasons. A blank cell is silent to a screen reader, so the listener hears
+#: the row's other columns and never learns that anything was missing. A
+#: dash conveys the meaning by a mark, which is exactly what the
+#: accessibility rules forbid. A zero would be a lie of the worst kind here,
+#: because "nobody measured this" and "this is as weak as a word can be" are
+#: opposite statements and only one of them puts the word at the top of the
+#: review queue.
+STRENGTH_NOT_MEASURED = "Not measured"
+
+
+def strength_percentage(strength: float | None) -> str:
+    """The strength as a phrase for a screen reader to read out.
+
+    "47 percent" rather than "47%". The symbol is not read the same way by
+    every screen reader at every punctuation setting, and one of the
+    readings is to skip it entirely, which would turn a percentage into a
+    bare number with no unit. Spelling the word out costs nothing and cannot
+    be misread.
+    """
+    if strength is None:
+        return STRENGTH_NOT_MEASURED
+    return f"{_whole_percent(strength)} percent"
+
+
+def strength_display(strength: float | None) -> str:
+    """The strength as a short string for a table cell.
+
+    The same figure as :func:`strength_percentage` and deliberately the same
+    rounding, so that what a person reads on the screen and what a screen
+    reader announces for the same cell can never differ. Only the unit is
+    written differently, because a column of cells has no room for the word
+    and the eye reads the symbol at a glance.
+    """
+    if strength is None:
+        return STRENGTH_NOT_MEASURED
+    return f"{_whole_percent(strength)}%"
+
+
+def _whole_percent(strength: float) -> int:
+    """The strength as a whole percentage point.
+
+    Whole points, not decimals. The strength is a weighing of evidence and
+    not a measurement of anything, so "47.3 percent" would advertise a
+    precision its inputs never had and invite somebody to read a difference
+    of a third of a point as meaningful. Whole points are enough to sort a
+    list by and enough to tell two words apart when they genuinely differ.
+
+    The value is clamped as well as rounded, so that a strength which
+    somehow arrived outside nought to one is shown at the nearest end of the
+    scale rather than as a nonsense like "4200%" on the screen.
+    """
+    return round(max(0.0, min(1.0, strength)) * 100)
+
+
 #: What each timing state is worth before the alignment quality is taken into
 #: account. The three exact states are the ones a word may be navigated to;
 #: the mapped ones put the right word in a span measured for another word,

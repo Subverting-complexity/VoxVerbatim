@@ -77,6 +77,7 @@ def _full_transcript() -> Transcript:
                 normalised_text="fifteen",
                 text_source=Provider.ELEVENLABS,
                 text_confidence=Confidence.HIGH,
+                confidence_strength=0.93,
                 start=12.25,
                 end=12.75,
                 timing_source=Provider.ELEVENLABS,
@@ -116,6 +117,7 @@ def _full_transcript() -> Transcript:
                 normalised_text="50000",
                 text_source=None,
                 text_confidence=Confidence.UNRESOLVED,
+                confidence_strength=0.21,
                 start=None,
                 end=None,
                 timing_source=Provider.DEEPGRAM,
@@ -427,6 +429,166 @@ def test_a_partly_damaged_transcript_keeps_what_it_can(tmp_path):
     assert loaded.speakers == []
     assert loaded.warnings == ["kept"]
     assert loaded.provider_results == {}
+
+
+# -- The composite confidence on each word --------------------------------
+
+
+def test_the_strength_behind_a_word_survives_the_round_trip(tmp_path):
+    """The number itself, not merely the category it happens to fall into.
+
+    Two words are checked rather than one, because the interesting failure
+    is a strength that is written but read back for the wrong word, and a
+    single-word fixture cannot show that.
+    """
+    store = TranscriptStore(tmp_path / "board-meeting.m4a")
+    store.save(_full_transcript())
+
+    loaded = store.load()
+
+    assert loaded is not None
+    assert [token.confidence_strength for token in loaded.tokens] == [0.93, 0.21]
+
+
+def test_the_strength_is_written_under_the_name_the_rest_of_the_feature_reads(tmp_path):
+    """The key on disk is part of the contract, so it is pinned here."""
+    store = TranscriptStore(tmp_path / "board-meeting.m4a")
+    store.save(_full_transcript())
+
+    data = json.loads(store.transcript_path.read_text(encoding="utf-8"))
+
+    assert data["tokens"][0]["confidence_strength"] == 0.93
+
+
+def test_whether_the_text_was_replaced_survives_the_round_trip(tmp_path):
+    """Under the key the rest of the feature reads, which is part of the contract."""
+    transcript = _full_transcript()
+    transcript.tokens[1].text_corrected = True
+    store = TranscriptStore(tmp_path / "board-meeting.m4a")
+    store.save(transcript)
+
+    data = json.loads(store.transcript_path.read_text(encoding="utf-8"))
+    loaded = store.load()
+
+    assert data["tokens"][0]["text_corrected"] is False
+    assert data["tokens"][1]["text_corrected"] is True
+    assert loaded is not None
+    assert [token.text_corrected for token in loaded.tokens] == [False, True]
+
+
+def test_a_word_corrected_before_the_flag_existed_is_still_known_to_be_corrected():
+    """Every transcript already on disk looks exactly like this.
+
+    Reading the missing flag as ``False`` would be a real loss rather than a
+    tidy default: a replacement rule refuses to touch a word whose text was
+    replaced, so the corrections in every older transcript would lose that
+    protection and be overwritten the first time the folder was analysed.
+    ``original_text`` is only ever written where the text was actually
+    replaced, so it answers the question exactly for those files.
+    """
+    loaded = transcript_from_dict(
+        {
+            "recording_name": "talk.m4a",
+            "tokens": [
+                {
+                    "id": "corrected",
+                    "text": "Bosch",
+                    "human_corrected": True,
+                    "original_text": "Bosh",
+                },
+                {
+                    "id": "timing-only",
+                    "text": "Bosh",
+                    "human_corrected": True,
+                },
+                {"id": "untouched", "text": "signed"},
+            ],
+        }
+    )
+
+    assert loaded is not None
+    assert [token.text_corrected for token in loaded.tokens] == [True, False, False]
+
+
+def test_a_damaged_text_corrected_flag_falls_back_rather_than_stopping_the_load():
+    """A value of the wrong type is read as though the field were absent."""
+    loaded = transcript_from_dict(
+        {
+            "recording_name": "talk.m4a",
+            "tokens": [
+                {"id": "nonsense", "text": "Bosch", "text_corrected": "yes",
+                 "original_text": "Bosh"},
+                {"id": "also", "text": "signed", "text_corrected": 1},
+            ],
+        }
+    )
+
+    assert loaded is not None
+    assert [token.text_corrected for token in loaded.tokens] == [True, False]
+
+
+def test_a_transcript_written_before_the_strength_existed_reads_as_unmeasured():
+    """Every transcript already on disk looks exactly like this.
+
+    The answer has to be "nobody worked this out", which is ``None``, and
+    not a zero. A zero would say the word is as weak as a word can be, and
+    every word of every transcript made before today would then arrive at
+    the top of the review queue.
+    """
+    loaded = transcript_from_dict(
+        {
+            "recording_name": "talk.m4a",
+            "tokens": [{"id": "old", "text": "hello", "text_confidence": "high"}],
+        }
+    )
+
+    assert loaded is not None
+    assert loaded.tokens[0].confidence_strength is None
+    assert loaded.tokens[0].text_confidence is Confidence.HIGH
+
+
+def test_a_damaged_strength_reads_as_unmeasured_rather_than_stopping_the_load():
+    """Three kinds of damage, and one honest answer to all of them.
+
+    A word instead of a number is a hand edit or a corrupted file. A number
+    far outside nought to one is the same damage in a shape that would pass
+    a type check, and clamping it to one would turn a broken file into a
+    word that looks thoroughly settled and is never shown to anybody again.
+    ``True`` is included because JSON booleans are integers in Python, and a
+    check that only asked whether the value was a number would let it
+    through as 1.0.
+    """
+    loaded = transcript_from_dict(
+        {
+            "recording_name": "talk.m4a",
+            "tokens": [
+                {"id": "text", "text": "one", "confidence_strength": "very good"},
+                {"id": "high", "text": "two", "confidence_strength": 42},
+                {"id": "negative", "text": "three", "confidence_strength": -0.5},
+                {"id": "boolean", "text": "four", "confidence_strength": True},
+            ],
+        }
+    )
+
+    assert loaded is not None
+    assert [token.text for token in loaded.tokens] == ["one", "two", "three", "four"]
+    assert all(token.confidence_strength is None for token in loaded.tokens)
+
+
+def test_the_ends_of_the_scale_are_kept_rather_than_treated_as_damage():
+    """Nought and one are real answers, and both sit on the boundary."""
+    loaded = transcript_from_dict(
+        {
+            "recording_name": "talk.m4a",
+            "tokens": [
+                {"id": "lowest", "text": "one", "confidence_strength": 0},
+                {"id": "highest", "text": "two", "confidence_strength": 1},
+            ],
+        }
+    )
+
+    assert loaded is not None
+    assert [token.confidence_strength for token in loaded.tokens] == [0.0, 1.0]
 
 
 def test_a_span_that_ends_before_it_starts_is_dropped(tmp_path):

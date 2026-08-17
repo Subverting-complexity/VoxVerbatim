@@ -15,6 +15,10 @@ Afrikaans is disabled.
 from __future__ import annotations
 
 from audio_transcriber.transcription.alignment import build_aligned_table
+from audio_transcriber.transcription.confidence import (
+    HIGH_CONFIDENCE_THRESHOLD,
+    category_for,
+)
 from audio_transcriber.transcription.model import (
     AlignmentStatus,
     AudioSpan,
@@ -112,6 +116,54 @@ def test_exact_agreement_is_accepted_with_high_confidence() -> None:
     assert all(token.text_confidence is Confidence.HIGH for token in tokens)
     assert all(token.alignment_status is AlignmentStatus.EXACT for token in tokens)
     assert all(not token.review_reasons for token in tokens)
+
+
+def test_every_settled_word_carries_the_strength_behind_its_category() -> None:
+    """The two saved answers about a word must never contradict each other.
+
+    This case is the one that can break it. Where every service says the
+    same thing, the word is accepted as high confidence by rule rather than
+    by arithmetic, because two of the three services report no confidence
+    figure at all and running unanimity back through the arithmetic would
+    mark the word down for that alone. The strength saved beside the
+    category has to follow it up, or the review window would leave the word
+    alone while the low-confidence sweep pulled the same word up as weak.
+    """
+    table = table_of(
+        spoken(Provider.ELEVENLABS, SENTENCE),
+        spoken(Provider.OPENAI, SENTENCE, timed=False),
+        spoken(Provider.MICROSOFT, SENTENCE, timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert all(token.text_confidence is Confidence.HIGH for token in tokens)
+    for token in tokens:
+        assert token.confidence_strength is not None
+        assert category_for(token.confidence_strength) is token.text_confidence
+
+
+def test_a_disputed_word_saves_the_strength_the_evidence_actually_reached() -> None:
+    """The promotion above is a floor, not a habit of writing down the floor.
+
+    A word the services argued about must keep its own number, because the
+    whole use of the number is to tell one weak word from another weak word
+    and decide which to look at first.
+    """
+    backbone = spoken(Provider.ELEVENLABS, SENTENCE, confidences=[0.4] * len(SENTENCE))
+    other = spoken(
+        Provider.OPENAI,
+        ["we", "should", "sign", "the", "contact", "tomorrow"],
+        timed=False,
+    )
+    table = table_of(backbone, other)
+
+    disputed = reconcile(table)[4]
+
+    assert disputed.text_confidence is not Confidence.HIGH
+    assert disputed.confidence_strength is not None
+    assert disputed.confidence_strength < HIGH_CONFIDENCE_THRESHOLD
+    assert category_for(disputed.confidence_strength) is disputed.text_confidence
 
 
 def test_an_exactly_agreed_word_keeps_the_measured_time() -> None:

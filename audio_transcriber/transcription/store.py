@@ -366,6 +366,28 @@ def _language_evidence_from_dict(data: Any) -> LanguageEvidence:
     return LanguageEvidence(scores=scores)
 
 
+def _strength_from(value: Any) -> float | None:
+    """Read a saved composite confidence back, or say there is not one.
+
+    Three different things all come back as ``None`` here, and the model
+    reads that one answer as "this was never worked out": the key is absent,
+    because the transcript predates the field; the value is not a number,
+    because the file was damaged or edited by hand; or the value is a number
+    outside nought to one, which is the same damage wearing a better
+    disguise.
+
+    The range check is the part worth explaining. Clamping a stray 42 to one
+    would turn a broken file into a word that looks thoroughly settled and
+    that nothing would ever put in front of a person again. Reading it as
+    unknown leaves the word outside every threshold instead of hiding it
+    inside one, which is the failure that can be noticed and corrected.
+    """
+    strength = _optional_number(value)
+    if strength is None or not 0.0 <= strength <= 1.0:
+        return None
+    return strength
+
+
 def _final_token_to_dict(token: FinalToken) -> dict[str, Any]:
     return {
         "id": token.id,
@@ -373,6 +395,7 @@ def _final_token_to_dict(token: FinalToken) -> dict[str, Any]:
         "normalised_text": token.normalised_text,
         "text_source": token.text_source.value if token.text_source else None,
         "text_confidence": token.text_confidence.value,
+        "confidence_strength": token.confidence_strength,
         "start": token.start,
         "end": token.end,
         "timing_source": token.timing_source.value if token.timing_source else None,
@@ -393,6 +416,7 @@ def _final_token_to_dict(token: FinalToken) -> dict[str, Any]:
         "review_reasons": [item.value for item in token.review_reasons],
         "llm_decision": token.llm_decision,
         "human_corrected": token.human_corrected,
+        "text_corrected": token.text_corrected,
         "original_text": token.original_text,
     }
 
@@ -410,6 +434,7 @@ def _final_token_from_dict(data: Any) -> FinalToken | None:
     token.text_confidence = _enum_of(
         Confidence, data.get("text_confidence"), Confidence.UNRESOLVED
     )
+    token.confidence_strength = _strength_from(data.get("confidence_strength"))
     token.start = _optional_number(data.get("start"))
     token.end = _optional_number(data.get("end"))
     token.timing_source = _optional_enum(Provider, data.get("timing_source"))
@@ -442,7 +467,30 @@ def _final_token_from_dict(data: Any) -> FinalToken | None:
     token.llm_decision = _optional_text(data.get("llm_decision"))
     token.human_corrected = _flag(data.get("human_corrected"))
     token.original_text = _optional_text(data.get("original_text"))
+    token.text_corrected = _text_corrected_from(data, token)
     return token
+
+
+def _text_corrected_from(data: dict[str, Any], token: FinalToken) -> bool:
+    """Whether this word's text was replaced, including in a file written before
+    the flag existed.
+
+    A missing ``text_corrected`` must not simply read as ``False``. Every
+    transcript written before this feature says nothing about the field, and
+    reading the silence as "never rewritten" would strip a word somebody
+    corrected by hand of the one thing that protects it: a replacement rule
+    refuses to touch a corrected word, so an old transcript would have its
+    corrections quietly overwritten the first time the folder was analysed.
+
+    The answer for those files is not a guess. ``original_text`` is written
+    only where the text was actually replaced, so a word that has one was
+    rewritten and a word that has none was not. That is the same fact the flag
+    records, read off the evidence that was already being saved.
+    """
+    stored = data.get("text_corrected")
+    if isinstance(stored, bool):
+        return stored
+    return token.original_text is not None
 
 
 def _provider_token_to_dict(token: ProviderToken) -> dict[str, Any]:

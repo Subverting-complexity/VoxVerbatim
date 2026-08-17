@@ -14,6 +14,7 @@ from audio_transcriber.transcription.confidence import (
     LOW_ACOUSTIC_THRESHOLD,
     REVIEW_REQUIRED_THRESHOLD,
     REVIEW_SUGGESTED_THRESHOLD,
+    STRENGTH_NOT_MEASURED,
     WEAK_ALIGNMENT_THRESHOLD,
     TextSignals,
     acoustic_confidence,
@@ -21,6 +22,8 @@ from audio_transcriber.transcription.confidence import (
     best_acoustic_confidence,
     category_for,
     speaker_confidence,
+    strength_display,
+    strength_percentage,
     timing_confidence,
 )
 from audio_transcriber.transcription.model import (
@@ -168,6 +171,84 @@ def test_a_person_who_corrected_the_word_ends_the_argument() -> None:
         TextSignals(support=0.1, acoustic=0.1, unresolved=True, human_corrected=True)
     )
     assert assessment.category is Confidence.HIGH
+    # The strength has to move with the category. Left at what the signals
+    # argued, it would keep pulling a word its owner has already settled back
+    # into anything that sorts or filters on the number.
+    assert assessment.strength == 1.0
+
+
+def test_the_category_is_the_one_the_strength_actually_falls_into() -> None:
+    """The saved number and the saved category must not contradict each other.
+
+    Both are written on to the word and both are read afterwards, so a word
+    marked high confidence carrying a strength below the high-confidence
+    threshold would be a word the review window left alone and the
+    low-confidence sweep pulled up, with nothing on either screen to explain
+    the difference. The two shortcuts that can break this are checked
+    elsewhere: the person's own correction just above, and the
+    unanimous-agreement rule in the reconciliation tests.
+    """
+    cases = [
+        TextSignals(support=0.95, runner_up=0.05, acoustic=0.95, alignment_quality=1.0),
+        TextSignals(support=0.8, runner_up=0.3, acoustic=0.6, alignment_quality=0.9),
+        TextSignals(support=0.6, runner_up=0.5, acoustic=0.4, alignment_quality=0.6),
+        TextSignals(support=0.3, runner_up=0.28, acoustic=0.2, alignment_quality=0.3),
+        TextSignals(support=0.05, runner_up=0.04, acoustic=0.1, alignment_quality=0.1),
+    ]
+    for signals in cases:
+        assessment = assess_text(signals)
+        assert assessment.category is category_for(assessment.strength)
+
+
+# -- Saying a strength out loud and showing it in a cell -----------------
+
+
+def test_a_strength_is_spoken_as_words_and_shown_as_a_symbol() -> None:
+    assert strength_percentage(0.47) == "47 percent"
+    assert strength_display(0.47) == "47%"
+
+
+def test_both_forms_of_the_same_strength_carry_the_same_number() -> None:
+    """A cell and its announcement disagreeing would be a bug nobody could see.
+
+    The person reading the screen and the person listening to it are often
+    the same person at different magnifications, and a figure that changed
+    between the two would be impossible to make sense of.
+    """
+    for strength in (0.0, 0.004, 0.126, 0.5, 0.666, 0.999, 1.0):
+        spoken = strength_percentage(strength).split(" ")[0]
+        assert strength_display(strength) == f"{spoken}%"
+
+
+def test_a_strength_is_rounded_to_whole_percentage_points() -> None:
+    # Not truncated, and not carried to a decimal place. The strength is a
+    # weighing of evidence rather than a measurement, so a tenth of a point
+    # would be precision the inputs never had.
+    assert strength_display(0.4712) == "47%"
+    assert strength_display(0.4759) == "48%"
+    assert strength_percentage(0.0) == "0 percent"
+    assert strength_percentage(1.0) == "100 percent"
+
+
+def test_a_word_nobody_measured_says_so_rather_than_showing_a_number() -> None:
+    """"Not measured" and "nought percent" are opposite statements.
+
+    One says there is no evidence either way, the other says the evidence is
+    as bad as it gets, and only the second belongs at the top of a review
+    queue. They must never be shown as the same thing.
+    """
+    assert strength_percentage(None) == STRENGTH_NOT_MEASURED
+    assert strength_display(None) == STRENGTH_NOT_MEASURED
+    assert strength_display(0.0) != STRENGTH_NOT_MEASURED
+    assert strength_percentage(0.0) != STRENGTH_NOT_MEASURED
+
+
+def test_the_unmeasured_text_is_a_phrase_a_screen_reader_can_read() -> None:
+    # Not a dash, not a blank and not a symbol. A blank cell is silent, and a
+    # mark conveys the meaning by appearance alone, which the accessibility
+    # rules treat as a functional failure rather than a cosmetic one.
+    assert STRENGTH_NOT_MEASURED.strip() == STRENGTH_NOT_MEASURED
+    assert any(character.isalpha() for character in STRENGTH_NOT_MEASURED)
 
 
 def test_every_factor_is_kept_so_the_answer_can_be_explained() -> None:

@@ -682,6 +682,7 @@ class _SdkClient:
         except ImportError as error:
             raise ProviderUnavailable(Provider.ASSEMBLYAI, PACKAGE) from error
         assemblyai.settings.api_key = api_key
+        assemblyai.settings.http_timeout = timeout_seconds
         self._assemblyai = assemblyai
         self._timeout_seconds = timeout_seconds
 

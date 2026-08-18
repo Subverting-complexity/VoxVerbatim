@@ -7,7 +7,6 @@ from audio_transcriber.transcription.context import (
     ASSEMBLYAI_MAXIMUM_KEYTERMS_UNIVERSAL_2,
     ASSEMBLYAI_MAXIMUM_KEYTERMS_UNIVERSAL_3_5_PRO,
     ASSEMBLYAI_MAXIMUM_PROMPT_WORDS,
-    ASSEMBLYAI_MAXIMUM_WORD_BOOST_TERMS,
     ASSEMBLYAI_UNIVERSAL_2,
     ASSEMBLYAI_UNIVERSAL_3_5_PRO,
     DEEPGRAM_ESTIMATED_TOKENS_PER_WORD,
@@ -198,13 +197,13 @@ def test_microsoft_is_sent_a_phrase_list_and_never_any_prose():
     assert written.prompt == ""
 
 
-def test_assemblyai_prefers_keyterms_and_keeps_word_boost_beside_them():
+def test_assemblyai_sets_keyterms_prompt():
     package = build_context_package(configuration(), terms("Vermeulen"))
 
     written = adapt_for(package, Provider.ASSEMBLYAI)
 
     assert written.parameters["keyterms_prompt"] == ["Vermeulen"]
-    assert written.parameters["word_boost"] == ["Vermeulen"]
+    assert "word_boost" not in written.parameters
     assert written.terms == ("Vermeulen",)
 
 
@@ -367,17 +366,6 @@ def test_the_assemblyai_prompt_is_cut_by_words_rather_than_characters():
 
     assert len(written.prompt.split()) == ASSEMBLYAI_MAXIMUM_PROMPT_WORDS
     assert written.prompt.endswith("elephant")
-
-
-def test_assemblyai_word_boost_keeps_to_its_own_conservative_limit():
-    package = build_context_package(
-        configuration(), many_terms(ASSEMBLYAI_MAXIMUM_KEYTERMS_UNIVERSAL_3_5_PRO)
-    )
-
-    written = adapt_for(package, Provider.ASSEMBLYAI, model=ASSEMBLYAI_UNIVERSAL_3_5_PRO)
-
-    assert len(written.parameters["word_boost"]) == ASSEMBLYAI_MAXIMUM_WORD_BOOST_TERMS
-    assert len(written.parameters["keyterms_prompt"]) > ASSEMBLYAI_MAXIMUM_WORD_BOOST_TERMS
 
 
 def test_an_assemblyai_phrase_of_too_many_words_is_dropped():

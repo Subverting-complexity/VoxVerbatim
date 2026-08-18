@@ -466,6 +466,19 @@ def test_the_recorded_request_holds_no_credential(tmp_path: Path) -> None:
     assert record.vocabulary_terms == ("Contoso",)
 
 
+def test_sdk_client_configures_api_key_and_http_timeout() -> None:
+    """The SDK client must propagate timeout_seconds to assemblyai.settings.http_timeout."""
+    import assemblyai as aai
+
+    original_timeout = aai.settings.http_timeout
+    try:
+        assemblyai._build_client(API_KEY, 1234.5)
+        assert aai.settings.api_key == API_KEY
+        assert aai.settings.http_timeout == 1234.5
+    finally:
+        aai.settings.http_timeout = original_timeout
+
+
 def block_import(monkeypatch, name: str) -> None:
     """Make one package look as though it was never installed."""
     real_import = builtins.__import__
@@ -476,3 +489,4 @@ def block_import(monkeypatch, name: str) -> None:
         return real_import(module, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+

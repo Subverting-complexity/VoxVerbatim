@@ -377,7 +377,7 @@ def _for_microsoft(package: ContextPackage) -> ProviderContext:
 
 
 def _for_assemblyai(package: ContextPackage, model: str | None) -> ProviderContext:
-    """AssemblyAI is shaped around its keyterms prompt, with the old list beside it.
+    """AssemblyAI is shaped around its keyterms prompt.
 
     How many keyterms it will take depends on the model, and so does whether
     it accepts prose at all, but the model is chosen per span rather than per
@@ -385,11 +385,6 @@ def _for_assemblyai(package: ContextPackage, model: str | None) -> ProviderConte
     the rest. When the caller has not said which is running, the smaller
     limits apply and no prompt is sent, because being refused for sending too
     much is a worse outcome than sending less than we could have.
-
-    ``word_boost`` is prepared alongside as a compatibility fallback. It is
-    the older mechanism, it no longer has a formal schema entry, and an
-    adapter should prefer ``keyterms_prompt`` wherever its client library
-    knows about it.
     """
     resolved = _assemblyai_model(model)
     keyterms, dropped = _fit_terms(
@@ -397,14 +392,8 @@ def _for_assemblyai(package: ContextPackage, model: str | None) -> ProviderConte
         _assemblyai_keyterm_limit(resolved),
         maximum_words=ASSEMBLYAI_MAXIMUM_KEYTERM_WORDS,
     )
-    boosted, _ = _fit_terms(
-        package.term_texts,
-        ASSEMBLYAI_MAXIMUM_WORD_BOOST_TERMS,
-        maximum_words=ASSEMBLYAI_MAXIMUM_KEYTERM_WORDS,
-    )
     parameters: dict[str, Any] = {
         "keyterms_prompt": list(keyterms),
-        "word_boost": list(boosted),
     }
     prompt = ""
     if resolved == ASSEMBLYAI_UNIVERSAL_3_5_PRO:

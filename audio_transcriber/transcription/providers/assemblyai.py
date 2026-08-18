@@ -78,31 +78,20 @@ from audio_transcriber.transcription.providers.base import (
     TranscriptionRequest,
 )
 
+from audio_transcriber.transcription.context import (
+    ASSEMBLYAI_MAXIMUM_KEYTERM_WORDS as MAXIMUM_KEYTERM_WORDS,
+    ASSEMBLYAI_MAXIMUM_KEYTERMS_UNIVERSAL_2 as DEFAULT_MAXIMUM_KEYTERMS,
+    ASSEMBLYAI_UNIVERSAL_2 as DEFAULT_AFRIKAANS_MODEL,
+    ASSEMBLYAI_UNIVERSAL_3_5_PRO as DEFAULT_MODEL,
+)
+
 _log = logging.getLogger(__name__)
 
 #: The package that must be installed for this service to work at all.
 PACKAGE = "assemblyai"
 
-#: The model tried first. ``universal-3-pro`` is deprecated and retires on
-#: 2 September 2026, so nothing here should default to it.
-DEFAULT_MODEL = "universal-3-5-pro"
-
-#: The model the chain falls through to. It is the only model of theirs that
-#: speaks Afrikaans at all, which is the whole reason there are two settings.
-DEFAULT_AFRIKAANS_MODEL = "universal-2"
-
-#: Key terms are limited to 1000 on the newest model and 200 on Universal-2.
-#: The lower number is the one to design against, because the chain can fall
-#: through to Universal-2 at any moment and a list that was legal for the
-#: first model would then be rejected by the second.
-DEFAULT_MAXIMUM_KEYTERMS = 200
-
-#: Each key term may be at most six words. A longer one is dropped rather than
-#: cut short, because half of a phrase is not a shorter phrase, it is a
-#: different one.
-MAXIMUM_KEYTERM_WORDS = 6
-
 _GIGABYTE = 1024 * 1024 * 1024
+
 
 #: Uploads are limited to 2.2 GB. Submitting an already-hosted URL allows 5 GB,
 #: but this application uploads, so the smaller number is the real one.

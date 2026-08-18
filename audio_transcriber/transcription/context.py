@@ -109,7 +109,7 @@ ASSEMBLYAI_MAXIMUM_WORD_BOOST_TERMS = 200
 #: whatever string settings hold; anything unrecognised falls back to the
 #: smaller cap, which is the safe direction to be wrong in.
 ASSEMBLYAI_UNIVERSAL_2 = "universal-2"
-ASSEMBLYAI_UNIVERSAL_3_5_PRO = "universal-3.5-pro"
+ASSEMBLYAI_UNIVERSAL_3_5_PRO = "universal-3-5-pro"
 
 #: Deepgram measures its keyterms in tokens across the whole request rather
 #: than counting them, and a request over the budget is refused outright

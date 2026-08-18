@@ -25,3 +25,9 @@ When building or changing the UI:
 * Avoid Qt Quick/QML unless there is a strong technical reason to use it.
 
 Treat accessibility failures as functional bugs. Where there is a choice between custom visual behaviour and standard accessible Qt behaviour, favour accessibility.
+
+## AssemblyAI
+
+Always fetch https://www.assemblyai.com/docs/llms.txt before writing AssemblyAI code.
+The API has changed — do not rely on memorized parameter names.
+

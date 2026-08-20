@@ -587,6 +587,24 @@ def test_nothing_claims_a_superseded_list_was_sent(request_for, caplog):
     assert "the settings" in messages
 
 
+def test_a_keyterms_value_that_is_not_a_list_is_reported_as_ignored(request_for, caplog):
+    """Its two neighbours warn when they cannot read a value, and so must this one.
+
+    A bare string is the mistake people actually make. It cannot hold terms,
+    so nothing is sent from it, and staying quiet about that would leave
+    somebody with a vocabulary they believe is reaching the service.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"keyterms": "Bosch"})
+
+    with caplog.at_level("WARNING"):
+        provider.transcribe(request_for(vocabulary_terms=()))
+
+    assert "keyterms" not in client.speech_to_text.calls[0]
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "keyterms value in the settings was ignored" in messages
+
+
 def test_an_empty_list_in_the_request_does_not_erase_the_vocabulary(request_for):
     """An empty parameter names no terms, so it is not an instruction to send none."""
     client = FakeClient(transcription(SAMPLE_WORDS))

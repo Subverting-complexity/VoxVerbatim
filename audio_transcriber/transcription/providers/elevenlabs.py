@@ -149,20 +149,6 @@ MAXIMUM_ALIGNMENT_FILE_BYTES = 1 * _GIGABYTE
 #: politely.
 MAXIMUM_SPEAKERS = 32
 
-#: The three fields that decide diarisation. The service refuses some
-#: combinations of them, so all three are settled here as one decision and
-#: none of them is passed straight through the free-form extras, where the
-#: client library would spread it over what this adapter had worked out.
-#:
-#: Being taken out of the extras is not the same as being ignored. ``diarize``
-#: and ``diarization_threshold`` are read back out first and are the values
-#: this adapter then reasons about, because for the moment the extras are the
-#: only way either of them can be set at all. ``num_speakers`` is the
-#: exception: it is worked out from the expected speaker count, which has a
-#: setting and a control of its own, so a second copy of it in the extras is
-#: dropped rather than obeyed.
-_DIARISATION_PARAMETERS = ("diarize", "num_speakers", "diarization_threshold")
-
 #: The word type the service uses for a non-speech sound.
 AUDIO_EVENT_TYPE = "audio_event"
 
@@ -550,9 +536,9 @@ class ElevenLabsProvider(TranscriptionProvider):
                 # available to anybody who wants one.
                 _log.warning(
                     "The diarize parameter was ignored, because %r is not true or "
-                    "false. ElevenLabs was asked to diarise: %s.",
+                    "false. Diarisation stays %s.",
                     written,
-                    diarise,
+                    "on" if diarise else "off",
                 )
 
         threshold = self._diarisation_threshold
@@ -866,7 +852,18 @@ def _terms_for(
     chosen: tuple[str, ...] | None = None
     chosen_from = ""
     for description, supplied in candidates:
-        if not isinstance(supplied, (list, tuple)) or not supplied:
+        if supplied is not None and not isinstance(supplied, (list, tuple)):
+            # Absent and empty are quiet, because neither names any terms and
+            # neither is a mistake. This is a mistake: somebody meant to send
+            # terms and wrote something that cannot hold any.
+            _log.warning(
+                "The keyterms value in %s was ignored, because %r is not a list "
+                "of terms.",
+                description,
+                supplied,
+            )
+            continue
+        if not supplied:
             continue
         if chosen is None:
             chosen = tuple(str(term) for term in supplied)

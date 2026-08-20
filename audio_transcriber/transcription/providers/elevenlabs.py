@@ -538,14 +538,34 @@ class ElevenLabsProvider(TranscriptionProvider):
         decided and produce a combination the service refuses.
         """
         diarise = request.diarise
-        written = extras.get("diarize")
-        if isinstance(written, bool):
-            diarise = written
+        if "diarize" in extras:
+            written = extras["diarize"]
+            if isinstance(written, bool):
+                diarise = written
+            else:
+                # Not turned into a boolean by guessing. "false" as a string
+                # is somebody who meant False, but so is 0, and "no", and a
+                # wrong guess here silently changes what the transcript is.
+                # The parameter box is read as JSON, so a real false is
+                # available to anybody who wants one.
+                _log.warning(
+                    "The diarize parameter was ignored, because %r is not true or "
+                    "false. ElevenLabs was asked to diarise: %s.",
+                    written,
+                    diarise,
+                )
 
         threshold = self._diarisation_threshold
-        supplied = _as_float(extras.get("diarization_threshold"))
-        if supplied is not None:
-            threshold = supplied
+        if "diarization_threshold" in extras:
+            supplied = _as_float(extras["diarization_threshold"])
+            if supplied is not None:
+                threshold = supplied
+            else:
+                _log.warning(
+                    "The diarization_threshold parameter was ignored, because %r "
+                    "is not a number.",
+                    extras["diarization_threshold"],
+                )
         return diarise, threshold
 
     def _body_parameters_for(self, extras: dict[str, Any]) -> dict[str, Any]:
@@ -564,15 +584,17 @@ class ElevenLabsProvider(TranscriptionProvider):
         and the audio they came from, so it is dropped even when somebody
         has put it in the settings.
 
-        The three diarisation fields are dropped for a different reason. The
-        service refuses some combinations of them outright, so this adapter
-        has to decide all three together; one of them arriving separately
-        would break the set and cost the request.
+        ``num_speakers`` is dropped outright. The speaker count is worked out
+        from the expected speaker count, which has a setting and a control of
+        its own, so a second copy of it here could only conflict with the
+        first.
 
-        ``keyterms`` is removed here but is not thrown away: it is read back
-        out beforehand and sent as an argument, so that the terms in it go
-        through the service's own rules about a key term instead of round
-        them. See ``_terms_for``.
+        The other three are removed but not thrown away. ``diarize`` and
+        ``diarization_threshold`` were read by ``_diarisation_for`` before
+        this ran, and ``keyterms`` by ``_terms_for``, so that all of them go
+        through this adapter's rules rather than round them. Each of those
+        methods says in the log what it made of what it found, which is why
+        nothing is said about them here.
         """
         merged = dict(extras)
         if "no_verbatim" in merged:
@@ -581,29 +603,22 @@ class ElevenLabsProvider(TranscriptionProvider):
                 "The no_verbatim parameter was not sent to ElevenLabs. This "
                 "application is verbatim by design."
             )
-        if merged.pop("keyterms", None) is not None:
-            _log.info(
-                "The keyterms parameter was taken out of the body and sent as an "
-                "argument, so that the terms in it are held to the service's own "
-                "rules about a key term."
+        if "num_speakers" in merged:
+            merged.pop("num_speakers")
+            _log.warning(
+                "The num_speakers parameter was not sent to ElevenLabs as written. "
+                "The speaker count comes from the expected speaker count, which "
+                "has a setting of its own."
             )
-        for name in _DIARISATION_PARAMETERS:
-            if name not in merged:
-                continue
-            merged.pop(name)
-            if name == "num_speakers":
-                _log.warning(
-                    "The num_speakers parameter was not sent to ElevenLabs as "
-                    "written. The speaker count comes from the expected speaker "
-                    "count, which has a setting of its own."
-                )
-            else:
-                _log.info(
-                    "The %s parameter was taken out of the body and settled with "
-                    "the rest of the diarisation decision, because the service "
-                    "rejects some combinations of those fields.",
-                    name,
-                )
+        # Removed without a word, deliberately. What became of these three is
+        # not known here: whether a list of terms was used or superseded, and
+        # whether a diarisation value was read or was unusable, was settled
+        # before this ran. Saying anything about them from here would mean
+        # guessing, and a log that guesses wrongly is worse than one that is
+        # quiet. The two methods that made those decisions report them.
+        merged.pop("keyterms", None)
+        merged.pop("diarize", None)
+        merged.pop("diarization_threshold", None)
         return merged
 
     def _request_record(
@@ -844,14 +859,31 @@ def _terms_for(
     than costing the recording its transcript.
     """
     candidates = (
-        request.extra_parameters.get("keyterms"),
-        request.vocabulary_terms,
-        settings_parameters.get("keyterms"),
+        ("the request's parameters", request.extra_parameters.get("keyterms")),
+        ("the request's vocabulary", request.vocabulary_terms),
+        ("the settings", settings_parameters.get("keyterms")),
     )
-    for supplied in candidates:
-        if isinstance(supplied, (list, tuple)) and supplied:
-            return tuple(str(term) for term in supplied)
-    return ()
+    chosen: tuple[str, ...] | None = None
+    chosen_from = ""
+    for description, supplied in candidates:
+        if not isinstance(supplied, (list, tuple)) or not supplied:
+            continue
+        if chosen is None:
+            chosen = tuple(str(term) for term in supplied)
+            chosen_from = description
+            continue
+        # Said out loud, because a standing list quietly losing to a live one
+        # is right but surprising, and somebody who wrote that list deserves
+        # to find out here rather than by wondering why it had no effect.
+        _log.info(
+            "The %d key terms in %s were not sent to ElevenLabs. The %d in %s "
+            "are more specific to this recording.",
+            len(supplied),
+            description,
+            len(chosen),
+            chosen_from,
+        )
+    return chosen if chosen is not None else ()
 
 
 def _why_the_service_would_refuse(term: str) -> str | None:

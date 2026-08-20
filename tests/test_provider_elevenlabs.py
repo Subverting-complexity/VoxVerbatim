@@ -551,6 +551,52 @@ def test_more_speakers_than_the_service_predicts_are_brought_down(request_for):
     assert client.speech_to_text.calls[0]["num_speakers"] == 32
 
 
+def test_a_diarisation_value_that_cannot_be_read_is_reported_as_ignored(request_for, caplog):
+    """A setting that did nothing has to say so, in the words of what happened.
+
+    The parameter box is read as JSON, so a user who means false can write
+    one. The string "false" is somebody who meant it but did not get it, and
+    turning it into a boolean by guessing would change what the transcript is
+    on the strength of a guess. It is refused and named in the log instead.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(
+        client, parameters={"diarize": "false", "diarization_threshold": "abc"}
+    )
+
+    with caplog.at_level("WARNING"):
+        provider.transcribe(request_for(diarise=True))
+
+    assert client.speech_to_text.calls[0]["diarize"] is True
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "diarize parameter was ignored" in messages
+    assert "diarization_threshold parameter was ignored" in messages
+
+
+def test_nothing_claims_a_superseded_list_was_sent(request_for, caplog):
+    """The log said the terms went out. They did not, and it had to stop saying so."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"keyterms": ["Stale"]})
+
+    with caplog.at_level("INFO"):
+        provider.transcribe(request_for(vocabulary_terms=("Vermeulen",)))
+
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen"]
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "were not sent to ElevenLabs" in messages
+    assert "the settings" in messages
+
+
+def test_an_empty_list_in_the_request_does_not_erase_the_vocabulary(request_for):
+    """An empty parameter names no terms, so it is not an instruction to send none."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(vocabulary_terms=("Vermeulen",), extra_parameters={"keyterms": []})
+    )
+
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen"]
+
+
 def test_the_diarisation_threshold_is_sent_when_the_service_will_take_it(request_for):
     client = FakeClient(transcription(SAMPLE_WORDS))
     provider = build_provider(client, diarisation_threshold=0.31)

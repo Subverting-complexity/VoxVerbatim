@@ -150,8 +150,17 @@ MAXIMUM_ALIGNMENT_FILE_BYTES = 1 * _GIGABYTE
 MAXIMUM_SPEAKERS = 32
 
 #: The three fields that decide diarisation. The service refuses some
-#: combinations of them, so this adapter settles all three together and takes
-#: them out of the free-form extras rather than letting one arrive on its own.
+#: combinations of them, so all three are settled here as one decision and
+#: none of them is passed straight through the free-form extras, where the
+#: client library would spread it over what this adapter had worked out.
+#:
+#: Being taken out of the extras is not the same as being ignored. ``diarize``
+#: and ``diarization_threshold`` are read back out first and are the values
+#: this adapter then reasons about, because for the moment the extras are the
+#: only way either of them can be set at all. ``num_speakers`` is the
+#: exception: it is worked out from the expected speaker count, which has a
+#: setting and a control of its own, so a second copy of it in the extras is
+#: dropped rather than obeyed.
 _DIARISATION_PARAMETERS = ("diarize", "num_speakers", "diarization_threshold")
 
 #: The word type the service uses for a non-speech sound.
@@ -303,29 +312,30 @@ class ElevenLabsProvider(TranscriptionProvider):
             )
 
         extras = {**self._parameters, **request.extra_parameters}
-        keyterms = self._keyterms_for(_terms_in(extras, request.vocabulary_terms))
+        keyterms = self._keyterms_for(_terms_for(request, self._parameters))
         language_code = _single_language_code(request.languages)
+        diarise, threshold = self._diarisation_for(request, extras)
         body_parameters = self._body_parameters_for(extras)
 
         arguments: dict[str, Any] = {
             "model_id": self._model,
             "timestamps_granularity": self._timestamps_granularity,
             "tag_audio_events": self._tag_audio_events,
-            "diarize": request.diarise,
+            "diarize": diarise,
         }
         if language_code is not None:
             arguments["language_code"] = language_code
-        if request.diarise and request.expected_speaker_count > 1:
+        if diarise and request.expected_speaker_count > 1:
             arguments["num_speakers"] = min(request.expected_speaker_count, MAXIMUM_SPEAKERS)
             if request.expected_speaker_count > MAXIMUM_SPEAKERS:
                 _log.info(
-                    "ElevenLabs was asked for %d speakers rather than the %d it was "
-                    "given, because %d is the most it will predict.",
+                    "ElevenLabs was asked for %d speakers rather than the %d this "
+                    "recording expects, because %d is the most it will predict.",
                     MAXIMUM_SPEAKERS,
                     request.expected_speaker_count,
                     MAXIMUM_SPEAKERS,
                 )
-        if self._diarisation_threshold is not None:
+        if threshold is not None:
             # The service accepts this only on a diarising request that has
             # not also been told how many speakers to expect, and refuses the
             # whole request otherwise. A speaker count is the stronger hint of
@@ -338,14 +348,14 @@ class ElevenLabsProvider(TranscriptionProvider):
                     "only one of the two.",
                     arguments["num_speakers"],
                 )
-            elif not request.diarise:
+            elif not diarise:
                 _log.info(
                     "The diarisation threshold was not sent to ElevenLabs, because "
                     "this request does not ask for diarisation and the service "
                     "rejects the threshold without it."
                 )
             else:
-                arguments["diarization_threshold"] = self._diarisation_threshold
+                arguments["diarization_threshold"] = threshold
         if keyterms:
             arguments["keyterms"] = list(keyterms)
 
@@ -511,6 +521,33 @@ class ElevenLabsProvider(TranscriptionProvider):
         )
         return tuple(kept[: self._maximum_keyterms])
 
+    def _diarisation_for(
+        self,
+        request: TranscriptionRequest,
+        extras: dict[str, Any],
+    ) -> tuple[bool, float | None]:
+        """Whether to diarise, and at what threshold, from wherever those were set.
+
+        Both can only be set through the free-form extras at present. Nothing
+        passes a threshold to this adapter's constructor, and the ``diarise``
+        setting that the settings dialog writes is not read by the code that
+        builds this adapter, so ``diarize`` in the extras is the only thing
+        that has ever turned diarisation off for ElevenLabs. Reading them here
+        keeps that working while still taking them out of the body, where the
+        client library would otherwise spread them over what this adapter
+        decided and produce a combination the service refuses.
+        """
+        diarise = request.diarise
+        written = extras.get("diarize")
+        if isinstance(written, bool):
+            diarise = written
+
+        threshold = self._diarisation_threshold
+        supplied = _as_float(extras.get("diarization_threshold"))
+        if supplied is not None:
+            threshold = supplied
+        return diarise, threshold
+
     def _body_parameters_for(self, extras: dict[str, Any]) -> dict[str, Any]:
         """The free-form extras, with the ones we never pass straight through removed.
 
@@ -535,7 +572,7 @@ class ElevenLabsProvider(TranscriptionProvider):
         ``keyterms`` is removed here but is not thrown away: it is read back
         out beforehand and sent as an argument, so that the terms in it go
         through the service's own rules about a key term instead of round
-        them. See ``_terms_in``.
+        them. See ``_terms_for``.
         """
         merged = dict(extras)
         if "no_verbatim" in merged:
@@ -544,15 +581,27 @@ class ElevenLabsProvider(TranscriptionProvider):
                 "The no_verbatim parameter was not sent to ElevenLabs. This "
                 "application is verbatim by design."
             )
-        merged.pop("keyterms", None)
+        if merged.pop("keyterms", None) is not None:
+            _log.info(
+                "The keyterms parameter was taken out of the body and sent as an "
+                "argument, so that the terms in it are held to the service's own "
+                "rules about a key term."
+            )
         for name in _DIARISATION_PARAMETERS:
-            if name in merged:
-                merged.pop(name)
+            if name not in merged:
+                continue
+            merged.pop(name)
+            if name == "num_speakers":
                 _log.warning(
-                    "The %s parameter was not sent to ElevenLabs as written. "
-                    "Diarisation is one decision with three fields in it, the "
-                    "service rejects some combinations of them, and this adapter "
-                    "settles all three together.",
+                    "The num_speakers parameter was not sent to ElevenLabs as "
+                    "written. The speaker count comes from the expected speaker "
+                    "count, which has a setting of its own."
+                )
+            else:
+                _log.info(
+                    "The %s parameter was taken out of the body and settled with "
+                    "the rest of the diarisation decision, because the service "
+                    "rejects some combinations of those fields.",
                     name,
                 )
         return merged
@@ -769,26 +818,40 @@ def _build_client(api_key: str) -> Any:
     return ElevenLabs(api_key=api_key)
 
 
-def _terms_in(extras: dict[str, Any], vocabulary_terms: tuple[str, ...]) -> tuple[str, ...]:
-    """The key terms to send, wherever they arrived from.
+def _terms_for(
+    request: TranscriptionRequest,
+    settings_parameters: dict[str, Any],
+) -> tuple[str, ...]:
+    """The key terms to send, from the most specific place that names any.
 
-    They can arrive by either of two doors. The context layer hands the same
-    list in twice, once as the request's vocabulary and once as a ``keyterms``
-    parameter, because every other service takes its terms as an ordinary
-    parameter and this one takes them as an argument. Settings may also carry
-    a list of their own.
+    They can arrive by three doors, and the order between them matters. The
+    context layer hands the same list in twice, once as the request's
+    vocabulary and once as a ``keyterms`` parameter on the request, because
+    every other service takes its terms as an ordinary parameter and this one
+    takes them as an argument. Settings may also hold a list, written by
+    somebody who wanted terms sent on every recording.
 
-    A list written into the extras wins, which is the same rule the extras
-    follow everywhere else: the more specific instruction is the one that
-    stands. What it does not get to do is skip the rules. Whichever list this
-    returns goes through the service's own limits on a key term afterwards,
-    so a bracket in somebody's settings costs them that term rather than the
-    whole recording.
+    The request is read first, then its vocabulary, and the settings list only
+    if neither named anything. That last part is the ordering that is worth
+    being deliberate about: the escalation path sends a live vocabulary
+    gathered for one window and no request parameters at all, and a fixed list
+    from the settings file should not be allowed to displace it. A general
+    instruction is what you fall back on, not what overrules the specific work
+    in front of you.
+
+    Whichever list comes back is then held to the service's own rules about a
+    key term, so a bracket in somebody's settings costs them that term rather
+    than costing the recording its transcript.
     """
-    supplied = extras.get("keyterms")
-    if isinstance(supplied, (list, tuple)):
-        return tuple(str(term) for term in supplied)
-    return vocabulary_terms
+    candidates = (
+        request.extra_parameters.get("keyterms"),
+        request.vocabulary_terms,
+        settings_parameters.get("keyterms"),
+    )
+    for supplied in candidates:
+        if isinstance(supplied, (list, tuple)) and supplied:
+            return tuple(str(term) for term in supplied)
+    return ()
 
 
 def _why_the_service_would_refuse(term: str) -> str | None:

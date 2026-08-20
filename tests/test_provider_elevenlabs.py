@@ -444,44 +444,74 @@ def test_the_speaker_count_is_only_sent_when_there_is_more_than_one(request_for)
     assert client.speech_to_text.calls[1]["num_speakers"] == 4
 
 
-def test_a_diarisation_field_in_the_extras_does_not_reach_the_service(request_for):
-    """The escape hatch may not break a set of parameters the service checks.
+def test_a_diarisation_field_in_the_extras_is_obeyed_but_never_passed_through(request_for):
+    """The escape hatch still works, but it goes through the rules on the way.
 
     The client library spreads the extras over the named arguments rather
-    than under them, so a speaker count written into settings would replace
-    the one this adapter worked out and would arrive beside a diarisation
-    threshold the service will not accept it with. All three fields are
-    settled here and taken out of the extras.
+    than under them, so a field left in the body would replace whatever this
+    adapter worked out and could land the request with a combination the
+    service refuses. All three diarisation fields are therefore taken out of
+    the body. Two of them are still read: the extras are, for now, the only
+    place either the switch or the threshold can be set at all.
     """
     client = FakeClient(transcription(SAMPLE_WORDS))
     provider = build_provider(
         client,
-        diarisation_threshold=0.31,
-        parameters={"num_speakers": 9, "diarize": False, "diarization_threshold": 0.9},
+        parameters={"diarize": False, "diarization_threshold": 0.9},
     )
 
     provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
 
     call = client.speech_to_text.calls[0]
-    body = call["request_options"]["additional_body_parameters"]
-    assert body == {}
-    assert call["diarize"] is True
-    assert call["diarization_threshold"] == 0.31
+    assert call["request_options"]["additional_body_parameters"] == {}
+    # Read out of the extras rather than passed through them.
+    assert call["diarize"] is False
+    # Refused on a request that does not diarise, whichever way it was set.
+    assert "diarization_threshold" not in call
+
+
+def test_a_threshold_from_the_extras_is_sent_when_the_service_will_take_it(request_for):
+    """Nothing else can set the threshold today, so the extras have to reach it."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"diarization_threshold": 0.9})
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
+
+    call = client.speech_to_text.calls[0]
+    assert call["diarization_threshold"] == 0.9
+    assert "diarization_threshold" not in call["request_options"]["additional_body_parameters"]
+
+
+def test_a_speaker_count_in_the_extras_is_dropped_rather_than_obeyed(request_for):
+    """This one the adapter genuinely owns, and a second copy could only conflict.
+
+    The count comes from the expected speaker count, which has its own
+    setting and its own control, so a number written into the extras beside
+    it has nothing to add and could arrive next to a threshold the service
+    will not accept it with.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"num_speakers": 9})
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
+
+    call = client.speech_to_text.calls[0]
     assert "num_speakers" not in call
+    assert call["request_options"]["additional_body_parameters"] == {}
 
 
-def test_key_terms_written_into_the_extras_still_go_through_the_rules(request_for):
-    """The more specific list wins, but it does not get to skip the limits.
+def test_key_terms_written_into_the_request_still_go_through_the_rules(request_for):
+    """The context layer's list is the one sent, and it is checked like any other.
 
-    The context layer hands the terms in as a keyterms parameter as well as
-    a vocabulary, because every other service takes them as a parameter.
-    Whichever door they come through, a term the service would refuse has to
-    be caught, or one bracket in somebody's settings costs the whole chunk.
+    That layer hands the terms in as a keyterms parameter as well as a
+    vocabulary, because every other service takes them as an ordinary
+    parameter. Whichever door they come through, a term the service would
+    refuse has to be caught, or one bracket costs the chunk its transcript.
     """
     client = FakeClient(transcription(SAMPLE_WORDS))
     build_provider(client).transcribe(
         request_for(
-            vocabulary_terms=("ignored",),
+            vocabulary_terms=("unused",),
             extra_parameters={"keyterms": ["Vermeulen", "Smith [Jr]", "Schmidt"]},
         )
     )
@@ -490,6 +520,25 @@ def test_key_terms_written_into_the_extras_still_go_through_the_rules(request_fo
     assert call["keyterms"] == ["Vermeulen", "Schmidt"]
     # Removed from the body, or it would replace the checked list on the way out.
     assert "keyterms" not in call["request_options"]["additional_body_parameters"]
+
+
+def test_a_fixed_list_in_the_settings_gives_way_to_the_live_vocabulary(request_for):
+    """A standing instruction is a fallback, not something that overrules the work.
+
+    The escalation path gathers a vocabulary for one window and sends no
+    request parameters at all. A list somebody put in the settings file once
+    must not displace it, or every escalated window would be biased towards
+    the wrong words.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"keyterms": ["Stale"]})
+
+    provider.transcribe(request_for(vocabulary_terms=("Vermeulen", "Schmidt")))
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen", "Schmidt"]
+
+    # With no live vocabulary, the standing list is what is left to use.
+    provider.transcribe(request_for(vocabulary_terms=()))
+    assert client.speech_to_text.calls[1]["keyterms"] == ["Stale"]
 
 
 def test_more_speakers_than_the_service_predicts_are_brought_down(request_for):

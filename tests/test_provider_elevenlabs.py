@@ -33,7 +33,9 @@ from audio_transcriber.transcription.providers.base import (
 )
 from audio_transcriber.transcription.providers.elevenlabs import (
     DEFAULT_MAXIMUM_KEYTERMS,
-    KEYTERM_SURCHARGE_THRESHOLD,
+    KEYTERM_MINIMUM_CHARGE_THRESHOLD,
+    MAXIMUM_KEYTERM_CHARACTERS,
+    MAXIMUM_KEYTERM_WORDS,
     ElevenLabsForcedAligner,
     ElevenLabsProvider,
 )
@@ -300,15 +302,20 @@ def test_the_declared_capabilities_match_what_the_service_actually_does():
 # -- What gets sent ------------------------------------------------------
 
 
-def test_the_key_terms_are_cut_before_the_surcharge_bites(request_for):
-    """A hundred terms would cost 20 per cent more, so ninety-nine go."""
+def test_the_key_terms_are_cut_before_the_minimum_charge_bites(request_for):
+    """Above a hundred terms the request is billed 20 seconds, so a hundred go.
+
+    The threshold is "more than a hundred", so a hundred is sent rather than
+    ninety-nine. Cutting further would buy nothing: the separate 20 per cent
+    keyterm surcharge is charged on any request carrying terms at all.
+    """
     client = FakeClient(transcription(SAMPLE_WORDS))
     terms = tuple(f"term-{number}" for number in range(250))
     result = build_provider(client).transcribe(request_for(vocabulary_terms=terms))
 
     sent = client.speech_to_text.calls[0]["keyterms"]
     assert len(sent) == DEFAULT_MAXIMUM_KEYTERMS
-    assert len(sent) < KEYTERM_SURCHARGE_THRESHOLD
+    assert len(sent) <= KEYTERM_MINIMUM_CHARGE_THRESHOLD
     # The most specific terms come first, so the cut falls off the tail.
     assert sent[0] == "term-0"
     assert result.request.vocabulary_terms == terms[:DEFAULT_MAXIMUM_KEYTERMS]
@@ -319,6 +326,41 @@ def test_a_short_vocabulary_is_sent_whole(request_for):
     build_provider(client).transcribe(request_for(vocabulary_terms=("Bosch", "Suzanne")))
 
     assert client.speech_to_text.calls[0]["keyterms"] == ["Bosch", "Suzanne"]
+
+
+def test_a_term_the_service_would_refuse_is_left_behind_rather_than_sent(request_for):
+    """One bad term fails the whole request, so it never leaves this module.
+
+    ElevenLabs rejects a key term of fifty characters or more, one of more
+    than five words, and one containing any of a short list of characters.
+    None of those refusals drops only the offending term: they refuse the
+    request, and the chunk comes back with no transcript at all.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(
+            vocabulary_terms=(
+                "Vermeulen",
+                "V" * (MAXIMUM_KEYTERM_CHARACTERS + 1),
+                " ".join(["word"] * (MAXIMUM_KEYTERM_WORDS + 1)),
+                "Smith [Jr]",
+                r"C:\Users",
+                "Contoso <Pty>",
+                "Schmidt",
+            )
+        )
+    )
+
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen", "Schmidt"]
+
+
+def test_a_term_of_exactly_the_longest_allowed_length_is_still_sent(request_for):
+    """The rule is "shorter than fifty", so forty-nine characters is fine."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    longest = "V" * MAXIMUM_KEYTERM_CHARACTERS
+    build_provider(client).transcribe(request_for(vocabulary_terms=(longest,)))
+
+    assert client.speech_to_text.calls[0]["keyterms"] == [longest]
 
 
 def test_the_cap_can_be_raised_deliberately(request_for):
@@ -377,6 +419,42 @@ def test_the_speaker_count_is_only_sent_when_there_is_more_than_one(request_for)
 
     provider.transcribe(request_for(expected_speaker_count=4))
     assert client.speech_to_text.calls[1]["num_speakers"] == 4
+
+
+def test_the_diarisation_threshold_is_sent_when_the_service_will_take_it(request_for):
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, diarisation_threshold=0.31)
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
+
+    assert client.speech_to_text.calls[0]["diarization_threshold"] == 0.31
+
+
+def test_the_diarisation_threshold_gives_way_to_a_speaker_count(request_for):
+    """The service takes one or the other and refuses a request carrying both.
+
+    The count is the better of the two, because somebody listened to the
+    recording and said how many voices were in it, so the threshold is what
+    gets dropped.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, diarisation_threshold=0.31)
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=4))
+
+    call = client.speech_to_text.calls[0]
+    assert call["num_speakers"] == 4
+    assert "diarization_threshold" not in call
+
+
+def test_the_diarisation_threshold_is_not_sent_without_diarisation(request_for):
+    """The service rejects the threshold outright on a request that does not diarise."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, diarisation_threshold=0.31)
+
+    provider.transcribe(request_for(diarise=False, expected_speaker_count=1))
+
+    assert "diarization_threshold" not in client.speech_to_text.calls[0]
 
 
 def test_word_timings_and_audio_events_are_asked_for(request_for):

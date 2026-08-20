@@ -41,10 +41,20 @@ against by a service that had never looked at it. The whole-file answer and
 its probability are recorded on the result instead, where they are honestly
 one weak signal among several. Please leave it that way.
 
-The third is money. Sending 100 or more key terms adds a 20 per cent
-surcharge and a 20-second minimum charge to the request, so the list is cut
+The third is money, and it is easy to get the wrong way round. Sending any
+key terms at all adds a 20 per cent surcharge, which is simply the price of
+vocabulary biasing and cannot be avoided by sending fewer of them. Sending
+more than a hundred adds a second charge on top: the request is then billed
+a minimum of 20 seconds of audio however short the recording is. That
+second charge is the one a limit can avoid, so the list is cut to a hundred
 before it goes. The vocabulary arrives ordered most-specific first, which is
 what makes cutting the tail the right place to cut.
+
+A key term can also be refused on its own account, for being 50 characters
+or longer, for running to more than five words, or for containing one of the
+characters the service does not accept. A refusal of that kind fails the
+whole request rather than dropping the one term, so any term that would
+cause it is left behind here instead.
 
 Forced alignment lives here too, because it is the same service and the same
 key, but it is a genuinely different job: it is given words that are already
@@ -83,6 +93,15 @@ from audio_transcriber.transcription.providers.base import (
     TranscriptionRequest,
 )
 
+from audio_transcriber.transcription.context import (
+    ELEVENLABS_KEYTERM_CHARACTER_LIMIT as KEYTERM_CHARACTER_LIMIT,
+    ELEVENLABS_KEYTERM_MINIMUM_CHARGE_THRESHOLD as KEYTERM_MINIMUM_CHARGE_THRESHOLD,
+    ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS as MAXIMUM_KEYTERM_CHARACTERS,
+    ELEVENLABS_MAXIMUM_KEYTERM_WORDS as MAXIMUM_KEYTERM_WORDS,
+    ELEVENLABS_MAXIMUM_KEYTERMS as DEFAULT_MAXIMUM_KEYTERMS,
+    ELEVENLABS_UNSUPPORTED_KEYTERM_CHARACTERS as UNSUPPORTED_KEYTERM_CHARACTERS,
+)
+
 _log = logging.getLogger(__name__)
 
 #: The package that must be installed for this service to work at all.
@@ -94,15 +113,16 @@ PACKAGE = "elevenlabs"
 #: works without an upgrade.
 DEFAULT_MODEL = "scribe_v2"
 
-#: Sending this many key terms or more adds a 20 per cent surcharge to the
-#: request and bills a minimum of 20 seconds of audio, however short the
-#: recording is. The API itself allows up to 1000 terms, so this is a cost
-#: decision rather than a technical limit, and it is why the default cap
-#: below sits one term underneath the threshold.
-KEYTERM_SURCHARGE_THRESHOLD = 100
-
-#: How many key terms are sent unless somebody deliberately raises it.
-DEFAULT_MAXIMUM_KEYTERMS = KEYTERM_SURCHARGE_THRESHOLD - 1
+#: Every limit these terms are held to belongs to the shared limits module,
+#: so that a number ElevenLabs changes is corrected in one place. They are
+#: renamed on the way in only because inside this module there is no other
+#: service to confuse them with.
+#:
+#: ``KEYTERM_MINIMUM_CHARGE_THRESHOLD`` is the count above which a request is
+#: billed a minimum of 20 seconds of audio. ``DEFAULT_MAXIMUM_KEYTERMS`` sits
+#: exactly on it rather than under it, because the threshold is "more than",
+#: and because the separate 20 per cent keyterm surcharge applies to any
+#: request carrying terms at all and so is not avoided by sending fewer.
 
 _GIGABYTE = 1024 * 1024 * 1024
 
@@ -280,7 +300,26 @@ class ElevenLabsProvider(TranscriptionProvider):
         if request.diarise and request.expected_speaker_count > 1:
             arguments["num_speakers"] = request.expected_speaker_count
         if self._diarisation_threshold is not None:
-            arguments["diarization_threshold"] = self._diarisation_threshold
+            # The service accepts this only on a diarising request that has
+            # not also been told how many speakers to expect, and refuses the
+            # whole request otherwise. A speaker count is the stronger hint of
+            # the two and comes from the person who listened to the recording,
+            # so where both are present the count is what survives.
+            if "num_speakers" in arguments:
+                _log.info(
+                    "The diarisation threshold was not sent to ElevenLabs, because "
+                    "a speaker count of %d was sent instead and the service accepts "
+                    "only one of the two.",
+                    arguments["num_speakers"],
+                )
+            elif not request.diarise:
+                _log.info(
+                    "The diarisation threshold was not sent to ElevenLabs, because "
+                    "this request does not ask for diarisation and the service "
+                    "rejects the threshold without it."
+                )
+            else:
+                arguments["diarization_threshold"] = self._diarisation_threshold
         if keyterms:
             arguments["keyterms"] = list(keyterms)
 
@@ -414,23 +453,37 @@ class ElevenLabsProvider(TranscriptionProvider):
     # -- Building the request -------------------------------------------
 
     def _keyterms_for(self, terms: tuple[str, ...]) -> tuple[str, ...]:
-        """Cut the vocabulary down to what can be sent without a surcharge.
+        """Cut the vocabulary down to what the service will actually accept.
 
-        The terms arrive ordered most specific and most confirmed first, so
-        taking the head of the list keeps the ones most likely to matter and
-        drops the ones least likely to.
+        Two different cuts happen here, and they are not the same kind of
+        thing. A term that breaks one of the service's own rules about a key
+        term is dropped wherever it sits in the list, because sending it
+        would have the whole request refused and cost the chunk its
+        transcript rather than costing that one word. Running out of room is
+        the other kind: the terms arrive ordered most specific and most
+        confirmed first, so taking the head of the list keeps the ones most
+        likely to matter and drops the ones least likely to.
         """
-        kept = tuple(term for term in terms if term and term.strip())
+        kept: list[str] = []
+        for term in terms:
+            cleaned = (term or "").strip()
+            if not cleaned:
+                continue
+            refusal = _why_the_service_would_refuse(cleaned)
+            if refusal is not None:
+                _log.info("The term %r was not sent to ElevenLabs: %s", cleaned, refusal)
+                continue
+            kept.append(cleaned)
         if len(kept) <= self._maximum_keyterms:
-            return kept
+            return tuple(kept)
         _log.info(
-            "Sending ElevenLabs the first %d of %d terms, to stay under the "
-            "%d-term surcharge.",
+            "Sending ElevenLabs the first %d of %d terms, to stay at or below the "
+            "%d terms above which a request is billed a 20-second minimum.",
             self._maximum_keyterms,
             len(kept),
-            KEYTERM_SURCHARGE_THRESHOLD,
+            KEYTERM_MINIMUM_CHARGE_THRESHOLD,
         )
-        return kept[: self._maximum_keyterms]
+        return tuple(kept[: self._maximum_keyterms])
 
     def _body_parameters_for(self, request: TranscriptionRequest) -> dict[str, Any]:
         """The free-form extras, with the one parameter we never send removed.
@@ -660,6 +713,35 @@ def _build_client(api_key: str) -> Any:
     except ImportError as error:
         raise ProviderUnavailable(Provider.ELEVENLABS, PACKAGE) from error
     return ElevenLabs(api_key=api_key)
+
+
+def _why_the_service_would_refuse(term: str) -> str | None:
+    """Why this key term cannot be sent, or None if it can.
+
+    A sentence rather than a flag, because the only thing anybody does with
+    the answer is write it into the log for somebody to read later, and
+    "it is 63 characters long" tells them what to change about their
+    vocabulary in a way that a bare rejection does not.
+    """
+    if len(term) > MAXIMUM_KEYTERM_CHARACTERS:
+        return (
+            f"it is {len(term)} characters long, and a key term must be shorter "
+            f"than {KEYTERM_CHARACTER_LIMIT}."
+        )
+    if len(term.split()) > MAXIMUM_KEYTERM_WORDS:
+        return (
+            f"it has {len(term.split())} words, and a key term may have at most "
+            f"{MAXIMUM_KEYTERM_WORDS}."
+        )
+    offending = sorted(
+        {character for character in term if character in UNSUPPORTED_KEYTERM_CHARACTERS}
+    )
+    if offending:
+        return (
+            f"it contains {' and '.join(repr(character) for character in offending)}, "
+            "which a key term may not contain."
+        )
+    return None
 
 
 def _is_written_mark(kind: str, text: str) -> bool:

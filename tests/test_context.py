@@ -14,6 +14,7 @@ from audio_transcriber.transcription.context import (
     ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS,
     ELEVENLABS_MAXIMUM_KEYTERM_WORDS,
     ELEVENLABS_MAXIMUM_KEYTERMS,
+    ELEVENLABS_UNSUPPORTED_KEYTERM_CHARACTERS,
     LANGUAGES_WITH_AFRIKAANS,
     LANGUAGES_WITHOUT_AFRIKAANS,
     MICROSOFT_MAXIMUM_PHRASES,
@@ -269,6 +270,49 @@ def test_a_phrase_of_too_many_words_is_dropped_rather_than_shortened():
 
     assert written.terms == ("Vermeulen", just_short_enough)
     assert written.dropped_term_count == 1
+
+
+def test_a_term_holding_a_character_the_service_refuses_is_dropped():
+    """A bracket or a backslash in one term would have the whole request refused.
+
+    ElevenLabs does not accept these characters inside a key term, and it
+    answers a term containing one by rejecting the request rather than by
+    ignoring that term. Taking the character out would send a different word
+    from the one the user asked for, so the term goes instead.
+    """
+    package = build_context_package(
+        configuration(),
+        terms("Vermeulen", "Smith [Jr]", r"C:\Users", "Contoso <Pty>", "Schmidt"),
+    )
+
+    written = adapt_for(package, Provider.ELEVENLABS)
+
+    assert written.terms == ("Vermeulen", "Schmidt")
+    assert written.dropped_term_count == 3
+
+
+def test_every_character_the_service_refuses_is_refused_here():
+    """Each of the seven on its own, so none of them can quietly go missing."""
+    for character in sorted(ELEVENLABS_UNSUPPORTED_KEYTERM_CHARACTERS):
+        package = build_context_package(
+            configuration(), terms("Vermeulen", f"Acme{character}Holdings")
+        )
+
+        written = adapt_for(package, Provider.ELEVENLABS)
+
+        assert written.terms == ("Vermeulen",), character
+        assert written.dropped_term_count == 1, character
+
+
+def test_a_term_of_exactly_the_longest_allowed_length_is_kept():
+    """The service's rule is "less than 50", so 49 characters must still fit."""
+    longest = "V" * ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS
+    package = build_context_package(configuration(), terms(longest))
+
+    written = adapt_for(package, Provider.ELEVENLABS)
+
+    assert written.terms == (longest,)
+    assert written.dropped_term_count == 0
 
 
 def test_openai_takes_only_as_many_keywords_as_we_will_send_it():

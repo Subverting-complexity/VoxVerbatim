@@ -99,12 +99,6 @@ ASSEMBLYAI_MAXIMUM_KEYTERMS_UNIVERSAL_3_5_PRO = 1000
 ASSEMBLYAI_MAXIMUM_KEYTERM_WORDS = 6
 ASSEMBLYAI_MAXIMUM_PROMPT_WORDS = 1500
 
-#: Ours: ``word_boost`` is the older mechanism and no longer has a formal
-#: schema entry, so nothing documents its limits. It is matched to the lower
-#: keyterm cap, which is known to be safe, and is only sent as a fallback for
-#: a client library too old to know about keyterms.
-ASSEMBLYAI_MAXIMUM_WORD_BOOST_TERMS = 200
-
 #: The AssemblyAI model names this module recognises. The adapter may pass
 #: whatever string settings hold; anything unrecognised falls back to the
 #: smaller cap, which is the safe direction to be wrong in.

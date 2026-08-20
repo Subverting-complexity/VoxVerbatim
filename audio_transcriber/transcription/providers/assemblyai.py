@@ -49,11 +49,19 @@ authority that settles one.
 The client library is imported inside the method that needs it, so a machine
 without the ``assemblyai`` package loses this one service rather than failing
 to start.
+
+One thing about that library is worth knowing before changing anything here.
+It will accept a parameter it has never heard of and then quietly leave it out
+of the request, because the body it posts is built from a typed object that
+keeps only the fields it declares. Settings promises the opposite, so this
+module checks what the installed package would carry and posts the request
+itself when the answer is "not all of it". See :class:`_SdkClient`.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -543,6 +551,18 @@ class AssemblyAiProvider(TranscriptionProvider):
                 )
                 continue
             parameters[key] = value
+
+        if "language_code" in parameters and parameters.get("language_detection"):
+            # The service refuses a request that both names a language and asks
+            # for one to be detected, so a setting that names one has to take
+            # the detection down with it rather than sit beside it and fail.
+            _log.info(
+                "AssemblyAI was not asked to detect the language, because a "
+                "language_code of %r was given in the settings.",
+                parameters["language_code"],
+            )
+            parameters.pop("language_detection", None)
+            parameters.pop("language_confidence_threshold", None)
         return parameters
 
     # -- Recording what happened ----------------------------------------
@@ -668,13 +688,32 @@ class AssemblyAiProvider(TranscriptionProvider):
 class _SdkClient:
     """The package's ``Transcriber``, behind the two methods this adapter uses.
 
-    It exists for one reason. The parameters that have to be sent include
-    ``speech_models``, which an installed copy of the library may predate, and
-    passing an unknown argument to the library's configuration object raises
-    rather than being sent. The library's documented escape hatch is its raw
-    configuration, which is declared to accept extra fields, so everything goes
-    through that and nothing depends on how new the installed package is.
+    Parameters are pushed onto the library's raw configuration rather than
+    passed to its constructor, because the constructor raises on an argument
+    it does not know and the raw object accepts anything.
+
+    That is not the whole story, and the difference matters. Accepting a field
+    is not the same as sending it. The library builds the body it posts by
+    copying the raw configuration into a typed request object, and that object
+    keeps only the fields it declares. A parameter the installed package has
+    never heard of therefore survives being set, survives being read back, and
+    then disappears on the way to the service without anything being said.
+
+    Settings promises the opposite: a parameter typed into the provider's
+    parameter list is meant to reach the service, so that a new option can be
+    used before this application knows about it. Honouring that means noticing
+    when the library would drop something and posting the request ourselves
+    instead, which is what :meth:`_transcribe_directly` does. It borrows the
+    library's own HTTP client, so the address, the key and the timeout are the
+    ones the library would have used, and only the request body differs.
+
+    The ordinary case sends nothing the library does not declare and goes
+    through the library unchanged.
     """
+
+    #: How long to wait between asking whether a directly-posted job is done.
+    #: Only a fallback; the library's own setting is preferred when it has one.
+    POLL_SECONDS = 3.0
 
     def __init__(self, api_key: str, timeout_seconds: float) -> None:
         try:
@@ -684,9 +723,21 @@ class _SdkClient:
         assemblyai.settings.api_key = api_key
         assemblyai.settings.http_timeout = timeout_seconds
         self._assemblyai = assemblyai
+        self._api_key = api_key
         self._timeout_seconds = timeout_seconds
+        self._http_client: Any = None
 
     def transcribe(self, audio: Any, parameters: dict[str, Any]) -> Any:
+        unsendable = self._parameters_the_library_would_drop(parameters)
+        if unsendable:
+            _log.info(
+                "Posting the AssemblyAI request directly, because the installed "
+                "%s package would not send %s.",
+                PACKAGE,
+                ", ".join(unsendable),
+            )
+            return self._transcribe_directly(audio, parameters)
+
         configuration = self._assemblyai.TranscriptionConfig()
         for key, value in parameters.items():
             setattr(configuration.raw, key, value)
@@ -694,6 +745,60 @@ class _SdkClient:
 
     def upload_file(self, audio_path: str) -> str:
         return str(self._assemblyai.Transcriber().upload_file(audio_path))
+
+    # -- Posting the request ourselves ----------------------------------
+
+    def _parameters_the_library_would_drop(self, parameters: dict[str, Any]) -> list[str]:
+        """The parameter names the installed package will not put on the wire.
+
+        Read off the typed request object the library builds, because that is
+        the thing that does the dropping. A package whose shape cannot be read
+        at all is treated as dropping nothing, which sends the request the
+        ordinary way rather than inventing a reason to take the long road.
+        """
+        request_type = getattr(self._assemblyai.types, "TranscriptRequest", None)
+        declared = getattr(request_type, "model_fields", None) or getattr(
+            request_type, "__fields__", None
+        )
+        if not declared:
+            return []
+        return [name for name in parameters if name not in declared]
+
+    def _transcribe_directly(self, audio: Any, parameters: dict[str, Any]) -> dict[str, Any]:
+        """Submit the job over the library's HTTP client and wait for it.
+
+        The audio has to be named by URL here, so a local path is uploaded
+        first. That is the same upload the library would have done, and the
+        request that follows carries every parameter exactly as given.
+        """
+        client = self._resolve_http_client()
+        audio_url = audio if _looks_like_url(audio) else self.upload_file(str(audio))
+
+        submitted = _json_of(
+            client.post("/v2/transcript", json={"audio_url": audio_url, **parameters})
+        )
+        transcript_id = submitted.get("id")
+        if not transcript_id:
+            # No id means no job to wait for, and the body is the only account
+            # of why. Handing it back lets the adapter report it as a rejected
+            # job like any other.
+            return submitted
+
+        while True:
+            answer = _json_of(client.get(f"/v2/transcript/{transcript_id}"))
+            if str(answer.get("status") or "").lower() in ("completed", "error"):
+                return answer
+            time.sleep(self._poll_seconds())
+
+    def _poll_seconds(self) -> float:
+        interval = _as_float(getattr(self._assemblyai.settings, "polling_interval", None))
+        return interval if interval and interval > 0 else self.POLL_SECONDS
+
+    def _resolve_http_client(self) -> Any:
+        """The library's own HTTP client, which already knows where to go."""
+        if self._http_client is None:
+            self._http_client = self._assemblyai.Client(api_key=self._api_key).http_client
+        return self._http_client
 
 
 def _build_client(api_key: str, timeout_seconds: float) -> Any:
@@ -707,6 +812,46 @@ def _build_client(api_key: str, timeout_seconds: float) -> Any:
 
 
 # -- Helpers -------------------------------------------------------------
+
+
+def _looks_like_url(audio: Any) -> bool:
+    """Whether this is already somewhere the service can fetch from."""
+    return isinstance(audio, str) and audio.lower().startswith(("http://", "https://"))
+
+
+def _json_of(response: Any) -> dict[str, Any]:
+    """The body of a directly-posted request, or the refusal as an exception.
+
+    The status code is carried on the exception rather than folded into the
+    message, because the adapter decides whether to try again from that number
+    and a sentence it would have to parse is not an answer.
+    """
+    status = _as_int(getattr(response, "status_code", None))
+    body: Any = None
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - a refusal need not be JSON at all
+        body = None
+
+    if status is not None and not 200 <= status < 300:
+        detail = ""
+        if isinstance(body, dict):
+            detail = str(body.get("error") or "").strip()
+        raise _DirectRequestError(detail or f"the request was refused ({status})", status)
+    return body if isinstance(body, dict) else {}
+
+
+class _DirectRequestError(Exception):
+    """A refusal of a request this module posted itself.
+
+    Shaped like the library's own errors, with ``status_code`` on it, so that
+    :func:`_describe_failure` reads it the same way and neither the retry
+    decision nor the message has to know which route the request took.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _canonical_seconds(milliseconds: float | None, offset: float) -> float | None:

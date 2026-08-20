@@ -17,7 +17,13 @@ av>=12.0
 # starts, and a transcript still comes out of whatever else answered.
 openai>=1.60
 elevenlabs>=2.0
-assemblyai>=0.35
+# AssemblyAI's floor is 1.0 rather than something older, and the reason is
+# not a feature we would like to have. Below 0.45 the package's raw
+# configuration object has no ``speech_models`` field and refuses to be given
+# one, so every request this application makes raises before it is sent.
+# Below 1.0 that same object silently ignores any field it does not declare.
+# Both were verified against the published wheels.
+assemblyai>=1.0
 deepgram-sdk>=4.0
 # Microsoft is called over plain HTTP rather than through its own library.
 # MAI-Transcribe is not a deployed model with an endpoint of its own; it is

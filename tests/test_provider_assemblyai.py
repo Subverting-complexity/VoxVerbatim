@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -490,3 +491,282 @@ def block_import(monkeypatch, name: str) -> None:
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
+
+# -- Parameters the library would drop on the floor ----------------------
+#
+# The package accepts any parameter set on its raw configuration and then
+# builds the body it posts from a typed object that keeps only the fields it
+# declares. Anything else is gone, and nothing is said. Settings promises that
+# a parameter typed into the provider's list reaches the service, so the
+# adapter has to notice and post the request itself. These tests hold that
+# line, because the failure it prevents leaves no trace anywhere.
+
+
+class FakeResponse:
+    """One HTTP answer, with only what the code reads off it."""
+
+    def __init__(self, payload: Any, status_code: int = 200) -> None:
+        self.payload = payload
+        self.status_code = status_code
+
+    def json(self) -> Any:
+        if isinstance(self.payload, Exception):
+            raise self.payload
+        return self.payload
+
+
+class FakeHttpClient:
+    """Stands in for the library's own HTTP client."""
+
+    def __init__(self, answers: list[FakeResponse] | None = None) -> None:
+        self.posts: list[dict[str, Any]] = []
+        self.gets: list[str] = []
+        self.answers = answers or []
+
+    def post(self, url: str, json: dict[str, Any]) -> FakeResponse:
+        self.posts.append({"url": url, "json": dict(json)})
+        return self.answers.pop(0) if self.answers else FakeResponse({"id": "job-1"})
+
+    def get(self, url: str) -> FakeResponse:
+        self.gets.append(url)
+        return self.answers.pop(0) if self.answers else FakeResponse(TRANSCRIPT)
+
+
+class FakeRequestType:
+    """The library's typed request object, which keeps only what it declares."""
+
+    model_fields: ClassVar[dict[str, Any]] = {
+        "audio_url": None,
+        "speech_models": None,
+        "punctuate": None,
+        "disfluencies": None,
+        "language_detection": None,
+    }
+
+
+class FakePackage:
+    """The parts of the ``assemblyai`` package this client touches."""
+
+    def __init__(self, request_type: Any = FakeRequestType) -> None:
+        self.settings = type("Settings", (), {"api_key": "", "http_timeout": 0.0})()
+        self.types = type("Types", (), {"TranscriptRequest": request_type})()
+        self.transcribed: list[dict[str, Any]] = []
+        package = self
+
+        class Config:
+            def __init__(self) -> None:
+                self.raw = type("Raw", (), {})()
+
+        class Transcriber:
+            def __init__(self, config: Any = None) -> None:
+                self.config = config
+
+            def transcribe(self, audio: Any) -> Any:
+                package.transcribed.append(
+                    {"audio": audio, "raw": dict(vars(self.config.raw))}
+                )
+                return TRANSCRIPT
+
+        self.TranscriptionConfig = Config
+        self.Transcriber = Transcriber
+
+
+def sdk_client_with(monkeypatch, http_client: FakeHttpClient, package: Any) -> Any:
+    """An ``_SdkClient`` built on a stand-in package rather than the real one."""
+    monkeypatch.setitem(sys.modules, "assemblyai", package)
+    client = assemblyai._SdkClient(API_KEY, 30.0)
+    client._http_client = http_client
+    return client
+
+
+def test_a_parameter_the_library_knows_goes_the_ordinary_way(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient()
+    client = sdk_client_with(monkeypatch, http, package)
+
+    client.transcribe("https://cdn.assemblyai.com/a.wav", {"speech_models": ["universal-2"]})
+
+    assert package.transcribed, "the library should have been used"
+    assert http.posts == [], "nothing should have been posted directly"
+
+
+def test_a_parameter_the_library_would_drop_is_posted_directly(monkeypatch) -> None:
+    """The whole point. An unknown parameter must reach the service."""
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"id": "job-1"}), FakeResponse(TRANSCRIPT)])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    answer = client.transcribe(
+        "https://cdn.assemblyai.com/a.wav",
+        {"speech_models": ["universal-2"], "some_new_option": "yes"},
+    )
+
+    assert package.transcribed == [], "the library would have dropped the new option"
+    assert http.posts[0]["url"] == "/v2/transcript"
+    assert http.posts[0]["json"]["some_new_option"] == "yes"
+    assert http.posts[0]["json"]["speech_models"] == ["universal-2"]
+    assert http.posts[0]["json"]["audio_url"] == "https://cdn.assemblyai.com/a.wav"
+    assert answer == TRANSCRIPT
+
+
+def test_a_local_file_is_uploaded_before_being_posted_directly(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"id": "job-1"}), FakeResponse(TRANSCRIPT)])
+    client = sdk_client_with(monkeypatch, http, package)
+    uploaded: list[str] = []
+
+    def upload(path: str) -> str:
+        uploaded.append(path)
+        return "https://cdn.assemblyai.com/uploaded.wav"
+
+    client.upload_file = upload
+
+    client.transcribe("C:/recordings/meeting.wav", {"some_new_option": "yes"})
+
+    assert uploaded == ["C:/recordings/meeting.wav"]
+    assert http.posts[0]["json"]["audio_url"] == "https://cdn.assemblyai.com/uploaded.wav"
+
+
+def test_a_directly_posted_job_is_waited_for(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient(
+        [
+            FakeResponse({"id": "job-1", "status": "queued"}),
+            FakeResponse({"id": "job-1", "status": "processing"}),
+            FakeResponse(TRANSCRIPT),
+        ]
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+
+    answer = client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert answer == TRANSCRIPT
+    assert http.gets == ["/v2/transcript/job-1", "/v2/transcript/job-1"]
+
+
+def test_a_refused_direct_request_carries_its_status(monkeypatch) -> None:
+    """The status decides whether it is worth trying again, so it must survive."""
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"error": "speech_models is not valid"}, 400)])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    with pytest.raises(assemblyai._DirectRequestError) as raised:
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert raised.value.status_code == 400
+    assert "speech_models is not valid" in str(raised.value)
+
+    _message, retryable, status = assemblyai._describe_failure(raised.value)
+    assert status == 400
+    assert retryable is False
+
+
+def test_a_package_whose_shape_cannot_be_read_is_used_as_it_is(monkeypatch) -> None:
+    """Not being able to tell is not a reason to take the long road."""
+    package = FakePackage(request_type=type("Opaque", (), {}))
+    http = FakeHttpClient()
+    client = sdk_client_with(monkeypatch, http, package)
+
+    client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert package.transcribed, "the library should have been used"
+    assert http.posts == []
+
+
+# -- Settings that would contradict each other ---------------------------
+
+
+def test_a_language_named_in_settings_takes_the_detection_down_with_it(
+    tmp_path: Path,
+) -> None:
+    """The service refuses a request that both names a language and detects one."""
+    client = FakeClient()
+    provider = make_provider(
+        client,
+        parameters={"language_code": "de"},
+        language_confidence_threshold=0.6,
+    )
+
+    provider.transcribe(
+        make_request(tmp_path, languages=(Language.ENGLISH, Language.AFRIKAANS))
+    )
+
+    sent = client.calls[0]["parameters"]
+    assert sent["language_code"] == "de"
+    assert "language_detection" not in sent
+    assert "language_confidence_threshold" not in sent
+
+
+# -- An answer that says nothing ----------------------------------------
+#
+# These four guard the two ways a well-meaning 200 can be worse than a
+# refusal. An unreadable body on the submission would otherwise be reported
+# as a recording that transcribed to no words at all, which nobody would read
+# as a failure. An unreadable body on a poll would otherwise never satisfy the
+# test for a finished job, and the wait would have no end.
+
+
+def test_an_unreadable_answer_to_the_submission_is_a_failure(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse(ValueError("not JSON at all"))])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    with pytest.raises(assemblyai._DirectRequestError) as raised:
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert "could not be read" in str(raised.value)
+
+
+def test_an_unreadable_answer_to_a_poll_ends_the_wait(monkeypatch) -> None:
+    """Otherwise the loop never sees a finished job and never stops."""
+    package = FakePackage()
+    http = FakeHttpClient(
+        [
+            FakeResponse({"id": "job-1", "status": "queued"}),
+            FakeResponse(ValueError("truncated")),
+        ]
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(assemblyai._DirectRequestError):
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+
+def test_an_answer_with_no_job_and_no_reason_is_not_a_success(monkeypatch) -> None:
+    """A body the adapter cannot read as a refusal it would read as a success."""
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"nothing": "useful"})])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    with pytest.raises(assemblyai._DirectRequestError) as raised:
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert "neither accepted nor refused" in str(raised.value)
+
+
+def test_a_refusal_without_a_job_keeps_the_body_that_explains_it(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"status": "error", "error": "audio too short"})])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    answer = client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert answer["error"] == "audio too short"
+
+
+def test_a_bad_answer_to_the_submission_never_looks_transcribed(tmp_path: Path) -> None:
+    """The whole reason the two tests above matter, seen from the adapter."""
+
+    class RefusingClient(FakeClient):
+        def transcribe(self, audio: Any, parameters: dict[str, Any]) -> Any:
+            self.calls.append({"audio": audio, "parameters": dict(parameters)})
+            raise assemblyai._DirectRequestError("the answer could not be read as JSON", 200)
+
+    result = make_provider(RefusingClient()).transcribe(make_request(tmp_path))
+
+    assert result.tokens == []
+    assert result.error is not None
+    assert result.request is not None
+    assert result.request.succeeded is False

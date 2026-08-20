@@ -33,7 +33,9 @@ from audio_transcriber.transcription.providers.base import (
 )
 from audio_transcriber.transcription.providers.elevenlabs import (
     DEFAULT_MAXIMUM_KEYTERMS,
-    KEYTERM_SURCHARGE_THRESHOLD,
+    KEYTERM_MINIMUM_CHARGE_THRESHOLD,
+    MAXIMUM_KEYTERM_CHARACTERS,
+    MAXIMUM_KEYTERM_WORDS,
     ElevenLabsForcedAligner,
     ElevenLabsProvider,
 )
@@ -300,15 +302,22 @@ def test_the_declared_capabilities_match_what_the_service_actually_does():
 # -- What gets sent ------------------------------------------------------
 
 
-def test_the_key_terms_are_cut_before_the_surcharge_bites(request_for):
-    """A hundred terms would cost 20 per cent more, so ninety-nine go."""
+def test_the_key_terms_are_cut_before_the_minimum_charge_bites(request_for):
+    """Above a hundred terms the request is billed 20 seconds, so a hundred go.
+
+    The threshold is "more than a hundred", so a hundred is sent rather than
+    ninety-nine. Cutting further would buy nothing: the separate 20 per cent
+    keyterm surcharge is charged on any request carrying terms at all.
+    """
     client = FakeClient(transcription(SAMPLE_WORDS))
     terms = tuple(f"term-{number}" for number in range(250))
     result = build_provider(client).transcribe(request_for(vocabulary_terms=terms))
 
     sent = client.speech_to_text.calls[0]["keyterms"]
-    assert len(sent) == DEFAULT_MAXIMUM_KEYTERMS
-    assert len(sent) < KEYTERM_SURCHARGE_THRESHOLD
+    # Written out, because DEFAULT_MAXIMUM_KEYTERMS is defined as the
+    # threshold and comparing the two against each other proves nothing.
+    assert len(sent) == 100
+    assert len(sent) == DEFAULT_MAXIMUM_KEYTERMS == KEYTERM_MINIMUM_CHARGE_THRESHOLD
     # The most specific terms come first, so the cut falls off the tail.
     assert sent[0] == "term-0"
     assert result.request.vocabulary_terms == terms[:DEFAULT_MAXIMUM_KEYTERMS]
@@ -319,6 +328,62 @@ def test_a_short_vocabulary_is_sent_whole(request_for):
     build_provider(client).transcribe(request_for(vocabulary_terms=("Bosch", "Suzanne")))
 
     assert client.speech_to_text.calls[0]["keyterms"] == ["Bosch", "Suzanne"]
+
+
+def test_a_term_the_service_would_refuse_is_left_behind_rather_than_sent(request_for):
+    """One bad term fails the whole request, so it never leaves this module.
+
+    ElevenLabs rejects a key term of fifty characters or more, one of more
+    than five words, and one containing any of a short list of characters.
+    None of those refusals drops only the offending term: they refuse the
+    request, and the chunk comes back with no transcript at all.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(
+            vocabulary_terms=(
+                "Vermeulen",
+                "V" * (MAXIMUM_KEYTERM_CHARACTERS + 1),
+                " ".join(["word"] * (MAXIMUM_KEYTERM_WORDS + 1)),
+                "Smith [Jr]",
+                r"C:\Users",
+                "Contoso <Pty>",
+                "Schmidt",
+            )
+        )
+    )
+
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen", "Schmidt"]
+
+
+def test_the_key_term_length_boundary_is_where_the_service_puts_it(request_for):
+    """ElevenLabs says a key term must be "less than 50 characters".
+
+    Both lengths are written out rather than taken from the constant under
+    test. Deriving them would make the test agree with whatever the constant
+    happens to say, including the value this pull request exists to correct.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(vocabulary_terms=("V" * 49, "W" * 50))
+    )
+
+    assert client.speech_to_text.calls[0]["keyterms"] == ["V" * 49]
+
+
+def test_the_key_term_word_boundary_is_where_the_service_puts_it(request_for):
+    """ElevenLabs says a key term may hold "at most 5 words", so six is too many."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(
+            vocabulary_terms=(
+                " ".join(["five"] * 5),
+                " ".join(["six"] * 6),
+            )
+        )
+    )
+
+    assert client.speech_to_text.calls[0]["keyterms"] == [" ".join(["five"] * 5)]
 
 
 def test_the_cap_can_be_raised_deliberately(request_for):
@@ -377,6 +442,213 @@ def test_the_speaker_count_is_only_sent_when_there_is_more_than_one(request_for)
 
     provider.transcribe(request_for(expected_speaker_count=4))
     assert client.speech_to_text.calls[1]["num_speakers"] == 4
+
+
+def test_a_diarisation_field_in_the_extras_is_obeyed_but_never_passed_through(request_for):
+    """The escape hatch still works, but it goes through the rules on the way.
+
+    The client library spreads the extras over the named arguments rather
+    than under them, so a field left in the body would replace whatever this
+    adapter worked out and could land the request with a combination the
+    service refuses. All three diarisation fields are therefore taken out of
+    the body. Two of them are still read: the extras are, for now, the only
+    place either the switch or the threshold can be set at all.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(
+        client,
+        parameters={"diarize": False, "diarization_threshold": 0.9},
+    )
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
+
+    call = client.speech_to_text.calls[0]
+    assert call["request_options"]["additional_body_parameters"] == {}
+    # Read out of the extras rather than passed through them.
+    assert call["diarize"] is False
+    # Refused on a request that does not diarise, whichever way it was set.
+    assert "diarization_threshold" not in call
+
+
+def test_a_threshold_from_the_extras_is_sent_when_the_service_will_take_it(request_for):
+    """Nothing else can set the threshold today, so the extras have to reach it."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"diarization_threshold": 0.9})
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
+
+    call = client.speech_to_text.calls[0]
+    assert call["diarization_threshold"] == 0.9
+    assert "diarization_threshold" not in call["request_options"]["additional_body_parameters"]
+
+
+def test_a_speaker_count_in_the_extras_is_dropped_rather_than_obeyed(request_for):
+    """This one the adapter genuinely owns, and a second copy could only conflict.
+
+    The count comes from the expected speaker count, which has its own
+    setting and its own control, so a number written into the extras beside
+    it has nothing to add and could arrive next to a threshold the service
+    will not accept it with.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"num_speakers": 9})
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
+
+    call = client.speech_to_text.calls[0]
+    assert "num_speakers" not in call
+    assert call["request_options"]["additional_body_parameters"] == {}
+
+
+def test_key_terms_written_into_the_request_still_go_through_the_rules(request_for):
+    """The context layer's list is the one sent, and it is checked like any other.
+
+    That layer hands the terms in as a keyterms parameter as well as a
+    vocabulary, because every other service takes them as an ordinary
+    parameter. Whichever door they come through, a term the service would
+    refuse has to be caught, or one bracket costs the chunk its transcript.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(
+            vocabulary_terms=("unused",),
+            extra_parameters={"keyterms": ["Vermeulen", "Smith [Jr]", "Schmidt"]},
+        )
+    )
+
+    call = client.speech_to_text.calls[0]
+    assert call["keyterms"] == ["Vermeulen", "Schmidt"]
+    # Removed from the body, or it would replace the checked list on the way out.
+    assert "keyterms" not in call["request_options"]["additional_body_parameters"]
+
+
+def test_a_fixed_list_in_the_settings_gives_way_to_the_live_vocabulary(request_for):
+    """A standing instruction is a fallback, not something that overrules the work.
+
+    The escalation path gathers a vocabulary for one window and sends no
+    request parameters at all. A list somebody put in the settings file once
+    must not displace it, or every escalated window would be biased towards
+    the wrong words.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"keyterms": ["Stale"]})
+
+    provider.transcribe(request_for(vocabulary_terms=("Vermeulen", "Schmidt")))
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen", "Schmidt"]
+
+    # With no live vocabulary, the standing list is what is left to use.
+    provider.transcribe(request_for(vocabulary_terms=()))
+    assert client.speech_to_text.calls[1]["keyterms"] == ["Stale"]
+
+
+def test_more_speakers_than_the_service_predicts_are_brought_down(request_for):
+    """ElevenLabs predicts at most 32, and refuses a request asking for more."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(diarise=True, expected_speaker_count=40)
+    )
+
+    assert client.speech_to_text.calls[0]["num_speakers"] == 32
+
+
+def test_a_diarisation_value_that_cannot_be_read_is_reported_as_ignored(request_for, caplog):
+    """A setting that did nothing has to say so, in the words of what happened.
+
+    The parameter box is read as JSON, so a user who means false can write
+    one. The string "false" is somebody who meant it but did not get it, and
+    turning it into a boolean by guessing would change what the transcript is
+    on the strength of a guess. It is refused and named in the log instead.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(
+        client, parameters={"diarize": "false", "diarization_threshold": "abc"}
+    )
+
+    with caplog.at_level("WARNING"):
+        provider.transcribe(request_for(diarise=True))
+
+    assert client.speech_to_text.calls[0]["diarize"] is True
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "diarize parameter was ignored" in messages
+    assert "diarization_threshold parameter was ignored" in messages
+
+
+def test_nothing_claims_a_superseded_list_was_sent(request_for, caplog):
+    """The log said the terms went out. They did not, and it had to stop saying so."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"keyterms": ["Stale"]})
+
+    with caplog.at_level("INFO"):
+        provider.transcribe(request_for(vocabulary_terms=("Vermeulen",)))
+
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen"]
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "were not sent to ElevenLabs" in messages
+    assert "the settings" in messages
+
+
+def test_a_keyterms_value_that_is_not_a_list_is_reported_as_ignored(request_for, caplog):
+    """Its two neighbours warn when they cannot read a value, and so must this one.
+
+    A bare string is the mistake people actually make. It cannot hold terms,
+    so nothing is sent from it, and staying quiet about that would leave
+    somebody with a vocabulary they believe is reaching the service.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, parameters={"keyterms": "Bosch"})
+
+    with caplog.at_level("WARNING"):
+        provider.transcribe(request_for(vocabulary_terms=()))
+
+    assert "keyterms" not in client.speech_to_text.calls[0]
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "keyterms value in the settings was ignored" in messages
+
+
+def test_an_empty_list_in_the_request_does_not_erase_the_vocabulary(request_for):
+    """An empty parameter names no terms, so it is not an instruction to send none."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client).transcribe(
+        request_for(vocabulary_terms=("Vermeulen",), extra_parameters={"keyterms": []})
+    )
+
+    assert client.speech_to_text.calls[0]["keyterms"] == ["Vermeulen"]
+
+
+def test_the_diarisation_threshold_is_sent_when_the_service_will_take_it(request_for):
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, diarisation_threshold=0.31)
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=1))
+
+    assert client.speech_to_text.calls[0]["diarization_threshold"] == 0.31
+
+
+def test_the_diarisation_threshold_gives_way_to_a_speaker_count(request_for):
+    """The service takes one or the other and refuses a request carrying both.
+
+    The count is the better of the two, because somebody listened to the
+    recording and said how many voices were in it, so the threshold is what
+    gets dropped.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, diarisation_threshold=0.31)
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=4))
+
+    call = client.speech_to_text.calls[0]
+    assert call["num_speakers"] == 4
+    assert "diarization_threshold" not in call
+
+
+def test_the_diarisation_threshold_is_not_sent_without_diarisation(request_for):
+    """The service rejects the threshold outright on a request that does not diarise."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, diarisation_threshold=0.31)
+
+    provider.transcribe(request_for(diarise=False, expected_speaker_count=1))
+
+    assert "diarization_threshold" not in client.speech_to_text.calls[0]
 
 
 def test_word_timings_and_audio_events_are_asked_for(request_for):

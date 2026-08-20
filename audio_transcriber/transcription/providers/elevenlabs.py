@@ -41,10 +41,20 @@ against by a service that had never looked at it. The whole-file answer and
 its probability are recorded on the result instead, where they are honestly
 one weak signal among several. Please leave it that way.
 
-The third is money. Sending 100 or more key terms adds a 20 per cent
-surcharge and a 20-second minimum charge to the request, so the list is cut
+The third is money, and it is easy to get the wrong way round. Sending any
+key terms at all adds a 20 per cent surcharge, which is simply the price of
+vocabulary biasing and cannot be avoided by sending fewer of them. Sending
+more than a hundred adds a second charge on top: the request is then billed
+a minimum of 20 seconds of audio however short the recording is. That
+second charge is the one a limit can avoid, so the list is cut to a hundred
 before it goes. The vocabulary arrives ordered most-specific first, which is
 what makes cutting the tail the right place to cut.
+
+A key term can also be refused on its own account, for being 50 characters
+or longer, for running to more than five words, or for containing one of the
+characters the service does not accept. A refusal of that kind fails the
+whole request rather than dropping the one term, so any term that would
+cause it is left behind here instead.
 
 Forced alignment lives here too, because it is the same service and the same
 key, but it is a genuinely different job: it is given words that are already
@@ -83,6 +93,31 @@ from audio_transcriber.transcription.providers.base import (
     TranscriptionRequest,
 )
 
+# Every limit a key term is held to is declared at the top of context.py,
+# beside every other service's, so that a number ElevenLabs changes is
+# corrected in one place. They are renamed on the way in only because inside
+# this module there is no other service to confuse them with.
+#
+# KEYTERM_MINIMUM_CHARGE_THRESHOLD is the count above which a request is
+# billed a minimum of 20 seconds of audio. DEFAULT_MAXIMUM_KEYTERMS sits
+# exactly on it rather than under it, because the threshold is "more than",
+# and because the separate 20 per cent keyterm surcharge applies to any
+# request carrying terms at all and so is not avoided by sending fewer.
+#
+# This direction is the only one that works. context.py reads
+# ProviderCapabilities out of providers/base.py, so base.py must never import
+# context.py and providers/__init__.py must never import an adapter eagerly.
+# Either would close the loop. The AssemblyAI adapter reads its own limits
+# the same way.
+from audio_transcriber.transcription.context import (
+    ELEVENLABS_KEYTERM_CHARACTER_LIMIT as KEYTERM_CHARACTER_LIMIT,
+    ELEVENLABS_KEYTERM_MINIMUM_CHARGE_THRESHOLD as KEYTERM_MINIMUM_CHARGE_THRESHOLD,
+    ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS as MAXIMUM_KEYTERM_CHARACTERS,
+    ELEVENLABS_MAXIMUM_KEYTERM_WORDS as MAXIMUM_KEYTERM_WORDS,
+    ELEVENLABS_MAXIMUM_KEYTERMS as DEFAULT_MAXIMUM_KEYTERMS,
+    ELEVENLABS_UNSUPPORTED_KEYTERM_CHARACTERS as UNSUPPORTED_KEYTERM_CHARACTERS,
+)
+
 _log = logging.getLogger(__name__)
 
 #: The package that must be installed for this service to work at all.
@@ -93,16 +128,6 @@ PACKAGE = "elevenlabs"
 #: settable, because the library types it loosely enough that a future model
 #: works without an upgrade.
 DEFAULT_MODEL = "scribe_v2"
-
-#: Sending this many key terms or more adds a 20 per cent surcharge to the
-#: request and bills a minimum of 20 seconds of audio, however short the
-#: recording is. The API itself allows up to 1000 terms, so this is a cost
-#: decision rather than a technical limit, and it is why the default cap
-#: below sits one term underneath the threshold.
-KEYTERM_SURCHARGE_THRESHOLD = 100
-
-#: How many key terms are sent unless somebody deliberately raises it.
-DEFAULT_MAXIMUM_KEYTERMS = KEYTERM_SURCHARGE_THRESHOLD - 1
 
 _GIGABYTE = 1024 * 1024 * 1024
 
@@ -116,6 +141,13 @@ MAXIMUM_DURATION_SECONDS = 10 * 60 * 60
 #: Forced alignment publishes a smaller limit than transcription does, and
 #: here too the two vendor pages disagree, at 1 GB and 3 GB.
 MAXIMUM_ALIGNMENT_FILE_BYTES = 1 * _GIGABYTE
+
+#: The most speakers the service will predict. Asking for more is refused, so
+#: the count is brought down to this before it goes rather than after. The
+#: settings layer stops at the same number, for the same reason, but this
+#: adapter is what talks to the service and cannot assume it was asked
+#: politely.
+MAXIMUM_SPEAKERS = 32
 
 #: The word type the service uses for a non-speech sound.
 AUDIO_EVENT_TYPE = "audio_event"
@@ -265,22 +297,51 @@ class ElevenLabsProvider(TranscriptionProvider):
                 "It has to be cut into chunks first."
             )
 
-        keyterms = self._keyterms_for(request.vocabulary_terms)
+        extras = {**self._parameters, **request.extra_parameters}
+        keyterms = self._keyterms_for(_terms_for(request, self._parameters))
         language_code = _single_language_code(request.languages)
-        body_parameters = self._body_parameters_for(request)
+        diarise, threshold = self._diarisation_for(request, extras)
+        body_parameters = self._body_parameters_for(extras)
 
         arguments: dict[str, Any] = {
             "model_id": self._model,
             "timestamps_granularity": self._timestamps_granularity,
             "tag_audio_events": self._tag_audio_events,
-            "diarize": request.diarise,
+            "diarize": diarise,
         }
         if language_code is not None:
             arguments["language_code"] = language_code
-        if request.diarise and request.expected_speaker_count > 1:
-            arguments["num_speakers"] = request.expected_speaker_count
-        if self._diarisation_threshold is not None:
-            arguments["diarization_threshold"] = self._diarisation_threshold
+        if diarise and request.expected_speaker_count > 1:
+            arguments["num_speakers"] = min(request.expected_speaker_count, MAXIMUM_SPEAKERS)
+            if request.expected_speaker_count > MAXIMUM_SPEAKERS:
+                _log.info(
+                    "ElevenLabs was asked for %d speakers rather than the %d this "
+                    "recording expects, because %d is the most it will predict.",
+                    MAXIMUM_SPEAKERS,
+                    request.expected_speaker_count,
+                    MAXIMUM_SPEAKERS,
+                )
+        if threshold is not None:
+            # The service accepts this only on a diarising request that has
+            # not also been told how many speakers to expect, and refuses the
+            # whole request otherwise. A speaker count is the stronger hint of
+            # the two and comes from the person who listened to the recording,
+            # so where both are present the count is what survives.
+            if "num_speakers" in arguments:
+                _log.info(
+                    "The diarisation threshold was not sent to ElevenLabs, because "
+                    "a speaker count of %d was sent instead and the service accepts "
+                    "only one of the two.",
+                    arguments["num_speakers"],
+                )
+            elif not diarise:
+                _log.info(
+                    "The diarisation threshold was not sent to ElevenLabs, because "
+                    "this request does not ask for diarisation and the service "
+                    "rejects the threshold without it."
+                )
+            else:
+                arguments["diarization_threshold"] = threshold
         if keyterms:
             arguments["keyterms"] = list(keyterms)
 
@@ -414,40 +475,136 @@ class ElevenLabsProvider(TranscriptionProvider):
     # -- Building the request -------------------------------------------
 
     def _keyterms_for(self, terms: tuple[str, ...]) -> tuple[str, ...]:
-        """Cut the vocabulary down to what can be sent without a surcharge.
+        """Cut the vocabulary down to what the service will actually accept.
 
-        The terms arrive ordered most specific and most confirmed first, so
-        taking the head of the list keeps the ones most likely to matter and
-        drops the ones least likely to.
+        Two different cuts happen here, and they are not the same kind of
+        thing. A term that breaks one of the service's own rules about a key
+        term is dropped wherever it sits in the list, because sending it
+        would have the whole request refused and cost the chunk its
+        transcript rather than costing that one word. Running out of room is
+        the other kind: the terms arrive ordered most specific and most
+        confirmed first, so taking the head of the list keeps the ones most
+        likely to matter and drops the ones least likely to.
         """
-        kept = tuple(term for term in terms if term and term.strip())
+        kept: list[str] = []
+        for term in terms:
+            cleaned = (term or "").strip()
+            if not cleaned:
+                continue
+            refusal = _why_the_service_would_refuse(cleaned)
+            if refusal is not None:
+                _log.info("The term %r was not sent to ElevenLabs: %s", cleaned, refusal)
+                continue
+            kept.append(cleaned)
         if len(kept) <= self._maximum_keyterms:
-            return kept
+            return tuple(kept)
         _log.info(
-            "Sending ElevenLabs the first %d of %d terms, to stay under the "
-            "%d-term surcharge.",
+            "Sending ElevenLabs the first %d of %d terms, to stay at or below the "
+            "%d terms above which a request is billed a 20-second minimum.",
             self._maximum_keyterms,
             len(kept),
-            KEYTERM_SURCHARGE_THRESHOLD,
+            KEYTERM_MINIMUM_CHARGE_THRESHOLD,
         )
-        return kept[: self._maximum_keyterms]
+        return tuple(kept[: self._maximum_keyterms])
 
-    def _body_parameters_for(self, request: TranscriptionRequest) -> dict[str, Any]:
-        """The free-form extras, with the one parameter we never send removed.
+    def _diarisation_for(
+        self,
+        request: TranscriptionRequest,
+        extras: dict[str, Any],
+    ) -> tuple[bool, float | None]:
+        """Whether to diarise, and at what threshold, from wherever those were set.
+
+        Both can only be set through the free-form extras at present. Nothing
+        passes a threshold to this adapter's constructor, and the ``diarise``
+        setting that the settings dialog writes is not read by the code that
+        builds this adapter, so ``diarize`` in the extras is the only thing
+        that has ever turned diarisation off for ElevenLabs. Reading them here
+        keeps that working while still taking them out of the body, where the
+        client library would otherwise spread them over what this adapter
+        decided and produce a combination the service refuses.
+        """
+        diarise = request.diarise
+        if "diarize" in extras:
+            written = extras["diarize"]
+            if isinstance(written, bool):
+                diarise = written
+            else:
+                # Not turned into a boolean by guessing. "false" as a string
+                # is somebody who meant False, but so is 0, and "no", and a
+                # wrong guess here silently changes what the transcript is.
+                # The parameter box is read as JSON, so a real false is
+                # available to anybody who wants one.
+                _log.warning(
+                    "The diarize parameter was ignored, because %r is not true or "
+                    "false. Diarisation stays %s.",
+                    written,
+                    "on" if diarise else "off",
+                )
+
+        threshold = self._diarisation_threshold
+        if "diarization_threshold" in extras:
+            supplied = _as_float(extras["diarization_threshold"])
+            if supplied is not None:
+                threshold = supplied
+            else:
+                _log.warning(
+                    "The diarization_threshold parameter was ignored, because %r "
+                    "is not a number.",
+                    extras["diarization_threshold"],
+                )
+        return diarise, threshold
+
+    def _body_parameters_for(self, extras: dict[str, Any]) -> dict[str, Any]:
+        """The free-form extras, with the ones we never pass straight through removed.
+
+        This matters more than it looks, because of how the client library
+        merges them. The extras are handed over as
+        ``additional_body_parameters`` and spread over the named arguments
+        rather than under them, so an extra of the same name silently
+        replaces what this adapter worked out. Anything decided here has to
+        be taken out of the extras, or the decision does not hold.
 
         ``no_verbatim`` asks the service to tidy what it heard. Our own
         verbatim layer is the authoritative one, and a service that quietly
         removes fillers and false starts breaks the link between the words
         and the audio they came from, so it is dropped even when somebody
         has put it in the settings.
+
+        ``num_speakers`` is dropped outright. The speaker count is worked out
+        from the expected speaker count, which has a setting and a control of
+        its own, so a second copy of it here could only conflict with the
+        first.
+
+        The other three are removed but not thrown away. ``diarize`` and
+        ``diarization_threshold`` were read by ``_diarisation_for`` before
+        this ran, and ``keyterms`` by ``_terms_for``, so that all of them go
+        through this adapter's rules rather than round them. Each of those
+        methods says in the log what it made of what it found, which is why
+        nothing is said about them here.
         """
-        merged = {**self._parameters, **request.extra_parameters}
+        merged = dict(extras)
         if "no_verbatim" in merged:
             merged.pop("no_verbatim")
             _log.warning(
                 "The no_verbatim parameter was not sent to ElevenLabs. This "
                 "application is verbatim by design."
             )
+        if "num_speakers" in merged:
+            merged.pop("num_speakers")
+            _log.warning(
+                "The num_speakers parameter was not sent to ElevenLabs as written. "
+                "The speaker count comes from the expected speaker count, which "
+                "has a setting of its own."
+            )
+        # Removed without a word, deliberately. What became of these three is
+        # not known here: whether a list of terms was used or superseded, and
+        # whether a diarisation value was read or was unusable, was settled
+        # before this ran. Saying anything about them from here would mean
+        # guessing, and a log that guesses wrongly is worse than one that is
+        # quiet. The two methods that made those decisions report them.
+        merged.pop("keyterms", None)
+        merged.pop("diarize", None)
+        merged.pop("diarization_threshold", None)
         return merged
 
     def _request_record(
@@ -660,6 +817,97 @@ def _build_client(api_key: str) -> Any:
     except ImportError as error:
         raise ProviderUnavailable(Provider.ELEVENLABS, PACKAGE) from error
     return ElevenLabs(api_key=api_key)
+
+
+def _terms_for(
+    request: TranscriptionRequest,
+    settings_parameters: dict[str, Any],
+) -> tuple[str, ...]:
+    """The key terms to send, from the most specific place that names any.
+
+    They can arrive by three doors, and the order between them matters. The
+    context layer hands the same list in twice, once as the request's
+    vocabulary and once as a ``keyterms`` parameter on the request, because
+    every other service takes its terms as an ordinary parameter and this one
+    takes them as an argument. Settings may also hold a list, written by
+    somebody who wanted terms sent on every recording.
+
+    The request is read first, then its vocabulary, and the settings list only
+    if neither named anything. That last part is the ordering that is worth
+    being deliberate about: the escalation path sends a live vocabulary
+    gathered for one window and no request parameters at all, and a fixed list
+    from the settings file should not be allowed to displace it. A general
+    instruction is what you fall back on, not what overrules the specific work
+    in front of you.
+
+    Whichever list comes back is then held to the service's own rules about a
+    key term, so a bracket in somebody's settings costs them that term rather
+    than costing the recording its transcript.
+    """
+    candidates = (
+        ("the request's parameters", request.extra_parameters.get("keyterms")),
+        ("the request's vocabulary", request.vocabulary_terms),
+        ("the settings", settings_parameters.get("keyterms")),
+    )
+    chosen: tuple[str, ...] | None = None
+    chosen_from = ""
+    for description, supplied in candidates:
+        if supplied is not None and not isinstance(supplied, (list, tuple)):
+            # Absent and empty are quiet, because neither names any terms and
+            # neither is a mistake. This is a mistake: somebody meant to send
+            # terms and wrote something that cannot hold any.
+            _log.warning(
+                "The keyterms value in %s was ignored, because %r is not a list "
+                "of terms.",
+                description,
+                supplied,
+            )
+            continue
+        if not supplied:
+            continue
+        if chosen is None:
+            chosen = tuple(str(term) for term in supplied)
+            chosen_from = description
+            continue
+        # Said out loud, because a standing list quietly losing to a live one
+        # is right but surprising, and somebody who wrote that list deserves
+        # to find out here rather than by wondering why it had no effect.
+        _log.info(
+            "The %d key terms in %s were not sent to ElevenLabs. The %d in %s "
+            "are more specific to this recording.",
+            len(supplied),
+            description,
+            len(chosen),
+            chosen_from,
+        )
+    return chosen if chosen is not None else ()
+
+
+def _why_the_service_would_refuse(term: str) -> str | None:
+    """Why this key term cannot be sent, or None if it can.
+
+    A sentence rather than a flag, because the only thing anybody does with
+    the answer is write it into the log for somebody to read later, and
+    "it is 63 characters long" tells them what to change about their
+    vocabulary in a way that a bare rejection does not.
+    """
+    if len(term) > MAXIMUM_KEYTERM_CHARACTERS:
+        return (
+            f"it is {len(term)} characters long, and a key term must be shorter "
+            f"than {KEYTERM_CHARACTER_LIMIT}."
+        )
+    if len(term.split()) > MAXIMUM_KEYTERM_WORDS:
+        return (
+            f"it has {len(term.split())} words, and a key term may have at most "
+            f"{MAXIMUM_KEYTERM_WORDS}."
+        )
+    offending = sorted(
+        {character for character in term if character in UNSUPPORTED_KEYTERM_CHARACTERS}
+    )
+    if offending:
+        listed = " and ".join(f'"{character}"' for character in offending)
+        return f"it contains {listed}, which a key term may not contain."
+    return None
 
 
 def _is_written_mark(kind: str, text: str) -> bool:

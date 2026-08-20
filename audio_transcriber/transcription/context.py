@@ -58,18 +58,41 @@ from audio_transcriber.transcription.vocabulary import VocabularyTerm
 
 #: ElevenLabs Scribe accepts a list of keyterms.
 #:
-#: Theirs: the API takes up to 1000 keyterms, each at most 50 characters and
-#: at most 5 words. A term breaking either rule is rejected, not trimmed.
+#: Theirs: the API takes up to 1000 keyterms, each of fewer than 50 characters
+#: and at most 5 words. A term breaking any of those rules is rejected, not
+#: trimmed, and it takes the whole request down with it rather than being
+#: quietly left out, so a term that cannot be sent has to be dropped here.
+#:
+#: The character rule is written as "less than 50", so the longest term that
+#: is actually accepted is 49 characters. The limit and the longest acceptable
+#: term are named separately below, because the two numbers are one apart and
+#: reading the wrong one costs a request.
 ELEVENLABS_KEYTERM_API_LIMIT = 1000
-ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS = 50
+ELEVENLABS_KEYTERM_CHARACTER_LIMIT = 50
+ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS = ELEVENLABS_KEYTERM_CHARACTER_LIMIT - 1
 ELEVENLABS_MAXIMUM_KEYTERM_WORDS = 5
 
-#: Ours, and a cost decision rather than a capability one. At 100 keyterms and
-#: above, ElevenLabs adds a 20 per cent surcharge and bills a 20-second
-#: minimum per request, so this sits deliberately one term below that
-#: threshold. A user with a long vocabulary and a reason to pay for it could
-#: reasonably want this raised, which is exactly why it is one named number.
-ELEVENLABS_MAXIMUM_KEYTERMS = 99
+#: Theirs: these characters may not appear inside a keyterm at all. A term
+#: containing one is refused, and the refusal is of the request rather than of
+#: the term, so anything holding a bracket or a backslash has to be left
+#: behind. Stripping the character out instead would send a word the user
+#: never asked for, which is worse than sending nothing.
+ELEVENLABS_UNSUPPORTED_KEYTERM_CHARACTERS = frozenset("<>{}[]\\")
+
+#: Theirs: sending more than this many keyterms bills the request a minimum of
+#: 20 seconds of audio, however short the recording really is. That is the
+#: charge a limit can avoid, and 100 terms is the largest list that avoids it.
+#:
+#: The 20 per cent surcharge that ElevenLabs adds for keyterms is a separate
+#: matter and is not avoidable by sending fewer: it applies to any request
+#: that carries keyterms at all. Nothing is gained by cutting the list below
+#: the threshold, which is why the limit sits exactly on it rather than under.
+ELEVENLABS_KEYTERM_MINIMUM_CHARGE_THRESHOLD = 100
+
+#: Ours, and a cost decision rather than a capability one. A user with a long
+#: vocabulary and a reason to pay the 20-second minimum could reasonably want
+#: this raised, which is exactly why it is one named number.
+ELEVENLABS_MAXIMUM_KEYTERMS = ELEVENLABS_KEYTERM_MINIMUM_CHARGE_THRESHOLD
 
 #: OpenAI ``gpt-transcribe`` takes context through three separate parameters,
 #: so its terms no longer have to be smuggled into the prose.
@@ -324,6 +347,7 @@ def _for_elevenlabs(package: ContextPackage) -> ProviderContext:
         ELEVENLABS_MAXIMUM_KEYTERMS,
         maximum_characters=ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS,
         maximum_words=ELEVENLABS_MAXIMUM_KEYTERM_WORDS,
+        forbidden_characters=ELEVENLABS_UNSUPPORTED_KEYTERM_CHARACTERS,
     )
     return ProviderContext(
         provider=Provider.ELEVENLABS,
@@ -454,14 +478,17 @@ def _fit_terms(
     maximum_terms: int,
     maximum_characters: int | None = None,
     maximum_words: int | None = None,
+    forbidden_characters: frozenset[str] | None = None,
 ) -> tuple[tuple[str, ...], int]:
     """Return as many terms as a service will take, and how many were left out.
 
-    A term that breaks a rule about its own length is dropped and the next one
+    A term that breaks a rule about itself is dropped and the next one
     considered, because it was never going to be accepted whatever room there
-    was. Running out of room is different: everything after that point goes,
-    because the list is ordered by value and letting a later, shorter term
-    jump the queue would quietly reverse that ranking.
+    was. That covers being too long, having too many words, and containing a
+    character the service refuses. Running out of room is different:
+    everything after that point goes, because the list is ordered by value and
+    letting a later, shorter term jump the queue would quietly reverse that
+    ranking.
     """
     kept: list[str] = []
     dropped = 0
@@ -473,6 +500,11 @@ def _fit_terms(
             dropped += 1
             continue
         if maximum_words is not None and _word_count(text) > maximum_words:
+            dropped += 1
+            continue
+        if forbidden_characters and any(
+            character in forbidden_characters for character in text
+        ):
             dropped += 1
             continue
         kept.append(text)

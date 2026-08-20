@@ -304,15 +304,21 @@ def test_every_character_the_service_refuses_is_refused_here():
         assert written.dropped_term_count == 1, character
 
 
-def test_a_term_of_exactly_the_longest_allowed_length_is_kept():
-    """The service's rule is "less than 50", so 49 characters must still fit."""
-    longest = "V" * ELEVENLABS_MAXIMUM_KEYTERM_CHARACTERS
-    package = build_context_package(configuration(), terms(longest))
+def test_the_key_term_length_boundary_is_where_the_service_puts_it():
+    """ElevenLabs says a key term must be "less than 50 characters".
+
+    The two lengths are written out rather than derived from the constant
+    under test, which is the whole point of the test: a constant restored to
+    the wrong value would build a fifty-character term, assert it survives,
+    and pass. Forty-nine has to be kept and fifty has to go, whatever the
+    constant currently says.
+    """
+    package = build_context_package(configuration(), terms("V" * 49, "W" * 50))
 
     written = adapt_for(package, Provider.ELEVENLABS)
 
-    assert written.terms == (longest,)
-    assert written.dropped_term_count == 0
+    assert written.terms == ("V" * 49,)
+    assert written.dropped_term_count == 1
 
 
 def test_openai_takes_only_as_many_keywords_as_we_will_send_it():

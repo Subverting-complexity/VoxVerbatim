@@ -93,6 +93,22 @@ from audio_transcriber.transcription.providers.base import (
     TranscriptionRequest,
 )
 
+# Every limit a key term is held to is declared at the top of context.py,
+# beside every other service's, so that a number ElevenLabs changes is
+# corrected in one place. They are renamed on the way in only because inside
+# this module there is no other service to confuse them with.
+#
+# KEYTERM_MINIMUM_CHARGE_THRESHOLD is the count above which a request is
+# billed a minimum of 20 seconds of audio. DEFAULT_MAXIMUM_KEYTERMS sits
+# exactly on it rather than under it, because the threshold is "more than",
+# and because the separate 20 per cent keyterm surcharge applies to any
+# request carrying terms at all and so is not avoided by sending fewer.
+#
+# This direction is the only one that works. context.py reads
+# ProviderCapabilities out of providers/base.py, so base.py must never import
+# context.py and providers/__init__.py must never import an adapter eagerly.
+# Either would close the loop. The AssemblyAI adapter reads its own limits
+# the same way.
 from audio_transcriber.transcription.context import (
     ELEVENLABS_KEYTERM_CHARACTER_LIMIT as KEYTERM_CHARACTER_LIMIT,
     ELEVENLABS_KEYTERM_MINIMUM_CHARGE_THRESHOLD as KEYTERM_MINIMUM_CHARGE_THRESHOLD,
@@ -113,17 +129,6 @@ PACKAGE = "elevenlabs"
 #: works without an upgrade.
 DEFAULT_MODEL = "scribe_v2"
 
-#: Every limit these terms are held to belongs to the shared limits module,
-#: so that a number ElevenLabs changes is corrected in one place. They are
-#: renamed on the way in only because inside this module there is no other
-#: service to confuse them with.
-#:
-#: ``KEYTERM_MINIMUM_CHARGE_THRESHOLD`` is the count above which a request is
-#: billed a minimum of 20 seconds of audio. ``DEFAULT_MAXIMUM_KEYTERMS`` sits
-#: exactly on it rather than under it, because the threshold is "more than",
-#: and because the separate 20 per cent keyterm surcharge applies to any
-#: request carrying terms at all and so is not avoided by sending fewer.
-
 _GIGABYTE = 1024 * 1024 * 1024
 
 #: The API reference says under 5 GB and the capabilities page says 3 GB.
@@ -136,6 +141,18 @@ MAXIMUM_DURATION_SECONDS = 10 * 60 * 60
 #: Forced alignment publishes a smaller limit than transcription does, and
 #: here too the two vendor pages disagree, at 1 GB and 3 GB.
 MAXIMUM_ALIGNMENT_FILE_BYTES = 1 * _GIGABYTE
+
+#: The most speakers the service will predict. Asking for more is refused, so
+#: the count is brought down to this before it goes rather than after. The
+#: settings layer stops at the same number, for the same reason, but this
+#: adapter is what talks to the service and cannot assume it was asked
+#: politely.
+MAXIMUM_SPEAKERS = 32
+
+#: The three fields that decide diarisation. The service refuses some
+#: combinations of them, so this adapter settles all three together and takes
+#: them out of the free-form extras rather than letting one arrive on its own.
+_DIARISATION_PARAMETERS = ("diarize", "num_speakers", "diarization_threshold")
 
 #: The word type the service uses for a non-speech sound.
 AUDIO_EVENT_TYPE = "audio_event"
@@ -285,9 +302,10 @@ class ElevenLabsProvider(TranscriptionProvider):
                 "It has to be cut into chunks first."
             )
 
-        keyterms = self._keyterms_for(request.vocabulary_terms)
+        extras = {**self._parameters, **request.extra_parameters}
+        keyterms = self._keyterms_for(_terms_in(extras, request.vocabulary_terms))
         language_code = _single_language_code(request.languages)
-        body_parameters = self._body_parameters_for(request)
+        body_parameters = self._body_parameters_for(extras)
 
         arguments: dict[str, Any] = {
             "model_id": self._model,
@@ -298,7 +316,15 @@ class ElevenLabsProvider(TranscriptionProvider):
         if language_code is not None:
             arguments["language_code"] = language_code
         if request.diarise and request.expected_speaker_count > 1:
-            arguments["num_speakers"] = request.expected_speaker_count
+            arguments["num_speakers"] = min(request.expected_speaker_count, MAXIMUM_SPEAKERS)
+            if request.expected_speaker_count > MAXIMUM_SPEAKERS:
+                _log.info(
+                    "ElevenLabs was asked for %d speakers rather than the %d it was "
+                    "given, because %d is the most it will predict.",
+                    MAXIMUM_SPEAKERS,
+                    request.expected_speaker_count,
+                    MAXIMUM_SPEAKERS,
+                )
         if self._diarisation_threshold is not None:
             # The service accepts this only on a diarising request that has
             # not also been told how many speakers to expect, and refuses the
@@ -485,22 +511,50 @@ class ElevenLabsProvider(TranscriptionProvider):
         )
         return tuple(kept[: self._maximum_keyterms])
 
-    def _body_parameters_for(self, request: TranscriptionRequest) -> dict[str, Any]:
-        """The free-form extras, with the one parameter we never send removed.
+    def _body_parameters_for(self, extras: dict[str, Any]) -> dict[str, Any]:
+        """The free-form extras, with the ones we never pass straight through removed.
+
+        This matters more than it looks, because of how the client library
+        merges them. The extras are handed over as
+        ``additional_body_parameters`` and spread over the named arguments
+        rather than under them, so an extra of the same name silently
+        replaces what this adapter worked out. Anything decided here has to
+        be taken out of the extras, or the decision does not hold.
 
         ``no_verbatim`` asks the service to tidy what it heard. Our own
         verbatim layer is the authoritative one, and a service that quietly
         removes fillers and false starts breaks the link between the words
         and the audio they came from, so it is dropped even when somebody
         has put it in the settings.
+
+        The three diarisation fields are dropped for a different reason. The
+        service refuses some combinations of them outright, so this adapter
+        has to decide all three together; one of them arriving separately
+        would break the set and cost the request.
+
+        ``keyterms`` is removed here but is not thrown away: it is read back
+        out beforehand and sent as an argument, so that the terms in it go
+        through the service's own rules about a key term instead of round
+        them. See ``_terms_in``.
         """
-        merged = {**self._parameters, **request.extra_parameters}
+        merged = dict(extras)
         if "no_verbatim" in merged:
             merged.pop("no_verbatim")
             _log.warning(
                 "The no_verbatim parameter was not sent to ElevenLabs. This "
                 "application is verbatim by design."
             )
+        merged.pop("keyterms", None)
+        for name in _DIARISATION_PARAMETERS:
+            if name in merged:
+                merged.pop(name)
+                _log.warning(
+                    "The %s parameter was not sent to ElevenLabs as written. "
+                    "Diarisation is one decision with three fields in it, the "
+                    "service rejects some combinations of them, and this adapter "
+                    "settles all three together.",
+                    name,
+                )
         return merged
 
     def _request_record(
@@ -715,6 +769,28 @@ def _build_client(api_key: str) -> Any:
     return ElevenLabs(api_key=api_key)
 
 
+def _terms_in(extras: dict[str, Any], vocabulary_terms: tuple[str, ...]) -> tuple[str, ...]:
+    """The key terms to send, wherever they arrived from.
+
+    They can arrive by either of two doors. The context layer hands the same
+    list in twice, once as the request's vocabulary and once as a ``keyterms``
+    parameter, because every other service takes its terms as an ordinary
+    parameter and this one takes them as an argument. Settings may also carry
+    a list of their own.
+
+    A list written into the extras wins, which is the same rule the extras
+    follow everywhere else: the more specific instruction is the one that
+    stands. What it does not get to do is skip the rules. Whichever list this
+    returns goes through the service's own limits on a key term afterwards,
+    so a bracket in somebody's settings costs them that term rather than the
+    whole recording.
+    """
+    supplied = extras.get("keyterms")
+    if isinstance(supplied, (list, tuple)):
+        return tuple(str(term) for term in supplied)
+    return vocabulary_terms
+
+
 def _why_the_service_would_refuse(term: str) -> str | None:
     """Why this key term cannot be sent, or None if it can.
 
@@ -737,10 +813,8 @@ def _why_the_service_would_refuse(term: str) -> str | None:
         {character for character in term if character in UNSUPPORTED_KEYTERM_CHARACTERS}
     )
     if offending:
-        return (
-            f"it contains {' and '.join(repr(character) for character in offending)}, "
-            "which a key term may not contain."
-        )
+        listed = " and ".join(f'"{character}"' for character in offending)
+        return f"it contains {listed}, which a key term may not contain."
     return None
 
 

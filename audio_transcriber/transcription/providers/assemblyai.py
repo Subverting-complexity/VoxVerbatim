@@ -779,10 +779,17 @@ class _SdkClient:
         )
         transcript_id = submitted.get("id")
         if not transcript_id:
-            # No id means no job to wait for, and the body is the only account
-            # of why. Handing it back lets the adapter report it as a rejected
-            # job like any other.
-            return submitted
+            # No id means no job to wait for. Where the body says why, it is
+            # handed back so the adapter reports it as a rejected job like any
+            # other and keeps the explanation. Where it says nothing, there is
+            # nothing to report and this has to be raised, because a body the
+            # adapter cannot read as a refusal it reads as a success instead.
+            if _reads_as_a_refusal(submitted):
+                return submitted
+            raise _DirectRequestError(
+                "the job was neither accepted nor refused: the answer carried no "
+                "transcript id and no error"
+            )
 
         while True:
             answer = _json_of(client.get(f"/v2/transcript/{transcript_id}"))
@@ -814,6 +821,17 @@ def _build_client(api_key: str, timeout_seconds: float) -> Any:
 # -- Helpers -------------------------------------------------------------
 
 
+def _reads_as_a_refusal(body: dict[str, Any]) -> bool:
+    """Whether the adapter will recognise this body as a job that was refused.
+
+    Deliberately the same two things the adapter itself looks at, so that a
+    body handed back here cannot be one it goes on to treat as a success.
+    """
+    return bool(body.get("error")) or str(body.get("status") or "").lower().endswith(
+        "error"
+    )
+
+
 def _looks_like_url(audio: Any) -> bool:
     """Whether this is already somewhere the service can fetch from."""
     return isinstance(audio, str) and audio.lower().startswith(("http://", "https://"))
@@ -825,20 +843,33 @@ def _json_of(response: Any) -> dict[str, Any]:
     The status code is carried on the exception rather than folded into the
     message, because the adapter decides whether to try again from that number
     and a sentence it would have to parse is not an answer.
+
+    A body that cannot be read as an object is a failure even when the status
+    says otherwise, and saying so here is what keeps two silent failures out of
+    the caller. An unreadable answer to the submission would otherwise look
+    like a job that finished with no words in it, and an unreadable answer to a
+    poll would otherwise look like a job that has not finished yet, which is a
+    wait with no end.
     """
     status = _as_int(getattr(response, "status_code", None))
     body: Any = None
+    unreadable = ""
     try:
         body = response.json()
-    except Exception:  # noqa: BLE001 - a refusal need not be JSON at all
+    except Exception as error:  # noqa: BLE001 - a refusal need not be JSON at all
+        unreadable = str(error).strip()
         body = None
 
+    detail = str(body.get("error") or "").strip() if isinstance(body, dict) else ""
     if status is not None and not 200 <= status < 300:
-        detail = ""
-        if isinstance(body, dict):
-            detail = str(body.get("error") or "").strip()
         raise _DirectRequestError(detail or f"the request was refused ({status})", status)
-    return body if isinstance(body, dict) else {}
+    if not isinstance(body, dict):
+        raise _DirectRequestError(
+            "the answer could not be read as JSON"
+            + (f": {unreadable}" if unreadable else ""),
+            status,
+        )
+    return body
 
 
 class _DirectRequestError(Exception):

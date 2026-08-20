@@ -696,3 +696,77 @@ def test_a_language_named_in_settings_takes_the_detection_down_with_it(
     assert sent["language_code"] == "de"
     assert "language_detection" not in sent
     assert "language_confidence_threshold" not in sent
+
+
+# -- An answer that says nothing ----------------------------------------
+#
+# These four guard the two ways a well-meaning 200 can be worse than a
+# refusal. An unreadable body on the submission would otherwise be reported
+# as a recording that transcribed to no words at all, which nobody would read
+# as a failure. An unreadable body on a poll would otherwise never satisfy the
+# test for a finished job, and the wait would have no end.
+
+
+def test_an_unreadable_answer_to_the_submission_is_a_failure(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse(ValueError("not JSON at all"))])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    with pytest.raises(assemblyai._DirectRequestError) as raised:
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert "could not be read" in str(raised.value)
+
+
+def test_an_unreadable_answer_to_a_poll_ends_the_wait(monkeypatch) -> None:
+    """Otherwise the loop never sees a finished job and never stops."""
+    package = FakePackage()
+    http = FakeHttpClient(
+        [
+            FakeResponse({"id": "job-1", "status": "queued"}),
+            FakeResponse(ValueError("truncated")),
+        ]
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(assemblyai._DirectRequestError):
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+
+def test_an_answer_with_no_job_and_no_reason_is_not_a_success(monkeypatch) -> None:
+    """A body the adapter cannot read as a refusal it would read as a success."""
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"nothing": "useful"})])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    with pytest.raises(assemblyai._DirectRequestError) as raised:
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert "neither accepted nor refused" in str(raised.value)
+
+
+def test_a_refusal_without_a_job_keeps_the_body_that_explains_it(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"status": "error", "error": "audio too short"})])
+    client = sdk_client_with(monkeypatch, http, package)
+
+    answer = client.transcribe("https://cdn.assemblyai.com/a.wav", {"some_new_option": 1})
+
+    assert answer["error"] == "audio too short"
+
+
+def test_a_bad_answer_to_the_submission_never_looks_transcribed(tmp_path: Path) -> None:
+    """The whole reason the two tests above matter, seen from the adapter."""
+
+    class RefusingClient(FakeClient):
+        def transcribe(self, audio: Any, parameters: dict[str, Any]) -> Any:
+            self.calls.append({"audio": audio, "parameters": dict(parameters)})
+            raise assemblyai._DirectRequestError("the answer could not be read as JSON", 200)
+
+    result = make_provider(RefusingClient()).transcribe(make_request(tmp_path))
+
+    assert result.tokens == []
+    assert result.error is not None
+    assert result.request is not None
+    assert result.request.succeeded is False

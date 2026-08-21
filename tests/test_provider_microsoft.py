@@ -371,7 +371,7 @@ def test_an_http_error_becomes_a_result(tmp_path: Path) -> None:
     assert "429" in result.error and "slow down" in result.error
 
 
-def test_a_rejected_model_names_the_four_regions(tmp_path: Path) -> None:
+def test_a_rejected_model_names_the_regions_that_serve_it(tmp_path: Path) -> None:
     """A resource in the wrong region looks exactly like a misspelled model."""
     client = FakeHttpClient(
         FakeResponse(
@@ -448,6 +448,295 @@ def test_a_credential_in_the_settings_extras_is_stripped(tmp_path: Path) -> None
     assert record is not None
     assert not contains_text(record.request_parameters, API_KEY)
     assert record.request_parameters["definition"]["customField"] == "kept"
+
+
+# -- The language the service is asked to listen for ----------------------
+
+
+def test_a_bilingual_recording_is_not_forced_into_one_language(tmp_path: Path) -> None:
+    """No locale at all, which is what leaves the service multi-lingual.
+
+    This is the whole reason Microsoft is here. Naming a locale forces
+    recognition into that language, so a recording that may be English or
+    German has to name none, or every phrase comes back English and the one
+    per-segment language signal in the application becomes a constant.
+    """
+    client = FakeHttpClient()
+    make_provider(client).transcribe(make_request(tmp_path))
+
+    assert "locales" not in client.posts[0]["definition"]
+
+
+def test_one_language_is_named(tmp_path: Path) -> None:
+    """Where there is only one, saying so is what the field is for."""
+    client = FakeHttpClient()
+    request = make_request(tmp_path, languages=(Language.GERMAN,))
+    make_provider(client).transcribe(request)
+
+    assert client.posts[0]["definition"]["locales"] == ["de"]
+
+
+def test_an_unknown_language_names_none(tmp_path: Path) -> None:
+    """Knowing nothing is not a reason to guess English."""
+    client = FakeHttpClient()
+    request = make_request(tmp_path, languages=(Language.UNKNOWN,))
+    make_provider(client).transcribe(request)
+
+    assert "locales" not in client.posts[0]["definition"]
+    assert client.posts[0]["definition"]["enhancedMode"]["model"] == microsoft.DEFAULT_MODEL
+
+
+def test_a_settings_locale_displaces_the_adapters_own(tmp_path: Path) -> None:
+    """The adapter's rule is a default, not a ban: a setting still wins.
+
+    The recording here is in one language, so the adapter would name a locale
+    of its own. That is what the setting has to displace. A bilingual recording
+    would prove nothing, because there would be no locale to displace.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"locales": ["en-GB"]})
+    provider.transcribe(make_request(tmp_path, languages=(Language.GERMAN,)))
+
+    assert client.posts[0]["definition"]["locales"] == ["en-GB"]
+
+
+# -- An answer that says nothing -----------------------------------------
+
+
+def test_an_unreadable_answer_is_a_failure_not_a_silent_recording(tmp_path: Path) -> None:
+    """A 200 whose body is not a transcript must not read as a silent recording.
+
+    This is the one failure here that would otherwise be invisible. No phrases
+    means no words, and a result with no words and no error is exactly what a
+    recording in which nobody spoke produces. The run would be called a
+    success and the recording left looking silent.
+    """
+    client = FakeHttpClient(FakeResponse("<html>504 Gateway Timeout</html>", 200))
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert result.tokens == []
+    assert result.error is not None and "not a transcription result" in result.error
+    # Whatever arrived is the only account of what went wrong.
+    assert result.raw_response == "<html>504 Gateway Timeout</html>"
+
+
+def test_an_answer_with_no_phrases_field_is_a_failure(tmp_path: Path) -> None:
+    """A truncated object is as unreadable as a page of HTML."""
+    client = FakeHttpClient(FakeResponse({"durationMilliseconds": 4000}, 200))
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert result.error is not None and "not a transcription result" in result.error
+
+
+def test_a_transcript_with_no_phrases_is_a_failure(tmp_path: Path) -> None:
+    """Words with nowhere to put them are reported, not quietly dropped."""
+    body = {
+        "durationMilliseconds": 4000,
+        "combinedPhrases": [{"text": "Good morning."}],
+        "phrases": [],
+    }
+    client = FakeHttpClient(FakeResponse(body, 200))
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert result.error is not None and "no phrases" in result.error
+    assert result.raw_response == body
+
+
+def test_a_single_phrase_where_a_list_belongs_is_a_failure(tmp_path: Path) -> None:
+    """Iterating an object yields its keys, and keys make words out of nothing.
+
+    This is the shape the guard exists for. Every field would read as missing,
+    every word would come out empty, and no error would be raised anywhere.
+    """
+    body = {
+        "durationMilliseconds": 4000,
+        "combinedPhrases": [{"text": "Good morning."}],
+        "phrases": {"text": "Good morning.", "offsetMilliseconds": 0},
+    }
+    client = FakeHttpClient(FakeResponse(body, 200))
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert result.tokens == []
+
+
+def test_a_genuinely_silent_recording_still_succeeds(tmp_path: Path) -> None:
+    """Nothing said and nothing returned is an answer, not a fault."""
+    body = {"durationMilliseconds": 4000, "combinedPhrases": [{"text": ""}], "phrases": []}
+    client = FakeHttpClient(FakeResponse(body, 200))
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is True
+    assert result.tokens == []
+
+
+# -- The model that takes neither a style nor a phrase list ---------------
+
+
+def test_the_older_model_is_sent_no_style_or_phrase_list(tmp_path: Path) -> None:
+    """Both arrived with 1.5. Sending them to the model before it is a refusal."""
+    client = FakeHttpClient()
+    provider = make_provider(client, model="mai-transcribe-1")
+    provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    definition = client.posts[0]["definition"]
+    assert "transcribeStyle" not in definition["enhancedMode"]
+    assert "phraseList" not in definition
+    assert definition["enhancedMode"]["model"] == "mai-transcribe-1"
+
+
+def test_the_older_model_cannot_be_given_a_style_by_settings(tmp_path: Path) -> None:
+    client = FakeHttpClient()
+    provider = make_provider(
+        client,
+        model="mai-transcribe-1",
+        parameters={
+            "enhancedMode": {"transcribeStyle": "verbatim"},
+            "phraseList": {"biasingWeight": 1.5},
+        },
+    )
+    provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    definition = client.posts[0]["definition"]
+    assert "transcribeStyle" not in definition["enhancedMode"]
+    assert "phraseList" not in definition
+
+
+def test_an_unrecognised_model_keeps_the_style(tmp_path: Path) -> None:
+    """A model newer than this file is assumed to take what 1.5 takes.
+
+    The other assumption is worse: a model released next year would quietly
+    lose its verbatim style and return a tidied transcript, and nothing would
+    say so.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, model="mai-transcribe-2")
+    provider.transcribe(make_request(tmp_path))
+
+    assert client.posts[0]["definition"]["enhancedMode"]["transcribeStyle"] == "verbatim"
+
+
+# -- Settings extras must not take the vocabulary away --------------------
+
+
+def test_a_phrase_list_setting_keeps_the_recording_vocabulary(tmp_path: Path) -> None:
+    """A biasing weight added in Settings must not replace the terms.
+
+    The two are separate fields of one object, and a straight replacement
+    would send the weight with no phrases to weight, which is a request that
+    succeeds and biases nothing.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"phraseList": {"biasingWeight": 1.5}})
+    provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso", "Rehaan")))
+
+    assert client.posts[0]["definition"]["phraseList"] == {
+        "phrases": ["Contoso", "Rehaan"],
+        "biasingWeight": 1.5,
+    }
+
+
+def test_a_phrase_list_setting_adds_to_the_recording_vocabulary(tmp_path: Path) -> None:
+    """Phrases named in Settings join the recording's terms rather than replacing them.
+
+    A setting applies to everything transcribed on this machine and the terms
+    belong to this one recording, so the general one must not displace the
+    particular one. Both lists are biased for, and the recording's come first.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"phraseList": {"phrases": ["Fabrikam"]}})
+    provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    assert client.posts[0]["definition"]["phraseList"] == {
+        "phrases": ["Contoso", "Fabrikam"]
+    }
+
+
+def test_a_biasing_weight_with_nothing_to_weight_is_not_sent(tmp_path: Path) -> None:
+    """A phrase list of one number and no phrases is not a phrase list.
+
+    It would go out on every recording that has no vocabulary of its own, which
+    is most of them, and it biases nothing at best.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"phraseList": {"biasingWeight": 1.5}})
+    provider.transcribe(make_request(tmp_path))
+
+    assert "phraseList" not in client.posts[0]["definition"]
+
+
+# -- The record has to match the request ----------------------------------
+
+
+def test_the_record_names_the_terms_that_were_actually_sent(tmp_path: Path) -> None:
+    """A model that takes no phrase list was sent no terms, and the record says so.
+
+    The record exists to answer one question: whether a later run that produced
+    different words made the same request. A record naming terms the service
+    never received cannot answer it.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, model="mai-transcribe-1")
+    result = provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    assert "phraseList" not in client.posts[0]["definition"]
+    record = result.request
+    assert record is not None
+    assert record.vocabulary_terms == ()
+    assert record.request_parameters["vocabulary_term_count"] == 0
+
+
+def test_the_record_names_the_phrases_a_setting_added(tmp_path: Path) -> None:
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"phraseList": {"phrases": ["Fabrikam"]}})
+    result = provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    record = result.request
+    assert record is not None
+    assert record.vocabulary_terms == ("Contoso", "Fabrikam")
+
+
+def test_the_record_names_the_locale_that_was_actually_sent(tmp_path: Path) -> None:
+    """A locale from Settings is what the service heard, so it is what is written."""
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"locales": ["en-GB"]})
+    result = provider.transcribe(make_request(tmp_path))
+
+    record = result.request
+    assert record is not None
+    assert record.language_configuration == "en-GB"
+
+
+def test_a_multi_lingual_request_is_recorded_as_automatic(tmp_path: Path) -> None:
+    client = FakeHttpClient()
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    record = result.request
+    assert record is not None
+    assert record.language_configuration == "auto"
+
+
+# -- The limits one request may carry -------------------------------------
+
+
+def test_the_limits_are_the_ones_the_endpoint_documents() -> None:
+    """250 MB and two hours, which is the smaller of the two published pairs.
+
+    The MAI page asks for under 300 MB and says nothing about length; the API
+    definition for this dated version says under 250 MB and under two hours.
+    Planning to the smaller pair costs one more chunk boundary, and a file over
+    the endpoint's own ceiling is refused outright.
+    """
+    assert microsoft.MAXIMUM_FILE_BYTES == 250 * 1024 * 1024
+    assert microsoft.MAXIMUM_DURATION_SECONDS == 2 * 60 * 60
+    assert microsoft.MICROSOFT_CAPABILITIES.maximum_file_bytes == microsoft.MAXIMUM_FILE_BYTES
+    assert (
+        microsoft.MICROSOFT_CAPABILITIES.maximum_duration_seconds
+        == microsoft.MAXIMUM_DURATION_SECONDS
+    )
 
 
 def block_import(monkeypatch, name: str) -> None:

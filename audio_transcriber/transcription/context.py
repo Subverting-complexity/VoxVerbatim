@@ -105,6 +105,18 @@ OPENAI_MAXIMUM_PROMPT_CHARACTERS = 1024
 #: what the service actually refuses.
 OPENAI_MAXIMUM_KEYWORDS = 200
 
+#: Theirs: a keyword may not contain any of these, and the documentation is
+#: explicit that the refusal is of the whole request rather than of the one
+#: keyword. A single term like ``<inaudible>`` in somebody's vocabulary would
+#: otherwise cost the recording every OpenAI chunk rather than that one word,
+#: so anything holding one has to be left behind here.
+#:
+#: The two line endings are in the set because the same rule requires each
+#: keyword to stay on one line. Stripping the offending character out instead
+#: would send a word the user never asked us to listen for, which is worse
+#: than sending nothing.
+OPENAI_UNSUPPORTED_KEYWORD_CHARACTERS = frozenset("<>\r\n")
+
 #: Microsoft accepts a ``phraseList`` for what its documentation calls entity
 #: biasing.
 #:
@@ -358,12 +370,19 @@ def _for_openai(package: ContextPackage) -> ProviderContext:
     and what the recording is about. The terms travel as their own list and
     the languages as their own codes, so a long vocabulary no longer competes
     with the description of the recording for room in a single string.
+
+    A term holding a character the service refuses is dropped here rather than
+    sent, because that refusal takes the whole request with it.
     """
     prompt = _trim_at_word_boundary(
         _describe(package, include_languages=False),
         OPENAI_MAXIMUM_PROMPT_CHARACTERS,
     )
-    keywords, dropped = _fit_terms(package.term_texts, OPENAI_MAXIMUM_KEYWORDS)
+    keywords, dropped = _fit_terms(
+        package.term_texts,
+        OPENAI_MAXIMUM_KEYWORDS,
+        forbidden_characters=OPENAI_UNSUPPORTED_KEYWORD_CHARACTERS,
+    )
     return ProviderContext(
         provider=Provider.OPENAI,
         terms=keywords,

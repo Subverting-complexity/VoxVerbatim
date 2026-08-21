@@ -39,6 +39,12 @@ only handle on a particular request is the HTTP request id in the response
 headers, which is why the call is made through ``with_raw_response`` and
 that id is written into provenance beside the model name that was sent.
 
+All three kinds of context are named parameters of the library's own call,
+which is why this module needs a version of the package new enough to have
+them. An older one has no ``keywords`` and no ``languages`` argument and
+raises before the request is built, so the floor in ``requirements.txt`` is
+a working requirement rather than a preference.
+
 The client library is imported inside the method that needs it, so a machine
 without the ``openai`` package loses this one service rather than failing to
 start.
@@ -68,6 +74,20 @@ from audio_transcriber.transcription.providers.base import (
     ProviderUnavailable,
     TranscriptionProvider,
     TranscriptionRequest,
+)
+
+# Somebody else's rule about what a keyword may contain, read from the one
+# module that holds every such rule, so that a change at OpenAI's end is
+# corrected in one place. It is renamed on the way in only because inside this
+# module there is no other service to confuse it with.
+#
+# This direction is the only one that works. context.py reads
+# ProviderCapabilities out of providers/base.py, so base.py must never import
+# context.py and providers/__init__.py must never import an adapter eagerly.
+# Either would close the loop. The ElevenLabs and AssemblyAI adapters read
+# their own limits the same way.
+from audio_transcriber.transcription.context import (
+    OPENAI_UNSUPPORTED_KEYWORD_CHARACTERS as UNSUPPORTED_KEYWORD_CHARACTERS,
 )
 
 _log = logging.getLogger(__name__)
@@ -115,6 +135,19 @@ _CREDENTIAL_NAMES = ("api_key", "apikey", "key", "token", "secret", "password", 
 #: Errors worth trying again even though they carry no HTTP status, because
 #: they happened before the far end answered at all.
 _RETRYABLE_ERROR_NAMES = ("timeout", "connection")
+
+#: The three request fields this adapter works out for itself, and which
+#: therefore never travel as free-form extras.
+#:
+#: This matters more than it looks, because of how the extras are merged. They
+#: go to the library as ``extra_body``, which it lays over the named arguments
+#: rather than under them, so an extra of the same name silently replaces what
+#: this adapter decided. All three arrive that way as a matter of course: the
+#: context module shapes them for this service, and the pipeline passes that
+#: same shape along as extras as well as through the request's own fields. Left
+#: in, the second copy wins, and every rule applied below to the first copy is
+#: undone without a word.
+_DECIDED_HERE = ("prompt", "keywords", "languages")
 
 _CONTENT_TYPES = {
     ".wav": "audio/wav",
@@ -236,8 +269,7 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
             )
 
         languages = _language_codes(request.languages)
-        keywords = tuple(term for term in request.vocabulary_terms if term and term.strip())
-        extra_body = {**self._parameters, **request.extra_parameters}
+        keywords = _keywords_for(request.vocabulary_terms)
 
         arguments: dict[str, Any] = {"model": self._model}
         if request.context_prompt.strip():
@@ -250,6 +282,10 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
             arguments["temperature"] = self._temperature
         if self._chunking_strategy is not None:
             arguments["chunking_strategy"] = self._chunking_strategy
+
+        # Built after the arguments, because what survives here depends on
+        # what was decided above.
+        extra_body = _extras_for({**self._parameters, **request.extra_parameters}, arguments)
 
         started_at = datetime.now()
         try:
@@ -308,9 +344,7 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
                 raw_response=_raw_body_of_failure(error),
             )
 
-        detected = tuple(
-            str(code) for code in (_field(response, "languages") or []) if code
-        )
+        detected = _detected_languages(_field(response, "languages"))
         tokens = self._tokens_from(_field(response, "text") or "", request)
         record = self._request_record(
             request,
@@ -395,7 +429,11 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
         """
         recorded = {key: value for key, value in arguments.items() if key != "keywords"}
         recorded["extra_parameters"] = _without_credentials(extra_body)
-        recorded["keyword_count"] = len(keywords)
+        # Named for the terms rather than for OpenAI's word for them, because
+        # the filter below drops anything whose name contains "key", and a
+        # count recorded as "keyword_count" is thrown away before it is
+        # written. The other adapters record theirs under this name too.
+        recorded["vocabulary_term_count"] = len(keywords)
         if request_id:
             recorded["response_request_id"] = request_id
         if detected:
@@ -469,6 +507,99 @@ def _language_codes(languages: tuple[Language, ...]) -> tuple[str, ...]:
             continue
         if language.value not in codes:
             codes.append(language.value)
+    return tuple(codes)
+
+
+def _keywords_for(terms: tuple[str, ...]) -> tuple[str, ...]:
+    """The vocabulary cut down to what the service will actually accept.
+
+    A term holding one of the characters OpenAI refuses is dropped wherever it
+    sits in the list, because sending it would have the whole request refused
+    and cost the chunk its transcript rather than costing that one word. The
+    shaping module applies the same rule before this ever runs; this is here
+    for the callers that do not go through it, and because a rule worth
+    obeying is worth obeying at the point the request is built.
+    """
+    kept: list[str] = []
+    for term in terms:
+        cleaned = (term or "").strip()
+        if not cleaned:
+            continue
+        offending = sorted(
+            {character for character in cleaned if character in UNSUPPORTED_KEYWORD_CHARACTERS}
+        )
+        if offending:
+            listed = " and ".join(_named(character) for character in offending)
+            _log.info(
+                "The term %r was not sent to OpenAI: it contains %s, and a keyword "
+                "holding one of those has the whole request refused.",
+                cleaned,
+                listed,
+            )
+            continue
+        kept.append(cleaned)
+    return tuple(kept)
+
+
+def _named(character: str) -> str:
+    """A character as something a person can read in a log line.
+
+    Two of the four are invisible, and a log saying a term contains "" is no
+    use to the person trying to work out which term to change.
+    """
+    if character == "\r":
+        return "a carriage return"
+    if character == "\n":
+        return "a line feed"
+    return f'"{character}"'
+
+
+def _extras_for(extras: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    """The free-form extras, with the ones this adapter decides removed.
+
+    See :data:`_DECIDED_HERE` for why leaving them in would undo the request
+    that was just built.
+
+    Removal is quiet where the extra says the same thing as the argument,
+    because that is the shaped context arriving by its second route and there
+    is nothing anybody needs to do about it. Where the two differ, somebody
+    has written that parameter into Settings by hand and is entitled to know
+    it was not sent as written, so the log names it.
+    """
+    kept = dict(extras)
+    for name in _DECIDED_HERE:
+        if name not in kept:
+            continue
+        supplied = kept.pop(name)
+        sent = arguments.get(name)
+        if supplied == sent or (not supplied and sent is None):
+            continue
+        _log.warning(
+            "The %s parameter was not sent to OpenAI as written. This adapter "
+            "works it out from the recording, and sent %r rather than %r.",
+            name,
+            sent,
+            supplied,
+        )
+    return kept
+
+
+def _detected_languages(reported: Any) -> tuple[str, ...]:
+    """The language codes out of what the service reported detecting.
+
+    The field is a list of small objects, each carrying the code in a ``code``
+    field, rather than a list of codes. Treating one of those objects as a
+    string yields its repr, which nothing recognises as a language, so the
+    service's only language opinion would be lost while appearing to be
+    present. A bare string is accepted as well, because it costs one line and
+    a shape this small is exactly the sort of thing that changes.
+    """
+    codes: list[str] = []
+    for entry in reported or []:
+        code = entry if isinstance(entry, str) else _field(entry, "code")
+        text = _as_text(code)
+        if text and text.strip():
+            codes.append(text.strip())
     return tuple(codes)
 
 

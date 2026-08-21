@@ -632,7 +632,11 @@ class ElevenLabsProvider(TranscriptionProvider):
         """
         recorded = {key: value for key, value in arguments.items() if key != "keyterms"}
         recorded["extra_parameters"] = _without_credentials(body_parameters)
-        recorded["keyterm_count"] = len(keyterms)
+        # Named for the terms rather than for this service's word for them,
+        # because the filter below drops anything whose name contains "key",
+        # and a count recorded as "keyterm_count" is thrown away before it is
+        # written. The other adapters record theirs under this name too.
+        recorded["vocabulary_term_count"] = len(keyterms)
         if transcription_id:
             recorded["response_transcription_id"] = transcription_id
         probability = _as_float(language_probability)

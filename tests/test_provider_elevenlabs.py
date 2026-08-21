@@ -680,6 +680,22 @@ def test_the_record_names_the_model_sent_and_the_transcription_returned(request_
     assert record.chunks[0].canonical_offset == pytest.approx(OFFSET)
 
 
+def test_how_much_vocabulary_was_sent_survives_the_credential_filter(request_for):
+    """The count is recorded, and under a name the filter does not eat.
+
+    The filter that keeps credentials out of the record drops any parameter
+    whose name contains "key". A count recorded as "keyterm_count" therefore
+    passed that test and was thrown away before anything was written, so a
+    folder said nothing at all about how much vocabulary the request carried.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    result = build_provider(client).transcribe(
+        request_for(vocabulary_terms=("Vermeulen", "Schmidt"))
+    )
+
+    assert result.request.request_parameters["vocabulary_term_count"] == 2
+
+
 def test_the_whole_answer_is_carried_back_and_not_rebuilt(request_for):
     """The response is kept as the service sent it, not as we understood it.
 

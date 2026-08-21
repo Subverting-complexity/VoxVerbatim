@@ -20,6 +20,7 @@ from audio_transcriber.transcription.context import (
     MICROSOFT_MAXIMUM_PHRASES,
     OPENAI_MAXIMUM_KEYWORDS,
     OPENAI_MAXIMUM_PROMPT_CHARACTERS,
+    OPENAI_UNSUPPORTED_KEYWORD_CHARACTERS,
     ContextPackage,
     adapt_for,
     build_context_package,
@@ -328,6 +329,38 @@ def test_openai_takes_only_as_many_keywords_as_we_will_send_it():
 
     assert len(written.parameters["keywords"]) == OPENAI_MAXIMUM_KEYWORDS
     assert written.dropped_term_count == 30
+
+
+def test_a_keyword_holding_a_character_openai_refuses_is_dropped():
+    """One such term would cost the recording every OpenAI chunk, not one word.
+
+    The documentation is explicit that the refusal is of the whole request.
+    A vocabulary is a long list a user builds up over months, and a single
+    entry written as "<inaudible>" is an easy thing to have in one, so the
+    term has to be left behind here rather than sent and refused.
+    """
+    package = build_context_package(
+        configuration(),
+        terms("Vermeulen", "Contoso <Pty>", "half > whole", "Schmidt"),
+    )
+
+    written = adapt_for(package, Provider.OPENAI)
+
+    assert written.parameters["keywords"] == ["Vermeulen", "Schmidt"]
+    assert written.dropped_term_count == 2
+
+
+def test_every_character_openai_refuses_is_refused_here():
+    """Each of the four on its own, the two invisible ones included."""
+    for character in sorted(OPENAI_UNSUPPORTED_KEYWORD_CHARACTERS):
+        package = build_context_package(
+            configuration(), terms("Vermeulen", f"Acme{character}Holdings")
+        )
+
+        written = adapt_for(package, Provider.OPENAI)
+
+        assert written.parameters["keywords"] == ["Vermeulen"], repr(character)
+        assert written.dropped_term_count == 1, repr(character)
 
 
 def test_an_enormous_description_is_cut_at_a_word_boundary():

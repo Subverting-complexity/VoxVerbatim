@@ -44,6 +44,16 @@ rules that reads as "this service was certain it heard nothing of the sort",
 which is a lie about evidence rather than an absence of it. So confidence is
 left as ``None`` and Microsoft simply contributes no acoustic confidence.
 
+One request-shaping decision is worth stating on its own, because the field
+that carries it looks harmless. The service is multi-lingual unless it is told
+otherwise, and naming a locale does not narrow the candidates it considers the
+way the same field does on the plain fast-transcription endpoint: it forces
+recognition into that one language. A request for an English and German meeting
+that named English would come back as English from end to end, and the
+per-phrase locale described above would be a constant rather than evidence. So
+the locale is sent only where the recording is known to be in a single
+language, and is left out entirely otherwise.
+
 Times come back as an offset and a duration, both in milliseconds, rather than
 as a start and an end. They are turned into canonical seconds here, once, and
 never thought about again.
@@ -99,10 +109,11 @@ DEFAULT_API_VERSION = "2025-10-15"
 #: appear in it: it goes in the body.
 TRANSCRIBE_PATH = "/speechtotext/transcriptions:transcribe"
 
-#: The only four Azure regions that serve MAI. A Speech resource in any other
-#: region answers ordinary fast-transcription requests perfectly well and
-#: refuses this one, which is why a rejected model is reported together with
-#: this list.
+#: The Azure regions known to serve MAI. A Speech resource anywhere else
+#: answers ordinary fast-transcription requests perfectly well and refuses this
+#: one, which is why a rejected model is reported together with this list.
+#: Azure adds regions without telling anybody, so the list is offered as a
+#: likely cause rather than as the whole truth.
 MAI_REGIONS = ("eastus", "northeurope", "southeastasia", "westus")
 
 #: Keeps the fillers, false starts and repetitions. Without it the service
@@ -111,15 +122,27 @@ MAI_REGIONS = ("eastus", "northeurope", "southeastasia", "westus")
 #: longer be the words that are in the audio.
 VERBATIM_STYLE = "verbatim"
 
+#: The model that takes neither a verbatim style nor a phrase list. Both
+#: arrived with ``mai-transcribe-1.5``; the model before it accepts neither,
+#: and is deprecated besides. Any other name is assumed to accept both,
+#: because a model newer than this file quietly losing its verbatim style
+#: would be the worse of the two mistakes.
+UNSTYLED_MODELS = frozenset({"mai-transcribe-1"})
+
 #: Turns the profanity masking off. The default replaces letters with
 #: asterisks, and a masked word is a corrupted transcript, not a polite one.
 PROFANITY_FILTER_OFF = "None"
 
 _MEGABYTE = 1024 * 1024
 
-#: 300 MB and five hours, both documented for MAI specifically.
-MAXIMUM_FILE_BYTES = 300 * _MEGABYTE
-MAXIMUM_DURATION_SECONDS = 5 * 60 * 60
+#: What one request may carry. The two documents describing this endpoint do
+#: not agree: the MAI page asks for a file under 300 MB and says nothing about
+#: length, while the API definition for this dated version says under 250 MB
+#: and under two hours of audio. The smaller of the two is taken. A file over
+#: the endpoint's own ceiling is refused outright, and planning to the smaller
+#: number costs nothing but one more chunk boundary, which is already exact.
+MAXIMUM_FILE_BYTES = 250 * _MEGABYTE
+MAXIMUM_DURATION_SECONDS = 2 * 60 * 60
 
 #: WAV, MP3 and FLAC only. The longer format lists in Azure's documentation
 #: belong to plain fast transcription, not to the enhanced mode we use.
@@ -197,7 +220,6 @@ class MicrosoftProvider(TranscriptionProvider):
         parameters: dict[str, Any] | None = None,
         *,
         api_version: str = DEFAULT_API_VERSION,
-        default_locales: tuple[str, ...] = ("en",),
         timeout_seconds: float = 900.0,
         client: Any | None = None,
     ) -> None:
@@ -222,7 +244,6 @@ class MicrosoftProvider(TranscriptionProvider):
         self._model = model or DEFAULT_MODEL
         self._parameters = dict(parameters or {})
         self._api_version = api_version or DEFAULT_API_VERSION
-        self._default_locales = default_locales
         self._timeout_seconds = timeout_seconds
         self._client = client
 
@@ -358,6 +379,25 @@ class MicrosoftProvider(TranscriptionProvider):
                 raw_response=body,
             )
 
+        unusable = _unusable_answer(body)
+        if unusable is not None:
+            reason, retryable = unusable
+            return self._failed(
+                request,
+                definition=definition,
+                locales=locales,
+                terms=terms,
+                size_bytes=size_bytes,
+                started_at=started_at,
+                request_id=_header(response, "apim-request-id"),
+                message=f"Microsoft answered, but {reason}",
+                retryable=retryable,
+                status=status,
+                # Kept for the same reason a refusal is: whatever arrived is
+                # the only account of why it could not be used.
+                raw_response=body,
+            )
+
         phrases = _field(body, "phrases") or []
         tokens = self._tokens_from(phrases, request)
         record = self._request_record(
@@ -450,12 +490,14 @@ class MicrosoftProvider(TranscriptionProvider):
     # -- Building the request -------------------------------------------
 
     def _locales_for(self, request: TranscriptionRequest) -> tuple[str, ...]:
-        """The locales to offer the service, in the order they were given.
+        """The locale to name, which for most recordings is none at all.
 
-        All the known ones are sent rather than one, because a recording that
-        switches languages is exactly the case this service is best at. Where
-        the caller knows nothing, the adapter's own default is sent, since the
-        endpoint expects to be told what to listen for.
+        Naming a locale here forces recognition into that one language rather
+        than narrowing a field of candidates, so it is sent only where exactly
+        one of the service's languages is in play. Where two are, the field is
+        left out and the service stays in the multi-lingual mode it uses by
+        default, which is both the documented behaviour and the only way its
+        per-phrase locale can say anything.
         """
         codes: list[str] = []
         for language in request.languages:
@@ -468,7 +510,7 @@ class MicrosoftProvider(TranscriptionProvider):
                 continue
             if language.value not in codes:
                 codes.append(language.value)
-        return tuple(codes) or tuple(self._default_locales)
+        return tuple(codes) if len(codes) == 1 else ()
 
     def _definition_for(
         self,
@@ -479,30 +521,56 @@ class MicrosoftProvider(TranscriptionProvider):
     ) -> dict[str, Any]:
         """The JSON options that travel beside the audio.
 
-        Two of these are sent on every request and neither is optional in
-        practice. ``transcribeStyle`` is set to verbatim because the service
-        otherwise returns a tidied, readable transcript, and a transcript that
-        has quietly dropped the false starts no longer matches the audio it
-        claims to describe. ``profanityFilterMode`` is turned off because its
-        default masks words with asterisks, and a masked word is simply a
-        wrong word that nothing downstream can recover.
+        Two of these are sent on every request that can carry them, and
+        neither is optional in practice. ``transcribeStyle`` is set to verbatim
+        because the service otherwise returns a tidied, readable transcript,
+        and a transcript that has quietly dropped the false starts no longer
+        matches the audio it claims to describe. ``profanityFilterMode`` is
+        turned off because its default masks words with asterisks, and a masked
+        word is simply a wrong word that nothing downstream can recover.
+
+        The style and the phrase list both arrived with ``mai-transcribe-1.5``.
+        The model before it takes neither, so on that model they are left out
+        and the loss is written to the log. That is better than a request the
+        service refuses outright, and better than sending a field the service
+        ignores while this code believes it was honoured.
         """
         definition: dict[str, Any] = {
-            "locales": list(locales),
             "profanityFilterMode": PROFANITY_FILTER_OFF,
             "enhancedMode": {
                 "enabled": True,
                 "model": self._model,
-                # Always verbatim, even where a caller asks for otherwise. The
-                # tidied style is not a formatting choice at this level: it
-                # removes words that were spoken, and the layer this evidence
-                # feeds is defined as the one that keeps them.
-                "transcribeStyle": VERBATIM_STYLE,
             },
         }
-        if terms:
-            # The service's vocabulary biasing, documented as entity biasing.
-            definition["phraseList"] = {"phrases": list(terms)}
+        if locales:
+            # One language, and only where the recording is known to be in it.
+            definition["locales"] = list(locales)
+        if self._supports_styling():
+            # Always verbatim, even where a caller asks for otherwise. The
+            # tidied style is not a formatting choice at this level: it
+            # removes words that were spoken, and the layer this evidence
+            # feeds is defined as the one that keeps them.
+            definition["enhancedMode"]["transcribeStyle"] = VERBATIM_STYLE
+            if terms:
+                # The service's vocabulary biasing, documented as entity
+                # biasing.
+                definition["phraseList"] = {"phrases": list(terms)}
+        elif terms:
+            _log.warning(
+                "The model %r accepts neither a verbatim style nor a phrase list, so "
+                "Microsoft will return a tidied transcript and will not be given the "
+                "%d vocabulary terms for this recording. Only mai-transcribe-1.5 "
+                "accepts them.",
+                self._model,
+                len(terms),
+            )
+        else:
+            _log.warning(
+                "The model %r accepts no verbatim style, so Microsoft will return a "
+                "tidied transcript rather than the words that were spoken. Only "
+                "mai-transcribe-1.5 accepts one.",
+                self._model,
+            )
 
         extras = {**self._parameters, **request.extra_parameters}
         for key, value in extras.items():
@@ -512,17 +580,38 @@ class MicrosoftProvider(TranscriptionProvider):
                 # the verbatim style along with it.
                 merged = {**definition["enhancedMode"], **value}
                 merged["model"] = self._model
-                merged["transcribeStyle"] = VERBATIM_STYLE
+                if self._supports_styling():
+                    merged["transcribeStyle"] = VERBATIM_STYLE
+                else:
+                    merged.pop("transcribeStyle", None)
                 definition["enhancedMode"] = merged
+                continue
+            if key == "phraseList" and isinstance(value, dict):
+                if not self._supports_styling():
+                    # Already reported above, along with the terms lost with it.
+                    continue
+                # Merged for the same reason as enhancedMode. A setting that
+                # adds a biasing weight must not take the recording's own
+                # vocabulary away with it, which a straight replacement does.
+                definition["phraseList"] = {
+                    **definition.get("phraseList", {}),
+                    **value,
+                }
                 continue
             if key == "profanityFilterMode" and value != PROFANITY_FILTER_OFF:
                 _log.warning(
-                    "The profanity filter was left off for Microsoft. A masked word "
-                    "is a corrupted transcript, not a polite one."
+                    "The Microsoft setting asking for profanity filtering (%r) was "
+                    "ignored and the filter left off. A masked word is a corrupted "
+                    "transcript, not a polite one.",
+                    value,
                 )
                 continue
             definition[key] = value
         return definition
+
+    def _supports_styling(self) -> bool:
+        """Whether this model accepts a verbatim style and a phrase list."""
+        return self._model.strip().lower() not in UNSTYLED_MODELS
 
     def _describe_rejection(self, status: int, body: Any) -> tuple[str, bool]:
         """Turn an HTTP error into a sentence somebody can act on.
@@ -539,8 +628,9 @@ class MicrosoftProvider(TranscriptionProvider):
         if status in (400, 403, 404) and _mentions_model(detail):
             sentence += (
                 f" The model {self._model!r} is refused both when the name is wrong and "
-                "when the Speech resource is in a region that does not serve MAI. Only "
-                f"{', '.join(MAI_REGIONS)} do."
+                "when the Speech resource is in a region that does not serve MAI. The "
+                f"regions known to serve it are {', '.join(MAI_REGIONS)}, and Azure's "
+                "own list of Speech regions is the current one."
             )
         return sentence, retryable
 
@@ -733,6 +823,53 @@ def _body_of(response: Any) -> Any:
         except Exception:  # noqa: BLE001 - an unparseable body is still a body
             pass
     return _field(response, "text")
+
+
+def _unusable_answer(body: Any) -> tuple[str, bool] | None:
+    """Why a successful answer cannot be used, and whether to ask again.
+
+    This is the one failure on this service that would otherwise be silent, and
+    it is worth spelling out. Every judgement the adapter makes about the words
+    comes from ``phrases``. A body that has none, because it was truncated on
+    the way here or rewritten by something in between, yields no words at all,
+    and a result with no words and no error is indistinguishable from a
+    recording in which nobody spoke. The run would be reported as a success and
+    the recording left looking silent, which is worse than any error.
+
+    An answer that is not an object at all, or one carrying no ``phrases`` field
+    whatsoever, is recorded as a transport fault worth another attempt, because
+    the status said the request itself succeeded. An answer that has the field
+    and a transcript beside it, but nothing in the field, is a shape this
+    adapter cannot place on the timeline, and asking again would produce the
+    same shape at the same price.
+    """
+    if not isinstance(body, dict) or "phrases" not in body:
+        return (
+            "the answer was not a transcription result. The status said the request "
+            "had succeeded, so this is a truncated or rewritten body rather than a "
+            "refusal.",
+            True,
+        )
+    if not body.get("phrases") and _combined_text(body):
+        return (
+            "the answer carried a transcript with no phrases in it, so there is "
+            "nothing that can be placed on the recording's timeline.",
+            False,
+        )
+    return None
+
+
+def _combined_text(body: Any) -> str:
+    """The whole-transcript text the service returns beside the phrases.
+
+    Read only to tell an empty answer from a lost one. It carries no times and
+    no locales, so it is never turned into words.
+    """
+    combined = _field(body, "combinedPhrases") or []
+    if isinstance(combined, dict):
+        combined = [combined]
+    parts = [str(_field(entry, "text") or "").strip() for entry in combined]
+    return " ".join(part for part in parts if part)
 
 
 def _detail_from(body: Any) -> str | None:

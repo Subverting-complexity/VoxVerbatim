@@ -371,7 +371,7 @@ def test_an_http_error_becomes_a_result(tmp_path: Path) -> None:
     assert "429" in result.error and "slow down" in result.error
 
 
-def test_a_rejected_model_names_the_four_regions(tmp_path: Path) -> None:
+def test_a_rejected_model_names_the_regions_that_serve_it(tmp_path: Path) -> None:
     """A resource in the wrong region looks exactly like a misspelled model."""
     client = FakeHttpClient(
         FakeResponse(
@@ -486,11 +486,16 @@ def test_an_unknown_language_names_none(tmp_path: Path) -> None:
     assert client.posts[0]["definition"]["enhancedMode"]["model"] == microsoft.DEFAULT_MODEL
 
 
-def test_a_settings_locale_still_reaches_the_service(tmp_path: Path) -> None:
-    """The adapter's rule is a default, not a ban: a setting still wins."""
+def test_a_settings_locale_displaces_the_adapters_own(tmp_path: Path) -> None:
+    """The adapter's rule is a default, not a ban: a setting still wins.
+
+    The recording here is in one language, so the adapter would name a locale
+    of its own. That is what the setting has to displace. A bilingual recording
+    would prove nothing, because there would be no locale to displace.
+    """
     client = FakeHttpClient()
     provider = make_provider(client, parameters={"locales": ["en-GB"]})
-    provider.transcribe(make_request(tmp_path))
+    provider.transcribe(make_request(tmp_path, languages=(Language.GERMAN,)))
 
     assert client.posts[0]["definition"]["locales"] == ["en-GB"]
 
@@ -538,6 +543,24 @@ def test_a_transcript_with_no_phrases_is_a_failure(tmp_path: Path) -> None:
     assert result.succeeded is False
     assert result.error is not None and "no phrases" in result.error
     assert result.raw_response == body
+
+
+def test_a_single_phrase_where_a_list_belongs_is_a_failure(tmp_path: Path) -> None:
+    """Iterating an object yields its keys, and keys make words out of nothing.
+
+    This is the shape the guard exists for. Every field would read as missing,
+    every word would come out empty, and no error would be raised anywhere.
+    """
+    body = {
+        "durationMilliseconds": 4000,
+        "combinedPhrases": [{"text": "Good morning."}],
+        "phrases": {"text": "Good morning.", "offsetMilliseconds": 0},
+    }
+    client = FakeHttpClient(FakeResponse(body, 200))
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert result.tokens == []
 
 
 def test_a_genuinely_silent_recording_still_succeeds(tmp_path: Path) -> None:
@@ -616,12 +639,84 @@ def test_a_phrase_list_setting_keeps_the_recording_vocabulary(tmp_path: Path) ->
     }
 
 
-def test_a_phrase_list_setting_may_still_name_its_own_phrases(tmp_path: Path) -> None:
+def test_a_phrase_list_setting_adds_to_the_recording_vocabulary(tmp_path: Path) -> None:
+    """Phrases named in Settings join the recording's terms rather than replacing them.
+
+    A setting applies to everything transcribed on this machine and the terms
+    belong to this one recording, so the general one must not displace the
+    particular one. Both lists are biased for, and the recording's come first.
+    """
     client = FakeHttpClient()
     provider = make_provider(client, parameters={"phraseList": {"phrases": ["Fabrikam"]}})
     provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
 
-    assert client.posts[0]["definition"]["phraseList"] == {"phrases": ["Fabrikam"]}
+    assert client.posts[0]["definition"]["phraseList"] == {
+        "phrases": ["Contoso", "Fabrikam"]
+    }
+
+
+def test_a_biasing_weight_with_nothing_to_weight_is_not_sent(tmp_path: Path) -> None:
+    """A phrase list of one number and no phrases is not a phrase list.
+
+    It would go out on every recording that has no vocabulary of its own, which
+    is most of them, and it biases nothing at best.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"phraseList": {"biasingWeight": 1.5}})
+    provider.transcribe(make_request(tmp_path))
+
+    assert "phraseList" not in client.posts[0]["definition"]
+
+
+# -- The record has to match the request ----------------------------------
+
+
+def test_the_record_names_the_terms_that_were_actually_sent(tmp_path: Path) -> None:
+    """A model that takes no phrase list was sent no terms, and the record says so.
+
+    The record exists to answer one question: whether a later run that produced
+    different words made the same request. A record naming terms the service
+    never received cannot answer it.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client, model="mai-transcribe-1")
+    result = provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    assert "phraseList" not in client.posts[0]["definition"]
+    record = result.request
+    assert record is not None
+    assert record.vocabulary_terms == ()
+    assert record.request_parameters["vocabulary_term_count"] == 0
+
+
+def test_the_record_names_the_phrases_a_setting_added(tmp_path: Path) -> None:
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"phraseList": {"phrases": ["Fabrikam"]}})
+    result = provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    record = result.request
+    assert record is not None
+    assert record.vocabulary_terms == ("Contoso", "Fabrikam")
+
+
+def test_the_record_names_the_locale_that_was_actually_sent(tmp_path: Path) -> None:
+    """A locale from Settings is what the service heard, so it is what is written."""
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"locales": ["en-GB"]})
+    result = provider.transcribe(make_request(tmp_path))
+
+    record = result.request
+    assert record is not None
+    assert record.language_configuration == "en-GB"
+
+
+def test_a_multi_lingual_request_is_recorded_as_automatic(tmp_path: Path) -> None:
+    client = FakeHttpClient()
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    record = result.request
+    assert record is not None
+    assert record.language_configuration == "auto"
 
 
 # -- The limits one request may carry -------------------------------------

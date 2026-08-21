@@ -15,11 +15,11 @@ The first is that MAI-Transcribe is not a model with an endpoint of its own.
 There is no deployment to create and no per-model URL. It is a mode switch
 inside the ordinary Azure Speech fast-transcription endpoint: you post to that
 endpoint and name the model inside the request body. The endpoint this adapter
-is given is therefore the Speech resource URL, not a deployment URL. Only four
-Azure regions serve MAI at all, and a resource in the wrong region fails in a
-way that looks exactly like a misspelled model name, so when the model is
-refused this module says which regions work rather than leaving somebody to
-guess.
+is given is therefore the Speech resource URL, not a deployment URL. Only a
+few Azure regions serve MAI at all, and a resource in the wrong region fails in
+a way that looks exactly like a misspelled model name, so when the model is
+refused this module names the regions known to serve it rather than leaving
+somebody to guess.
 
 The second is why this one service is called over plain HTTP while the other
 four go through a vendor library. The official ``azure-ai-transcription``
@@ -318,6 +318,13 @@ class MicrosoftProvider(TranscriptionProvider):
         locales = self._locales_for(request)
         terms = tuple(term for term in request.vocabulary_terms if term and term.strip())
         definition = self._definition_for(request, locales=locales, terms=terms)
+        # Read back out of the definition rather than reused from above. A
+        # setting can add phrases, and a model that takes no phrase list drops
+        # them altogether, so the two are not the same list. The record has to
+        # say what the service was actually given, or it cannot answer the one
+        # question it exists for: whether a later run made the same request.
+        sent_locales = _locales_in(definition)
+        sent_terms = _phrases_in(definition)
 
         started_at = datetime.now()
         try:
@@ -347,8 +354,8 @@ class MicrosoftProvider(TranscriptionProvider):
             return self._failed(
                 request,
                 definition=definition,
-                locales=locales,
-                terms=terms,
+                locales=sent_locales,
+                terms=sent_terms,
                 size_bytes=size_bytes,
                 started_at=started_at,
                 request_id=None,
@@ -364,8 +371,8 @@ class MicrosoftProvider(TranscriptionProvider):
             return self._failed(
                 request,
                 definition=definition,
-                locales=locales,
-                terms=terms,
+                locales=sent_locales,
+                terms=sent_terms,
                 size_bytes=size_bytes,
                 started_at=started_at,
                 request_id=_header(response, "apim-request-id"),
@@ -385,8 +392,8 @@ class MicrosoftProvider(TranscriptionProvider):
             return self._failed(
                 request,
                 definition=definition,
-                locales=locales,
-                terms=terms,
+                locales=sent_locales,
+                terms=sent_terms,
                 size_bytes=size_bytes,
                 started_at=started_at,
                 request_id=_header(response, "apim-request-id"),
@@ -403,8 +410,8 @@ class MicrosoftProvider(TranscriptionProvider):
         record = self._request_record(
             request,
             definition=definition,
-            locales=locales,
-            terms=terms,
+            locales=sent_locales,
+            terms=sent_terms,
             size_bytes=size_bytes,
             started_at=started_at,
             request_id=_header(response, "apim-request-id"),
@@ -534,6 +541,12 @@ class MicrosoftProvider(TranscriptionProvider):
         and the loss is written to the log. That is better than a request the
         service refuses outright, and better than sending a field the service
         ignores while this code believes it was honoured.
+
+        Phrases named in Settings are added to the recording's own terms rather
+        than put in their place, since the setting applies to everything and
+        the terms belong to this one recording. A phrase list that ends up
+        holding no phrases at all is left out, because a biasing weight with
+        nothing to weight is not a phrase list.
         """
         definition: dict[str, Any] = {
             "profanityFilterMode": PROFANITY_FILTER_OFF,
@@ -593,10 +606,19 @@ class MicrosoftProvider(TranscriptionProvider):
                 # Merged for the same reason as enhancedMode. A setting that
                 # adds a biasing weight must not take the recording's own
                 # vocabulary away with it, which a straight replacement does.
-                definition["phraseList"] = {
-                    **definition.get("phraseList", {}),
-                    **value,
-                }
+                current = definition.get("phraseList", {})
+                merged = {**current, **value}
+                supplied = value.get("phrases")
+                if isinstance(supplied, (list, tuple)):
+                    # Both lists are kept, the recording's first. A setting
+                    # applies to everything transcribed on this machine, while
+                    # the terms come from this recording, and the general one
+                    # must not quietly displace the particular one.
+                    ours = [str(phrase) for phrase in current.get("phrases") or ()]
+                    merged["phrases"] = ours + [
+                        phrase for phrase in supplied if phrase not in ours
+                    ]
+                definition["phraseList"] = merged
                 continue
             if key == "profanityFilterMode" and value != PROFANITY_FILTER_OFF:
                 _log.warning(
@@ -607,6 +629,17 @@ class MicrosoftProvider(TranscriptionProvider):
                 )
                 continue
             definition[key] = value
+
+        phrase_list = definition.get("phraseList")
+        if isinstance(phrase_list, dict) and not phrase_list.get("phrases"):
+            # A biasing weight with no phrases to weight is at best ignored and
+            # at worst refused, and it would go out on every recording that has
+            # no vocabulary of its own, which is most of them.
+            definition.pop("phraseList")
+            _log.warning(
+                "A Microsoft phrase list holding no phrases was left out of the "
+                "request. A biasing weight on its own has nothing to bias."
+            )
         return definition
 
     def _supports_styling(self) -> bool:
@@ -618,7 +651,7 @@ class MicrosoftProvider(TranscriptionProvider):
 
         A resource in a region that does not serve MAI refuses the model by
         name, which reads exactly like a misspelled model. Whenever the
-        complaint touches the model or enhanced mode, the four regions that do
+        complaint touches the model or enhanced mode, the regions known to
         serve it are named, because that is the far more likely cause and
         nothing in the message from Azure hints at it.
         """
@@ -843,20 +876,42 @@ def _unusable_answer(body: Any) -> tuple[str, bool] | None:
     adapter cannot place on the timeline, and asking again would produce the
     same shape at the same price.
     """
-    if not isinstance(body, dict) or "phrases" not in body:
+    phrases = _field(body, "phrases")
+    if not isinstance(phrases, (list, tuple)):
+        # A missing array, a null one, and a single object where a list belongs
+        # are all the same thing from here: nothing that can be read as phrases.
+        # The last of those is the dangerous one, because iterating it yields
+        # words made of nothing and no error at all.
         return (
             "the answer was not a transcription result. The status said the request "
             "had succeeded, so this is a truncated or rewritten body rather than a "
             "refusal.",
             True,
         )
-    if not body.get("phrases") and _combined_text(body):
+    if not phrases and _combined_text(body):
         return (
             "the answer carried a transcript with no phrases in it, so there is "
             "nothing that can be placed on the recording's timeline.",
             False,
         )
     return None
+
+
+def _locales_in(definition: dict[str, Any]) -> tuple[str, ...]:
+    """The locales the request actually named, which may be none."""
+    value = definition.get("locales")
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def _phrases_in(definition: dict[str, Any]) -> tuple[str, ...]:
+    """The phrases the request actually carried, which may be none."""
+    phrase_list = definition.get("phraseList")
+    phrases = phrase_list.get("phrases") if isinstance(phrase_list, dict) else None
+    if not isinstance(phrases, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in phrases)
 
 
 def _combined_text(body: Any) -> str:

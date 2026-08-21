@@ -61,18 +61,28 @@ request options, which is the one route that carries a name the generated
 method has never heard of. Versions 3 and 4 cannot be reached that way at all,
 which is why the required version is 5 or later.
 
-That library also retries by itself, twice, on any 5xx. Both repeats post an
-audio stream that has already been read to the end, so the second request
-carries no audio, and what comes back is a protocol error with no status code
-on it rather than the status the service actually sent. A transient 503, which
-this application would have retried, arrives instead as a nameless failure
-that looks permanent. Its retries are switched off here and the decision about
-trying again is left where it already lives.
+That library also retries by itself, twice, on any 5xx, and its retries are
+broken for a request shaped like this one. The first attempt reads the audio
+handle to the end and nothing puts it back, so the repeats post an empty body.
+Over a real connection the result is a protocol error carrying no status code
+at all, which turns a transient 503 that was worth repeating into a nameless
+failure that reads as permanent. That is worth knowing if you go looking: a
+test that answers through a mock transport never exercises the wire and so
+never shows it.
+
+Its retries are therefore switched off and replaced with two of our own, which
+rewind the audio before each attempt and use the same judgement about which
+failures are worth repeating that the reported error already uses. Nothing
+further out repeats a provider call, so removing these without replacing them
+would have left Deepgram with a single attempt at a service that answers 503
+under load. The processing-budget 504 is deliberately not among the failures
+worth repeating, for the reason given above.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -134,8 +144,10 @@ TOKENS_PER_WORD = 5
 
 #: The model families that can use a key-term list. Anything else has to fall
 #: back on the older ``keywords`` feature, which this application does not use,
-#: so a key term sent to one of them is at best ignored. Matched as a prefix,
-#: because the family has variants: ``nova-3-medical`` is a Nova-3.
+#: so a key term sent to one of them is refused or ignored. Matched as a
+#: prefix, because the family has variants: ``nova-3-medical`` is a Nova-3.
+#: Flux is listed for completeness rather than because it can be reached from
+#: here; it is a streaming model and this adapter posts whole recordings.
 KEYTERM_MODEL_PREFIXES = ("nova-3", "flux")
 
 _GIGABYTE = 1024 * 1024 * 1024
@@ -279,8 +291,12 @@ class DeepgramProvider(TranscriptionProvider):
                 "It has to be cut into chunks first."
             )
 
-        keyterms = self._keyterms_for(request.vocabulary_terms)
-        options = self._options_for(request, keyterms=keyterms)
+        # The model first, because whether key terms may be sent at all
+        # depends on it and a setting can change it out from under the
+        # constructor's answer.
+        model = self._model_for(request)
+        keyterms = self._keyterms_for(request.vocabulary_terms, model)
+        options = self._options_for(request, model=model, keyterms=keyterms)
 
         started_at = datetime.now()
         try:
@@ -299,7 +315,7 @@ class DeepgramProvider(TranscriptionProvider):
                 keyterms=keyterms,
                 size_bytes=size_bytes,
                 started_at=started_at,
-                metadata=None,
+                answer=None,
                 succeeded=False,
                 error=message,
             )
@@ -312,7 +328,6 @@ class DeepgramProvider(TranscriptionProvider):
         # it to a file of its own; this adapter never writes anything and knows
         # nothing about where transcripts are kept.
         answer = _raw_response_of(response)
-        metadata = _field(answer, "metadata")
         alternative = _best_alternative(answer)
 
         if alternative is None:
@@ -336,7 +351,7 @@ class DeepgramProvider(TranscriptionProvider):
                     keyterms=keyterms,
                     size_bytes=size_bytes,
                     started_at=started_at,
-                    metadata=metadata,
+                    answer=answer,
                     succeeded=False,
                     error=message,
                 ),
@@ -351,7 +366,7 @@ class DeepgramProvider(TranscriptionProvider):
             keyterms=keyterms,
             size_bytes=size_bytes,
             started_at=started_at,
-            metadata=metadata,
+            answer=answer,
             succeeded=True,
             error=None,
         )
@@ -413,7 +428,7 @@ class DeepgramProvider(TranscriptionProvider):
 
     # -- Building the request -------------------------------------------
 
-    def _keyterms_for(self, terms: tuple[str, ...]) -> tuple[str, ...]:
+    def _keyterms_for(self, terms: tuple[str, ...], model: str) -> tuple[str, ...]:
         """Cut the vocabulary down to what one request is allowed to carry.
 
         The cap counts tokens rather than terms, and exceeding it fails the
@@ -429,13 +444,13 @@ class DeepgramProvider(TranscriptionProvider):
         the service may refuse from being built.
         """
         cleaned = [term.strip() for term in terms if term and term.strip()]
-        if cleaned and not self._model_takes_keyterms():
+        if cleaned and not model.startswith(KEYTERM_MODEL_PREFIXES):
             _log.warning(
                 "The %d vocabulary terms were not sent to Deepgram. Key terms need "
                 "one of the %s models, and this request uses %r.",
                 len(cleaned),
                 " or ".join(KEYTERM_MODEL_PREFIXES),
-                self._model,
+                model,
             )
             return ()
         kept: list[str] = []
@@ -457,15 +472,32 @@ class DeepgramProvider(TranscriptionProvider):
             )
         return tuple(kept)
 
-    def _model_takes_keyterms(self) -> bool:
-        """Whether the chosen model can use a key-term list."""
-        name = self._model.strip().lower()
-        return name.startswith(KEYTERM_MODEL_PREFIXES)
+    def _model_for(self, request: TranscriptionRequest) -> str:
+        """The model this request will actually be sent with.
+
+        Not simply the one the constructor was given. The free-form settings
+        are merged into the request last and may name a model of their own,
+        which is deliberate: it is how a model this application has never heard
+        of gets used at all. Two decisions depend on knowing which name really
+        goes out. Key terms are refused by every model but a few, so a gate
+        that consulted the constructor would either send them to a model that
+        rejects the request or withhold them from one that would have taken
+        them and then name the wrong model in the warning. And provenance
+        records the model beside the parameters, which must not disagree.
+
+        Trimmed and lowered, because that is the form that goes on the wire.
+        Deepgram takes the name literally, so a stray space around it is a
+        rejected request rather than a tolerated one.
+        """
+        extras = {**self._parameters, **request.extra_parameters}
+        chosen = extras.get("model") or self._model
+        return str(chosen).strip().lower()
 
     def _options_for(
         self,
         request: TranscriptionRequest,
         *,
+        model: str,
         keyterms: tuple[str, ...],
     ) -> dict[str, Any]:
         """Everything that goes in the request, as one plain dictionary.
@@ -477,7 +509,7 @@ class DeepgramProvider(TranscriptionProvider):
         those settings are for.
         """
         options: dict[str, Any] = {
-            "model": self._model,
+            "model": model,
             "language": self._language_for(request),
             "smart_format": self._smart_format,
             "punctuate": self._punctuate,
@@ -498,6 +530,10 @@ class DeepgramProvider(TranscriptionProvider):
 
         extras = {**self._parameters, **request.extra_parameters}
         for key, value in extras.items():
+            if key == "model":
+                # Already taken, and already trimmed and lowered. Letting it
+                # through here would put the untidied form back.
+                continue
             if key == "diarize":
                 _log.warning(
                     "The diarize parameter was not sent to Deepgram. It is the "
@@ -537,7 +573,7 @@ class DeepgramProvider(TranscriptionProvider):
         keyterms: tuple[str, ...],
         size_bytes: int,
         started_at: datetime,
-        metadata: Any,
+        answer: Any,
         succeeded: bool,
         error: str | None,
     ) -> ProviderRequestRecord:
@@ -556,7 +592,8 @@ class DeepgramProvider(TranscriptionProvider):
         # on the way to disk and a count of terms would vanish with it.
         recorded["vocabulary_term_count"] = len(keyterms)
 
-        request_id = _as_text(_field(metadata, "request_id"))
+        metadata = _field(answer, "metadata")
+        request_id = _request_id_of(answer)
         if request_id:
             recorded["response_request_id"] = request_id
         model_version = _model_version_of(metadata)
@@ -585,7 +622,11 @@ class DeepgramProvider(TranscriptionProvider):
         )
         return ProviderRequestRecord(
             provider=self.provider,
-            model_identifier=self._model,
+            # The one that was sent, which a setting may have changed, rather
+            # than the one this adapter was built with. A record whose named
+            # model disagrees with its own recorded parameters explains
+            # nothing.
+            model_identifier=str(options.get("model") or self._model),
             model_version=model_version,
             request_parameters=_without_credentials(recorded),
             language_configuration=str(options.get("language") or "auto"),
@@ -637,17 +678,72 @@ class _SdkClient:
         self._client = DeepgramClient(api_key=api_key)
         self._media = _media_client_of(self._client)
 
+    #: How many further attempts a failure worth repeating is given. Two,
+    #: which is what the library itself would have made, so this replaces its
+    #: retries rather than adding to them.
+    RETRIES = 2
+
+    #: Seconds before the first retry, doubled for the second. Short, because
+    #: what is being waited out is a moment of load at the far end and the
+    #: request behind it may already have been running for minutes.
+    FIRST_RETRY_SECONDS = 2.0
+
     def transcribe(self, audio: Any, options: dict[str, Any], timeout: float | None = None) -> Any:
         request_options: dict[str, Any] = {
             "additional_query_parameters": dict(options),
-            # None. The library would otherwise repeat a failed request twice
-            # by itself, and both repeats would post an audio stream that has
-            # already been read to the end. See the module docstring.
+            # None from the library. See the module docstring, and the retry
+            # below that takes its place.
             "max_retries": 0,
         }
         if timeout is not None:
             request_options["timeout"] = timeout
-        return self._media.transcribe_file(request=audio, request_options=request_options)
+
+        delay = self.FIRST_RETRY_SECONDS
+        for attempt in range(self.RETRIES + 1):
+            remaining = self.RETRIES - attempt
+            if not _rewound(audio):
+                # Nothing can be repeated from a stream that will not go back
+                # to its beginning, so this attempt is the only attempt.
+                remaining = 0
+            try:
+                return self._media.transcribe_file(
+                    request=audio, request_options=request_options
+                )
+            except Exception as error:
+                # Caught only to decide whether to repeat it. Anything not
+                # worth repeating goes straight back out, unchanged, for the
+                # adapter to turn into a result.
+                _, retryable, status = _describe_failure(error)
+                if not remaining or not retryable:
+                    raise
+                _log.info(
+                    "Deepgram answered with %s. Trying again in %.0f seconds, with %d "
+                    "further attempt(s) after this one.",
+                    status or type(error).__name__,
+                    delay,
+                    remaining - 1,
+                )
+                time.sleep(delay)
+                delay *= 2
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _rewound(audio: Any) -> bool:
+    """Put the audio back to its beginning, and say whether that worked.
+
+    This is the whole reason the retry lives here rather than being left to
+    the library. An attempt reads the handle to the end, and a second attempt
+    that does not first go back to the start posts nothing at all. Where the
+    audio cannot be rewound there is no honest way to repeat the request, and
+    saying so is better than sending an empty one.
+    """
+    try:
+        if not audio.seekable():
+            return False
+        audio.seek(0)
+    except (AttributeError, OSError, ValueError):
+        return False
+    return True
 
 
 def _media_client_of(client: Any) -> Any:
@@ -695,11 +791,17 @@ def _canonical_seconds(seconds: float | None, offset: float) -> float | None:
 
 
 #: The ways a response object of one library generation or another will hand
-#: back the plain structure it was built from, best first. ``to_dict`` was the
-#: old library's; ``model_dump`` is the current one's, and it keeps the fields
-#: the library does not declare, which is where several of the things this
-#: adapter reads now live.
-_RESPONSE_CONVERTERS = ("to_dict", "model_dump", "dict")
+#: back the plain structure it was built from, best first, with the arguments
+#: each needs. ``to_dict`` was the old library's. ``model_dump`` is the current
+#: one's, and it has to be asked for JSON: left to itself it hands back the
+#: Python objects the library parsed the answer into, and one of those cannot
+#: be written to a file. See :func:`_raw_response_of`.
+_RESPONSE_CONVERTERS: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("to_dict", {}),
+    ("model_dump", {"mode": "json"}),
+    ("model_dump", {}),
+    ("dict", {}),
+)
 
 
 def _raw_response_of(response: Any) -> Any:
@@ -713,21 +815,30 @@ def _raw_response_of(response: Any) -> Any:
     convert itself is passed along as it is, for the store to serialise.
 
     Everything else in this module reads what comes back from here rather than
-    the object the library returned, and the difference is not cosmetic. The
-    current library builds typed objects whose declared shape does not always
-    match what the service sends. ``model_info`` is the clearest case: the
-    service keys it by the identifier of the model that ran, the library
-    declares it as a single named object, and reading it off the typed form
-    loses the dated build string that makes this service's provenance the best
-    of the five. Converted back to a plain structure it is a dictionary again,
-    which is what it always was on the wire.
+    the object the library returned, for two reasons. The store can only write
+    a plain structure, and reading the typed object instead would tie this
+    adapter to whatever shape the installed library happens to declare, which
+    is a shape that has already changed once and will change again.
+
+    Asking for JSON rather than taking the default dump is the part that is
+    easy to get wrong and expensive to get wrong. The library parses the answer
+    into Python objects, and the ``created`` timestamp in the metadata becomes
+    a real ``datetime``. A dictionary with one of those in it is written
+    nowhere: it reaches the transcript store, which serialises it as JSON, and
+    fails there. That happens once every service has answered and been paid
+    for, so it costs the whole run rather than this one service. Asked for
+    JSON, the same dump gives a string.
+
+    Untouched has one limit worth naming. That timestamp comes back in a
+    canonical form, so a service that wrote ``.426Z`` is recorded as
+    ``.426000Z``. Nothing else is changed, added or dropped.
     """
-    for name in _RESPONSE_CONVERTERS:
+    for name, arguments in _RESPONSE_CONVERTERS:
         converter = getattr(response, name, None)
         if not callable(converter):
             continue
         try:
-            converted = converter()
+            converted = converter(**arguments)
         except Exception:  # noqa: BLE001 - trying the next way still beats nothing
             _log.debug("Deepgram's response would not convert through %s.", name)
             continue
@@ -752,6 +863,20 @@ def _best_alternative(response: Any) -> Any:
         return None
     alternatives = _field(channels[0], "alternatives") or []
     return alternatives[0] if alternatives else None
+
+
+def _request_id_of(response: Any) -> str | None:
+    """The service's own identifier for this request, from either shape.
+
+    A transcript keeps it in the metadata. An acknowledgement of a callback
+    request has no metadata at all: it is a single ``request_id`` and nothing
+    else. That is the shape most in need of the identifier, because the
+    transcript for it arrives somewhere else entirely and this number is the
+    only way to go and find it, so reading only the metadata lost it in
+    exactly the case where it mattered most.
+    """
+    metadata = _field(response, "metadata")
+    return _as_text(_field(metadata, "request_id")) or _as_text(_field(response, "request_id"))
 
 
 def _detected_language_code(response: Any) -> str | None:

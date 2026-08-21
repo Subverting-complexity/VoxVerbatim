@@ -524,7 +524,8 @@ def test_an_answer_with_no_transcript_is_a_failure(tmp_path: Path) -> None:
     would be indistinguishable from a recording in which nobody spoke, and the
     run would be over with nothing to show that anything went wrong.
     """
-    client = FakeClient({"metadata": {"request_id": "dg-accepted-1"}})
+    # The real shape: a request id at the top level and no metadata at all.
+    client = FakeClient({"request_id": "dg-accepted-1"})
     result = make_provider(client).transcribe(make_request(tmp_path))
 
     assert result.succeeded is False
@@ -532,8 +533,11 @@ def test_an_answer_with_no_transcript_is_a_failure(tmp_path: Path) -> None:
     assert result.tokens == []
     assert result.request is not None and result.request.succeeded is False
     # The reply is kept, because it is the only account of what happened.
-    assert result.raw_response == {"metadata": {"request_id": "dg-accepted-1"}}
+    assert result.raw_response == {"request_id": "dg-accepted-1"}
+    # And the identifier is recorded, because the transcript for a callback
+    # request arrives elsewhere and this is the only way to go and find it.
     assert result.request.request_parameters["response_request_id"] == "dg-accepted-1"
+    assert result.request.chunks[0].provider_request_id == "dg-accepted-1"
 
 
 def test_an_answer_with_no_words_is_still_a_success(tmp_path: Path) -> None:
@@ -724,3 +728,174 @@ def test_the_installed_package_has_the_shape_this_adapter_calls() -> None:
     parameters = inspect.signature(media.transcribe_file).parameters
     assert "request" in parameters
     assert "request_options" in parameters
+
+
+# -- The answer has to survive being written down -------------------------
+
+
+def test_the_answer_can_be_written_as_json(tmp_path: Path) -> None:
+    """The one thing the stored answer has to be, and the easy way to lose it.
+
+    The library parses the reply into Python objects, and the ``created``
+    timestamp becomes a real ``datetime``. A dictionary holding one of those
+    is written nowhere. It reaches the transcript store at the very end of a
+    pass, after every service has answered and been paid for, and the run dies
+    there rather than losing only this service.
+    """
+    typed = pytest.importorskip(
+        "deepgram.types.listen_v1response", reason="deepgram-sdk is not installed"
+    )
+    from deepgram.core.pydantic_utilities import parse_obj_as
+
+    body = json.loads(json.dumps(RESPONSE))
+    # The fields the library declares and this fixture otherwise leaves out.
+    body["metadata"].update(
+        {"sha256": "154e", "created": "2024-05-12T18:57:13.426Z", "models": ["1a2b3c"]}
+    )
+    response = parse_obj_as(typed.ListenV1Response, body)
+
+    result = make_provider(FakeClient(response)).transcribe(make_request(tmp_path))
+
+    assert result.succeeded
+    # Would raise TypeError on a datetime.
+    written = json.dumps(result.raw_response)
+    assert "2024-05-12T18:57:13" in written
+    # And the provenance survived the conversion.
+    assert result.request is not None
+    assert result.request.model_version == "nova-3 2026-06-01.4821"
+
+
+# -- The model, which two decisions depend on -----------------------------
+
+
+def test_a_setting_that_names_a_model_decides_the_key_terms(tmp_path: Path) -> None:
+    """The gate has to ask the model that is really sent, not the one configured.
+
+    The free-form settings are merged last and may name a model of their own.
+    A gate reading the constructor would pass a Nova-3 while a Nova-2 went out
+    beside the key terms, which Deepgram refuses outright.
+    """
+    client = FakeClient()
+    provider = make_provider(client, model="nova-3", parameters={"model": "nova-2"})
+    provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    options = client.calls[0]["options"]
+    assert options["model"] == "nova-2"
+    assert "keyterm" not in options
+
+
+def test_a_setting_can_also_open_the_key_terms_up(tmp_path: Path) -> None:
+    """The same reading, the other way round."""
+    client = FakeClient()
+    provider = make_provider(client, model="nova-2", parameters={"model": "nova-3"})
+    provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    options = client.calls[0]["options"]
+    assert options["model"] == "nova-3"
+    assert options["keyterm"] == ["Contoso"]
+
+
+def test_the_model_goes_out_tidied(tmp_path: Path) -> None:
+    """Deepgram takes the name literally, so a stray space is a rejected request."""
+    client = FakeClient()
+    make_provider(client, model="  Nova-3  ").transcribe(make_request(tmp_path))
+
+    assert client.calls[0]["options"]["model"] == "nova-3"
+
+
+def test_provenance_names_the_model_that_was_sent(tmp_path: Path) -> None:
+    """A record whose named model disagrees with its own parameters explains nothing."""
+    provider = make_provider(model="nova-3", parameters={"model": "nova-2"})
+    result = provider.transcribe(make_request(tmp_path))
+
+    record = result.request
+    assert record is not None
+    assert record.model_identifier == "nova-2"
+    assert record.request_parameters["model"] == "nova-2"
+
+
+# -- Trying again, which nothing else in the application does -------------
+
+
+class FailingMedia(FakeMedia):
+    """Fails a set number of times before answering, recording each body."""
+
+    def __init__(self, error: Exception, failures: int) -> None:
+        super().__init__()
+        self.error = error
+        self.failures = failures
+        self.bodies: list[int] = []
+
+    def transcribe_file(self, *, request: Any, request_options: dict[str, Any]) -> Any:
+        self.bodies.append(len(request.read()))
+        self.calls.append({"request_options": dict(request_options)})
+        if len(self.calls) <= self.failures:
+            raise self.error
+        return RESPONSE
+
+
+def failing_package(monkeypatch, media: FakeMedia) -> None:
+    """A stand-in package whose client hands back this particular entry point."""
+
+    class Client:
+        def __init__(self, *, api_key: str) -> None:
+            self.listen = type("Listen", (), {"v1": type("V1", (), {"media": media})()})()
+
+    install_fake_package(monkeypatch, Client)
+    # The waiting is real time, and nothing here is worth waiting for.
+    monkeypatch.setattr(deepgram.time, "sleep", lambda seconds: None)
+
+
+def test_a_failure_worth_repeating_is_repeated_with_the_audio_rewound(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The library repeats too, but posts nothing the second time.
+
+    That is the whole reason the retry lives in this adapter: an attempt reads
+    the handle to the end, and a repeat that does not go back to the start
+    sends an empty body and gets a meaningless answer to it.
+    """
+    media = FailingMedia(Boom("service unavailable", status_code=503), failures=2)
+    failing_package(monkeypatch, media)
+
+    result = DeepgramProvider(api_key=API_KEY).transcribe(make_request(tmp_path))
+
+    assert result.succeeded
+    assert len(media.calls) == 3
+    # Every attempt carried the whole recording, not just the first.
+    assert media.bodies == [4096, 4096, 4096]
+
+
+def test_a_failure_not_worth_repeating_is_not_repeated(monkeypatch, tmp_path: Path) -> None:
+    """A rejected key is the same rejection however many times it is sent."""
+    media = FailingMedia(Boom("unauthorised", status_code=401), failures=1)
+    failing_package(monkeypatch, media)
+
+    result = DeepgramProvider(api_key=API_KEY).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert len(media.calls) == 1
+
+
+def test_the_processing_budget_is_never_spent_twice(monkeypatch, tmp_path: Path) -> None:
+    """A 504 here means the request took too long, and repeating it takes as long again."""
+    media = FailingMedia(Boom("gateway timeout", status_code=504), failures=1)
+    failing_package(monkeypatch, media)
+
+    result = DeepgramProvider(api_key=API_KEY).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert len(media.calls) == 1
+    assert result.error is not None and "ten-minute processing budget" in result.error
+
+
+def test_giving_up_reports_the_last_failure(monkeypatch, tmp_path: Path) -> None:
+    """Three attempts and no answer is still a failure, described as one."""
+    media = FailingMedia(Boom("service unavailable", status_code=503), failures=99)
+    failing_package(monkeypatch, media)
+
+    result = DeepgramProvider(api_key=API_KEY).transcribe(make_request(tmp_path))
+
+    assert result.succeeded is False
+    assert len(media.calls) == 3
+    assert result.error is not None and "503" in result.error

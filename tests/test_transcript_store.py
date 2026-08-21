@@ -710,6 +710,39 @@ def test_a_raw_response_is_stored_exactly_as_it_arrived(tmp_path):
     assert store.read_raw_response(name) == body
 
 
+
+def test_a_value_that_will_not_serialise_never_costs_the_transcript(tmp_path):
+    """The caller treats a failure here as a warning, so nothing may escape.
+
+    This runs at the very end of a pass, once every service has answered and
+    been paid for. An exception leaving this method throws away a transcript
+    that is otherwise finished and good, which is the opposite of what keeping
+    a copy of the answer is for.
+    """
+    import datetime
+
+    store = TranscriptStore(tmp_path / "talk.m4a")
+    moment = datetime.datetime(2024, 5, 12, 18, 57, 13, tzinfo=datetime.UTC)
+    payload = {"metadata": {"created": moment}}
+
+    name = store.write_raw_response(Provider.DEEPGRAM, payload)
+
+    assert name is not None
+    written = store.read_raw_response(name)
+    assert written is not None and "2024-05-12 18:57:13" in written
+
+
+def test_an_answer_that_cannot_be_written_at_all_is_reported_as_such(tmp_path):
+    """Still no exception, and still an honest answer to the caller."""
+    store = TranscriptStore(tmp_path / "talk.m4a")
+    payload: dict = {}
+    payload["itself"] = payload
+
+    name = store.write_raw_response(Provider.DEEPGRAM, payload)
+
+    assert name is None
+
+
 def test_writing_the_same_response_twice_never_replaces_the_first(tmp_path):
     store = TranscriptStore(tmp_path / "talk.m4a")
 

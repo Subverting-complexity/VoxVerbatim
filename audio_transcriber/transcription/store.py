@@ -952,18 +952,20 @@ class TranscriptStore:
         again: it is one more than the highest already there, so a second run
         over the same recording writes new files beside the old ones and can
         never replace them.
+
+        Nothing here may raise. This runs at the very end of a pass, after
+        every service has answered and been paid for, and the caller treats a
+        failure as a warning against a transcript that is otherwise good. An
+        exception escaping instead would throw that transcript away, which is
+        the opposite of what keeping a copy of the answer is for. A value the
+        adapter left in a form that will not serialise is written through
+        ``str`` rather than dropped, because a slightly flattened record still
+        explains a transcript and no record at all does not.
         """
         folder = self.raw_responses_folder
         name = self._next_raw_name(provider, purpose, chunk_index, window, extension)
-        if isinstance(payload, dict):
-            # Already parsed, so writing it as JSON is the closest thing to
-            # untouched there is.
-            body = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
-        elif isinstance(payload, str):
-            body = payload.encode("utf-8")
-        else:
-            body = payload
-        if not _write_bytes(folder / name, body):
+        body = _body_of(payload, provider)
+        if body is None or not _write_bytes(folder / name, body):
             return None
         return name
 
@@ -1043,6 +1045,45 @@ def transcript_folder_for(
     """
     path = Path(recording_path)
     return path.parent / f"{path.name}{folder_suffix}"
+
+
+def _body_of(payload: str | bytes | dict[str, Any], provider: Provider) -> bytes | None:
+    """The bytes to write for one service's answer, or ``None`` if there are none.
+
+    This cannot raise, and that is the whole point of it. It runs at the end
+    of a pass, once every service has answered and been paid for, and its
+    caller treats a failure as a warning against a transcript that is
+    otherwise good. An exception escaping here would throw that transcript
+    away instead, which is the opposite of what keeping the answer is for.
+
+    A parsed answer is written as JSON, which is the closest thing to
+    untouched there is for something that has already been parsed. Where a
+    value in it will not serialise, it is written through ``str`` rather than
+    the whole answer being dropped, because a record with one value flattened
+    still explains a transcript and no record at all does not.
+    """
+    if isinstance(payload, bytes):
+        return payload
+    if isinstance(payload, str):
+        return payload.encode("utf-8")
+    try:
+        return json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError):
+        _log.warning(
+            "The answer from %s held something that is not JSON, so it has been "
+            "written with those values as text.",
+            provider.display_name,
+            exc_info=True,
+        )
+    try:
+        return json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        _log.warning(
+            "The answer from %s could not be written at all.",
+            provider.display_name,
+            exc_info=True,
+        )
+        return None
 
 
 def _write_bytes(path: Path, body: bytes) -> bool:

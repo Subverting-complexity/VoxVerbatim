@@ -196,6 +196,28 @@ def _language(value: Any) -> str:
     return _text(value, _UNKNOWN_LANGUAGE) or _UNKNOWN_LANGUAGE
 
 
+def _whole_number_map(value: Any) -> dict[str, int]:
+    """A stored mapping of names to whole numbers, keeping only what is both.
+
+    Anything else is dropped rather than repaired, and dropping is the safe
+    direction here: the only caller reads a missing entry as "nothing is known
+    about that recording", which costs a read it might not have needed. Coaxing
+    a number out of a value that is not one would instead let a hand-edited or
+    half-written file claim knowledge it does not have, and this mapping is
+    what decides that a transcript need not be looked at.
+    """
+    if not isinstance(value, dict):
+        return {}
+    found: dict[str, int] = {}
+    for name, number in value.items():
+        # ``bool`` is an ``int`` in Python, so ``True`` would otherwise be
+        # read back as the number 1.
+        if not isinstance(name, str) or isinstance(number, bool) or not isinstance(number, int):
+            continue
+        found[name] = number
+    return found
+
+
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -641,7 +663,39 @@ class ProjectState:
 
     rules: list[ReplacementRule] = field(default_factory=list)
     processed_at: str = ""
-    """When the analysis last ran, ISO 8601."""
+    """When the analysis last ran, ISO 8601.
+
+    This says when, for anyone who wants to know when, and it is what tells an
+    unreviewed folder apart from a reviewed one. It is deliberately not what
+    decides whether a transcript has to be read again; ``transcript_times``
+    is, and the difference between the two is written up there.
+    """
+
+    transcript_times: dict[str, int] = field(default_factory=dict)
+    """What each recording's transcript file said its own age was when it was analysed.
+
+    Keyed on the recording's file name with its extension, as everything else
+    about a recording is, and holding the modification time the filesystem
+    reported for its transcript, in nanoseconds, exactly as it was given. The
+    number is never interpreted here and never compared with a wall clock. It
+    is only ever compared with the same filesystem's answer about the same
+    file later on, and the single question asked of it is whether the two are
+    the same number.
+
+    That is what makes it trustworthy where a time of day is not. A stamp
+    saying when the analysis ran comes from the system clock, and the time a
+    file carries comes from the filesystem, and on Windows those two do not
+    agree: a transcript written a moment *after* an analysis finished can
+    honestly report an age a moment *before* it, by up to about ten
+    milliseconds, so asking "is the file newer than the analysis" answers no
+    about a file that has genuinely changed. Asking instead whether the file
+    is still the one that was read has no clock in it at all.
+
+    A recording with no entry here has never been analysed, or was analysed
+    and could not be read, and either way is read again. An entry is dropped
+    when its recording leaves the folder, so this never grows into a record of
+    files that are gone.
+    """
 
     last_group_id: str | None = None
     """The group the person was last on, so reopening puts them back there."""
@@ -746,6 +800,7 @@ class ProjectState:
             "flagged": [item.to_dict() for item in self.flagged],
             "rules": [item.to_dict() for item in self.rules],
             "processed_at": self.processed_at,
+            "transcript_times": dict(self.transcript_times),
             "last_group_id": self.last_group_id,
             "last_occurrence_id": self.last_occurrence_id,
         }
@@ -781,6 +836,7 @@ class ProjectState:
         state.flagged = _each(data.get("flagged"), FlaggedItem.from_dict)
         state.rules = _each(data.get("rules"), ReplacementRule.from_dict)
         state.processed_at = _text(data.get("processed_at"))
+        state.transcript_times = _whole_number_map(data.get("transcript_times"))
         state.last_group_id = _optional_text(data.get("last_group_id"))
         state.last_occurrence_id = _optional_text(data.get("last_occurrence_id"))
         state._repair()

@@ -1035,6 +1035,18 @@ def reprocess(
         ],
         rules=state.rules,
         processed_at=_now(),
+        # Carried across untouched, apart from the recordings that have left
+        # the folder, exactly as the flagged words are. What each transcript
+        # was when it was last analysed is not this function's business -- it
+        # is not told which files it was given, only what they said -- but a
+        # fresh project built without it would be a project that has forgotten
+        # which transcripts it has read, and every recording in the folder
+        # would then be read again on the next opening.
+        transcript_times={
+            name: age
+            for name, age in state.transcript_times.items()
+            if not _has_left_the_folder(name, present)
+        },
     )
     _restore_markers(state, rebuilt)
     return rebuilt

@@ -833,6 +833,16 @@ class MainWindow(QMainWindow):
         # empty project rather than as a failure.
         state = project_store.load()
         analysing = self._recordings_to_analyse(state, recording_names, stores)
+        # Asked before a word of any of them is read, and the order is what
+        # makes it safe rather than tidy. Something else may be writing a
+        # transcript at this very moment. Noting its age first and reading it
+        # afterwards means the note describes a file at least as old as what
+        # was read, so a write that lands in between makes the next opening
+        # read the recording once more, needlessly. Noting it afterwards would
+        # make that same write disappear: the note would describe the new file
+        # while the analysis had read the old one, and nothing would ever look
+        # at that recording again.
+        analysed_as = _transcript_times(analysing, stores)
         corrected, problems = self._answer_with_project_rules(state, analysing, reader)
         gathered: dict[str, list[FlaggedItem]] = {}
         # The folder listing is handed over as well as the shorter list of
@@ -868,13 +878,20 @@ class MainWindow(QMainWindow):
         # nothing and says so at the time.
         readable = [name for name in recording_names if name not in damaged]
 
-        # Stamped here rather than left as the analysis wrote it, and the
-        # reason is precision rather than pedantry. The analysis records whole
-        # seconds, and the corrections above are written in the same second it
-        # records, so every file this opening touched would look newer than the
-        # analysis that produced it and be read again pointlessly on the next
-        # opening. Stamping after the last write, to the microsecond, makes the
-        # comparison in _recordings_to_analyse mean exactly what it says.
+        # What each transcript said its own age was, for the next opening to
+        # compare against. A recording that could not be read is deliberately
+        # left without a note, because a note here is a promise that the file
+        # has been looked at, and the promise would spare it from ever being
+        # looked at again.
+        state.transcript_times = _times_after(
+            state.transcript_times, recording_names, analysed_as, damaged
+        )
+        # Stamped here rather than left as the analysis wrote it, so that it
+        # says when this opening finished rather than when the middle of it
+        # ran. Nothing decides what to read from this; _recordings_to_analyse
+        # explains why not, and what it uses instead. What this is for is
+        # telling somebody, and telling the review window, when the folder was
+        # last gone through.
         state.processed_at = datetime.now().astimezone().isoformat()
         if not project_store.save(state):
             problems.append(
@@ -1046,57 +1063,61 @@ class MainWindow(QMainWindow):
         reading the ones that cannot have changed, and the project file already
         holds every occurrence found in those.
 
-        A recording is read again when either of two things is true. Its
-        transcript has been written since the analysis last ran, so whatever it
-        says now may not be what was analysed. Or the project saves nothing
-        about it at all, which is the only honest reading of a recording it has
-        never recorded a word of: it may be one transcribed this morning whose
-        shaky words have never been seen, and it may equally be one that was
-        analysed and had nothing in it worth saving. Telling those two apart is
-        not possible without reading the file, and getting it wrong in the
-        first direction means a recording's shaky words never reach the person
-        at all, silently, which is the one failure this feature exists to
-        prevent. So the ambiguous case is always read, and the cost of that is
-        re-reading the handful of recordings that genuinely had nothing to say.
+        So the only recording spared is one whose transcript file is still,
+        exactly, the file that was read. The project wrote down what each
+        transcript said its own age was at the moment it was analysed, and the
+        question here is whether the file still says the same thing. If it does
+        not, for any reason and in either direction, the recording is read
+        again. A recording the project has no note of has never been analysed,
+        or was analysed and could not be read, and is read as well.
 
-        Both a weak word and a flagged one count as the project having a record
-        of a recording. They are two different lists for good reasons, but the
-        question here is only whether anything has ever looked at the file, and
-        either of them answers it. Leaving the flagged words out would re-read
-        every recording whose words are all strong and some of which some rule
-        objected to, on every single opening, for no gain.
+        It is worth saying why this is a comparison for sameness rather than
+        the obvious one, which is to ask whether the transcript is newer than
+        the analysis. That question sounds equivalent and is not, because the
+        two times in it come from two different clocks. The stamp saying when
+        the analysis ran is read from the system clock, and the age a file
+        carries is written by the filesystem, and on Windows those two do not
+        agree: a file written immediately after the clock was read comes out
+        with a time up to about ten milliseconds *before* the reading, which is
+        what measuring it on Windows 11 gives. "Is the file newer" then answers
+        no about a file that has genuinely changed, the recording is silently
+        left out of the review, and its shaky words never reach the person at
+        all, which is the one failure this whole feature exists to prevent.
 
-        Where the project has never been analysed, or its stamp cannot be
-        understood, everything is read. That is the first opening of a folder,
-        and it is the one that is honestly expensive.
+        That gap is not hypothetical, and it is not only a matter of test
+        timing. A correction the person makes in the review window is written
+        into a transcript after this opening stamped the project, and so is a
+        recording transcribed again the moment a review is closed. Both are
+        exactly the case above.
+
+        Comparing for sameness has a second thing going for it, which the
+        newer-than question gets wrong even with a perfect clock: a transcript
+        restored from a backup or copied back from another machine carries an
+        old age and is nonetheless a different file from the one that was
+        analysed. It differs, so it is read.
 
         The recordings written during this very opening, by a rule correcting a
-        word, come back newer than the stamp and are therefore read once more
-        on the next opening. That settles itself after that one run, because
-        the next analysis stamps a time later than the files and writes nothing
-        further to them.
+        word, differ from what was noted before they were read and are
+        therefore read once more on the next opening. That settles itself after
+        that one run, because the next analysis notes them as they now are and
+        writes nothing further to them.
         """
-        processed = _analysis_time(state.processed_at)
-        if processed is None:
-            return list(recording_names)
-        analysed = {occurrence.recording_name for occurrence in state.occurrences} | {
-            item.recording_name for item in state.flagged
-        }
         wanted: list[str] = []
         for name in recording_names:
-            if name not in analysed:
+            analysed_as = state.transcript_times.get(name)
+            store = stores.get(name)
+            if analysed_as is None or store is None:
                 wanted.append(name)
                 continue
-            store = stores.get(name)
             try:
-                written = store.transcript_path.stat().st_mtime
+                now = store.transcript_path.stat().st_mtime_ns
             except OSError:
                 # The file cannot even be asked about. Read it, so that the
                 # trouble is reported by whoever tries rather than becoming a
                 # recording quietly left out of the review.
                 wanted.append(name)
                 continue
-            if written >= processed:
+            if now != analysed_as:
                 wanted.append(name)
         return wanted
 
@@ -1776,21 +1797,66 @@ def _flagged_after(
     return kept + fresh
 
 
-def _analysis_time(processed_at: str) -> float | None:
-    """When the analysis last ran, in seconds, or ``None`` if that is not known.
+def _transcript_times(
+    recording_names: list[str],
+    stores: dict[str, TranscriptStore],
+) -> dict[str, int]:
+    """What each of these transcript files says its own age is, in nanoseconds.
 
-    An empty or unreadable stamp comes back as ``None``, which the caller
-    reads as "no idea, so look at everything". Guessing a time here would mean
-    quietly skipping a recording on the strength of a date nobody could
-    justify, and a recording skipped is a set of shaky words that never reach
-    the person at all.
+    The number is whatever the filesystem gives, kept as it is given and never
+    turned into a date. Its only use is being compared with the same
+    filesystem's answer about the same file on a later opening, and for that
+    the exact number matters and its meaning does not.
+
+    A file that cannot be asked leaves no entry, and neither does a recording
+    with no store behind it. Both come back to the caller as "nothing is known
+    about that one", which is read as a reason to look at it again rather than
+    as a reason to trust anything.
     """
-    if not processed_at:
-        return None
-    try:
-        return datetime.fromisoformat(processed_at).timestamp()
-    except ValueError:
-        return None
+    times: dict[str, int] = {}
+    for name in recording_names:
+        store = stores.get(name)
+        if store is None:
+            continue
+        try:
+            times[name] = store.transcript_path.stat().st_mtime_ns
+        except OSError:
+            continue
+    return times
+
+
+def _times_after(
+    remembered: dict[str, int],
+    present: list[str],
+    taken: dict[str, int],
+    damaged: set[str],
+) -> dict[str, int]:
+    """The transcript ages the project should hold after one analysis.
+
+    Three things happen here, and each is what keeps one kind of mistake out
+    of the project file.
+
+    A recording that has left the folder loses its entry, so this stays a note
+    about the transcripts that are there rather than a growing record of files
+    nobody has any more.
+
+    A recording that was read this time is described by the age noted before
+    it was read. A recording that was not read keeps whatever was noted about
+    it before, which is still true of it, because not being read is precisely
+    what it means for a file not to have changed.
+
+    A recording that could not be read loses its entry altogether, even one
+    that had a perfectly good entry a moment ago. It was in this run's list
+    because something about it looked new, and nobody has managed to look at
+    it yet, so the next opening must try again. Leaving the old note in place
+    would say the file had been analysed as it now stands, and the recording
+    would be passed over from then on.
+    """
+    kept = {name: age for name, age in remembered.items() if name in present}
+    kept.update({name: age for name, age in taken.items() if name not in damaged})
+    for name in damaged:
+        kept.pop(name, None)
+    return kept
 
 
 def _count(number: int, noun: str) -> str:

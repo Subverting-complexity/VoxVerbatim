@@ -90,7 +90,12 @@ class FakeTranscriptions:
         self.error = error
         self.headers = headers or {"x-request-id": "req_abc123"}
         if body is None and response is not None:
-            body = json.dumps({"text": response.text, "languages": response.languages})
+            body = json.dumps(
+                {
+                    "text": response.text,
+                    "languages": [{"code": entry.code} for entry in response.languages],
+                }
+            )
         self.body = body or ""
         self.calls: list[dict] = []
         self.with_raw_response = FakeWithRawResponse(self)
@@ -102,8 +107,31 @@ class FakeClient:
         self.audio = SimpleNamespace(transcriptions=self.transcriptions)
 
 
+class FakeLanguage:
+    """One entry of the response's ``languages`` list.
+
+    A small object carrying the code in a field, because that is the shape the
+    library returns and a plain string is not. The double used to hand back
+    strings, which made every test here agree with the adapter and both of
+    them disagree with the service: the code read the entries as strings, got
+    the repr of an object instead, and the language OpenAI reported was lost
+    on every request without anything failing.
+    """
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+
+    def __repr__(self) -> str:
+        return f"FakeLanguage(code={self.code!r})"
+
+
 def transcription(text: str, languages=("en",)):
-    return SimpleNamespace(text=text, languages=list(languages), logprobs=None, usage=None)
+    return SimpleNamespace(
+        text=text,
+        languages=[FakeLanguage(code) for code in languages],
+        logprobs=None,
+        usage=None,
+    )
 
 
 SAMPLE_TEXT = "Good morning, everyone. Suzanne will present the Q4 numbers."
@@ -273,6 +301,164 @@ def test_free_form_parameters_go_through_the_escape_hatch(request_for):
     assert client.transcriptions.calls[0]["extra_body"] == {"seed": 42, "some_setting": "a"}
 
 
+def test_the_shaped_context_arriving_as_extras_does_not_displace_what_was_built(
+    request_for,
+):
+    """The three the adapter decides are taken out of the extras before sending.
+
+    This is the shape the pipeline actually produces. The context module works
+    out a prompt, a keyword list and a set of language codes for this service,
+    and the pipeline hands that same dictionary to the adapter as extras as
+    well as through the request's own fields. The library lays extras over the
+    named arguments rather than under them, so leaving them in would send each
+    of the three twice with the extra copy winning, and every rule applied
+    here would be undone silently. The blank term below is the visible proof:
+    the adapter drops it, and it must not come back.
+    """
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    build_provider(client).transcribe(
+        request_for(
+            context_prompt="A board meeting.",
+            vocabulary_terms=("Suzanne", "   ", "Bosch"),
+            languages=(Language.GERMAN, Language.AFRIKAANS),
+            extra_parameters={
+                "prompt": "A board meeting.",
+                "keywords": ["Suzanne", "   ", "Bosch"],
+                "languages": ["de", "af"],
+                "seed": 7,
+            },
+        )
+    )
+
+    call = client.transcriptions.calls[0]
+    assert call["extra_body"] == {"seed": 7}
+    assert call["keywords"] == ["Suzanne", "Bosch"]
+    assert call["prompt"] == "A board meeting."
+    assert call["languages"] == ["de", "af"]
+
+
+def test_a_settings_parameter_the_adapter_decides_is_reported_rather_than_obeyed(
+    request_for, caplog
+):
+    """Somebody who wrote one into Settings is entitled to know it was not sent."""
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    with caplog.at_level("WARNING"):
+        build_provider(client, parameters={"languages": ["fr"]}).transcribe(
+            request_for(languages=(Language.ENGLISH,))
+        )
+
+    call = client.transcriptions.calls[0]
+    assert call["languages"] == ["en"]
+    assert "languages" not in call["extra_body"]
+    assert "languages" in caplog.text
+    assert "not sent to OpenAI as written" in caplog.text
+
+
+def test_the_warning_does_not_claim_a_value_was_sent_when_none_was(request_for, caplog):
+    """A recording with no vocabulary of its own sends no keywords at all.
+
+    The warning has to say that, rather than reporting that None was sent in
+    place of what somebody wrote. A log line that misdescribes what happened
+    is worse than none, because it is what the reader will act on.
+    """
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    with caplog.at_level("WARNING"):
+        build_provider(client, parameters={"keywords": ["Bosch"]}).transcribe(
+            request_for(vocabulary_terms=())
+        )
+
+    assert "keywords" not in client.transcriptions.calls[0]
+    assert "sent nothing for it" in caplog.text
+    assert "None" not in caplog.text
+
+
+def test_the_same_terms_written_as_a_tuple_are_not_reported_as_a_difference(
+    request_for, caplog
+):
+    """A list and a tuple of the same codes are the same instruction.
+
+    Settings hold whatever somebody typed, and the arguments hold lists, so
+    the two arrive here in different shapes while saying the same thing. A
+    warning there would be noise about nothing.
+    """
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    with caplog.at_level("WARNING"):
+        build_provider(client, parameters={"languages": ("en",)}).transcribe(
+            request_for(languages=(Language.ENGLISH,))
+        )
+
+    assert client.transcriptions.calls[0]["languages"] == ["en"]
+    assert "not sent to OpenAI as written" not in caplog.text
+
+
+@pytest.mark.parametrize("model", FORBIDDEN_MODELS)
+def test_no_older_model_can_be_reached_through_the_free_form_parameters(
+    model, request_for, caplog
+):
+    """The escape hatch must not walk past the one rule this adapter enforces.
+
+    The model check runs on the settings model before anything is sent, and it
+    is the whole reason the adapter exists in the shape it does. An extra
+    called "model" used to go straight past it: the check passed, the library
+    laid the extra over the named argument, and the older model ran. The
+    request record then named the model that had not run, which is worse than
+    keeping no record, because the record exists to explain why a later run of
+    the same recording said something different.
+    """
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    with caplog.at_level("WARNING"):
+        result = build_provider(client, parameters={"model": model}).transcribe(
+            request_for()
+        )
+
+    call = client.transcriptions.calls[0]
+    assert call["model"] == MODEL_FAMILY
+    assert "model" not in call["extra_body"]
+    assert result.request.model_identifier == MODEL_FAMILY
+    assert model in caplog.text
+
+
+@pytest.mark.parametrize("name", ["stream", "response_format", "file"])
+def test_a_parameter_that_would_change_the_shape_of_the_answer_is_refused(
+    name, request_for, caplog
+):
+    """This adapter reads one non-streaming JSON body and keeps it as the response.
+
+    Asked for a stream, or for subtitles, it would be holding something it
+    cannot read, and the body it stores as the untouched answer would no
+    longer be the answer to the question the rest of the module thinks it
+    asked.
+    """
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    with caplog.at_level("WARNING"):
+        build_provider(client, parameters={name: "something"}).transcribe(request_for())
+
+    assert name not in client.transcriptions.calls[0]["extra_body"]
+    assert name in caplog.text
+
+
+def test_a_keyword_the_service_refuses_costs_that_term_and_not_the_request(
+    request_for, caplog
+):
+    """A keyword holding one of these has the whole request refused, not the term.
+
+    That is the documented behaviour, and it is why the term has to be left
+    behind here. Sent, one bracket in somebody's vocabulary would cost the
+    recording every OpenAI chunk rather than costing it one word.
+    """
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    with caplog.at_level("INFO"):
+        build_provider(client).transcribe(
+            request_for(
+                vocabulary_terms=("Suzanne", "<inaudible>", "line\nbreak", "Bosch")
+            )
+        )
+
+    assert client.transcriptions.calls[0]["keywords"] == ["Suzanne", "Bosch"]
+    assert "<inaudible>" in caplog.text
+    assert "a line feed" in caplog.text
+
+
 def test_nothing_is_sent_that_the_model_cannot_use(request_for):
     """It has no speakers and no timestamps, so it is never asked for either."""
     client = FakeClient(transcription(SAMPLE_TEXT))
@@ -310,6 +496,85 @@ def test_the_request_id_is_recorded_because_nothing_else_identifies_the_call(req
     assert record.request_parameters["response_request_id"] == "req_9f8e7d"
     assert record.chunks[0].provider_request_id == "req_9f8e7d"
     assert record.succeeded is True
+
+
+def test_how_much_vocabulary_was_sent_survives_the_credential_filter(request_for):
+    """The count is recorded, and under a name the filter does not eat.
+
+    The record keeps a count rather than the terms, and the filter that keeps
+    credentials out of it drops any parameter whose name contains "key". A
+    count recorded as "keyword_count" therefore passed that test and was
+    thrown away before anything was written, so a folder said nothing at all
+    about how much vocabulary the request carried.
+    """
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    result = build_provider(client).transcribe(
+        request_for(vocabulary_terms=("Suzanne", "Bosch", "Q4"))
+    )
+
+    assert result.request.request_parameters["vocabulary_term_count"] == 3
+    # The terms themselves are on the record in their own field, which is
+    # where anybody looking for them should find them.
+    assert result.request.vocabulary_terms == ("Suzanne", "Bosch", "Q4")
+
+
+def test_the_response_shape_this_adapter_reads_is_the_one_the_library_returns(
+    request_for,
+):
+    """Read the languages out of a real parsed response, not out of a double.
+
+    Every other test here runs against a stand-in, and a stand-in can only
+    ever agree with whatever the adapter already believes. This one asks the
+    installed library to parse a documented response body and hands the result
+    to the adapter, so a change in that shape shows up as a failure here
+    rather than as a language quietly going missing in a real run.
+    """
+    transcription_type = pytest.importorskip(
+        "openai.types.audio.transcription"
+    ).Transcription
+    parsed = transcription_type.model_validate_json(
+        json.dumps({"text": "Bonjour.", "languages": [{"code": "de"}]})
+    )
+    client = FakeClient(parsed, body='{"text": "Bonjour.", "languages": [{"code": "de"}]}')
+
+    result = build_provider(client).transcribe(request_for())
+
+    assert result.detected_language is Language.GERMAN
+    assert result.request.request_parameters["response_languages"] == ["de"]
+
+
+@pytest.mark.parametrize(
+    "reported, expected",
+    [
+        ([{"code": "de"}], ("de",)),
+        # A plain string is the one plausible way this field could be
+        # simplified later, and it has to be read whole. Walked one character
+        # at a time it yields "e" and "n", neither of which is a language.
+        ("en", ("en",)),
+        # Iterating a mapping yields its keys, so this shape would otherwise
+        # record "code" as a language the service never named.
+        ({"code": "en"}, ()),
+        # Not iterable at all. This used to raise out of the adapter, and the
+        # generic handler above it threw away a chunk whose words had arrived
+        # intact, along with the untouched body.
+        (7, ()),
+        ([{}], ()),
+        ([{"code": ""}], ()),
+        (None, ()),
+        ([], ()),
+    ],
+)
+def test_a_language_field_of_an_unexpected_shape_reports_nothing_rather_than_nonsense(
+    reported, expected
+):
+    """The library does not validate this field, so anything can reach here.
+
+    What the field is has to be settled before it is walked. Recording a
+    fabricated code is worse than recording none: the request record is read
+    later as evidence of what the service said, and a language nobody detected
+    is a fact invented by the reader of the answer rather than by its author.
+    """
+    assert openai_module._detected_languages(reported) == expected
 
 
 def test_the_detected_languages_are_kept_as_a_second_opinion(request_for):

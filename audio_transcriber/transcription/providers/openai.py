@@ -136,18 +136,55 @@ _CREDENTIAL_NAMES = ("api_key", "apikey", "key", "token", "secret", "password", 
 #: they happened before the far end answered at all.
 _RETRYABLE_ERROR_NAMES = ("timeout", "connection")
 
-#: The three request fields this adapter works out for itself, and which
-#: therefore never travel as free-form extras.
+#: How the extras are merged, which is what makes the two lists below
+#: necessary. They go to the library as ``extra_body``, which it lays *over*
+#: the named arguments rather than under them, so an extra sharing a name with
+#: one of this adapter's arguments silently replaces it. The escape hatch is
+#: worth having, but it cannot be allowed to reach inside the request and
+#: change a decision that was made for a reason.
+
+#: The three kinds of context this adapter works out from the recording.
 #:
-#: This matters more than it looks, because of how the extras are merged. They
-#: go to the library as ``extra_body``, which it lays over the named arguments
-#: rather than under them, so an extra of the same name silently replaces what
-#: this adapter decided. All three arrive that way as a matter of course: the
-#: context module shapes them for this service, and the pipeline passes that
-#: same shape along as extras as well as through the request's own fields. Left
-#: in, the second copy wins, and every rule applied below to the first copy is
-#: undone without a word.
+#: All three arrive as extras as a matter of course: the context module shapes
+#: them for this service, and the pipeline passes that same shape along as
+#: extras as well as through the request's own fields. Left in, the second copy
+#: wins and every rule applied to the first copy is undone without a word.
 _DECIDED_HERE = ("prompt", "keywords", "languages")
+
+#: Names an extra may never set, and why each one is refused.
+#:
+#: ``model`` is the serious one. This adapter refuses every model outside the
+#: ``gpt-transcribe`` family, and refuses it before the request is built, for
+#: the reason set out at the top of this file. An extra named ``model`` walked
+#: straight past that: the check passed on the settings model, the older model
+#: in the extras replaced it on the wire, and the request record went on
+#: naming the model that did not run. A record that names the wrong model is
+#: worse than no record, because the whole purpose of keeping one is to
+#: explain why a later run of the same recording said something different.
+#:
+#: The other three change the answer rather than the question, and leave this
+#: adapter holding something it cannot read.
+#:
+#: The reasons are written out per name rather than shared, because they are
+#: what the log says, and somebody who has just lost a parameter they wrote
+#: deliberately needs to know which of these two very different things
+#: happened.
+_NEVER_FROM_EXTRAS: dict[str, str] = {
+    "model": (
+        "this application calls only the {family} family, and a model chosen "
+        "here would run without the check that enforces that, leaving the "
+        "request record naming a model that never ran"
+    ),
+    "stream": (
+        "this adapter reads one whole answer rather than a stream of pieces, "
+        "and would be left holding something it cannot read"
+    ),
+    "response_format": (
+        "this adapter reads a JSON answer, and asking for text or subtitles "
+        "instead would leave it holding something it cannot read"
+    ),
+    "file": "the audio to send is the recording itself, which is already attached",
+}
 
 _CONTENT_TYPES = {
     ".wav": "audio/wav",
@@ -557,14 +594,15 @@ def _named(character: str) -> str:
 def _extras_for(extras: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
     """The free-form extras, with the ones this adapter decides removed.
 
-    See :data:`_DECIDED_HERE` for why leaving them in would undo the request
-    that was just built.
+    See :data:`_DECIDED_HERE` and :data:`_NEVER_FROM_EXTRAS` for why leaving
+    them in would undo the request that was just built.
 
-    Removal is quiet where the extra says the same thing as the argument,
-    because that is the shaped context arriving by its second route and there
-    is nothing anybody needs to do about it. Where the two differ, somebody
-    has written that parameter into Settings by hand and is entitled to know
-    it was not sent as written, so the log names it.
+    A context parameter is removed quietly where the extra says the same thing
+    as the argument, because that is the shaped context arriving by its second
+    route and there is nothing anybody needs to do about it. Where the two
+    differ, somebody has written that parameter into Settings by hand and is
+    entitled to know it was not sent as written. The rest are always worth a
+    word, because nothing sends them by accident.
     """
     kept = dict(extras)
     for name in _DECIDED_HERE:
@@ -572,16 +610,40 @@ def _extras_for(extras: dict[str, Any], arguments: dict[str, Any]) -> dict[str, 
             continue
         supplied = kept.pop(name)
         sent = arguments.get(name)
-        if supplied == sent or (not supplied and sent is None):
+        if _same_request_value(supplied, sent):
             continue
         _log.warning(
             "The %s parameter was not sent to OpenAI as written. This adapter "
-            "works it out from the recording, and sent %r rather than %r.",
+            "works it out from the recording, and %s.",
             name,
-            sent,
+            f"sent {sent!r} instead" if name in arguments else "sent nothing for it",
+        )
+    for name, reason in _NEVER_FROM_EXTRAS.items():
+        if name not in kept:
+            continue
+        supplied = kept.pop(name)
+        _log.warning(
+            "The %s parameter was not sent to OpenAI, although it was set to %r: %s.",
+            name,
             supplied,
+            reason.format(family=MODEL_FAMILY),
         )
     return kept
+
+
+def _same_request_value(supplied: Any, sent: Any) -> bool:
+    """Whether an extra says the same thing as the argument it shares a name with.
+
+    Lists and tuples of the same codes are the same instruction, and the two
+    reach here in different shapes: the arguments hold lists, while what
+    somebody types into Settings may be either. Empty and absent are the same
+    thing too, because neither asks for anything.
+    """
+    if isinstance(supplied, (list, tuple)) and isinstance(sent, (list, tuple)):
+        return list(supplied) == list(sent)
+    if not supplied and sent is None:
+        return True
+    return bool(supplied == sent)
 
 
 def _detected_languages(reported: Any) -> tuple[str, ...]:
@@ -591,15 +653,45 @@ def _detected_languages(reported: Any) -> tuple[str, ...]:
     field, rather than a list of codes. Treating one of those objects as a
     string yields its repr, which nothing recognises as a language, so the
     service's only language opinion would be lost while appearing to be
-    present. A bare string is accepted as well, because it costs one line and
-    a shape this small is exactly the sort of thing that changes.
+    present.
+
+    What the field is has to be established before it is walked, rather than
+    left to the loop. The library builds the answer without validating it, so
+    a field that arrives as something other than a list stays that way, and
+    iterating whatever turns up is how a shape change becomes fabricated
+    evidence instead of a missing one. A bare ``"en"`` walked one character at
+    a time yields "e" and "n"; a bare mapping yields its keys, and "code"
+    would be recorded as a language the service never named. Anything not
+    recognised is treated as nothing reported, which is the honest answer and
+    the one that cannot invent a fact.
+
+    A single string is the one unrecognised shape worth reading, because it is
+    the plausible way this field could be simplified later, and reading it
+    whole is unambiguous.
     """
+    if isinstance(reported, str):
+        entries: list[Any] = [reported]
+    elif isinstance(reported, (list, tuple)):
+        entries = list(reported)
+    else:
+        if reported is not None:
+            # Not an error: the transcript itself is fine and the run carries
+            # on. But it is the one thing here nobody would otherwise notice.
+            _log.warning(
+                "OpenAI reported its detected languages as %s, which this "
+                "adapter cannot read, so no language was taken from them.",
+                type(reported).__name__,
+            )
+        return ()
+
     codes: list[str] = []
-    for entry in reported or []:
+    for entry in entries:
+        # An entry with no code at all reads as None and is passed over. That
+        # covers a mapping without the field and an object without it alike.
         code = entry if isinstance(entry, str) else _field(entry, "code")
-        text = _as_text(code)
-        if text and text.strip():
-            codes.append(text.strip())
+        text = (_as_text(code) or "").strip()
+        if text:
+            codes.append(text)
     return tuple(codes)
 
 

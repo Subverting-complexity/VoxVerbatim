@@ -15,14 +15,15 @@ av>=12.0
 # therefore switches off one service and says so, which is the same thing
 # that happens when a service is simply unconfigured. The application still
 # starts, and a transcript still comes out of whatever else answered.
-# OpenAI's floor is 3.0.0 for the same kind of reason as AssemblyAI's below.
-# ``gpt-transcribe`` takes its keywords and its candidate languages as two
-# named parameters of the library's transcription call, and neither parameter
-# exists before 3.0.0: 2.28.0 has neither and 3.0.0 has both, checked against
-# the tagged sources. Below the floor every request raises a TypeError about
-# an unexpected argument before it is sent, which reads like a network fault
-# and is not one.
-openai>=3.0.0
+# OpenAI's floor is 2.50.0 for the same kind of reason as AssemblyAI's below.
+# gpt-transcribe takes its keywords and its candidate languages as two named
+# parameters of the library's transcription call, and it reports the languages
+# it detected as objects carrying a code rather than as plain codes. All three
+# arrive together in 2.50.0: the 2.49.0 tag has none of them and the 2.50.0 tag
+# has all three, read from the tagged sources rather than from the changelog.
+# Below the floor every request raises a TypeError about an unexpected
+# argument before it is sent, which reads like a network fault and is not one.
+openai>=2.50.0
 elevenlabs>=2.0
 # AssemblyAI's floor is 1.0 rather than something older, and the reason is
 # not a feature we would like to have. Below 0.45 the package's raw

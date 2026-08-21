@@ -901,6 +901,25 @@ def test_a_recording_that_has_left_the_folder_takes_its_occurrences_with_it():
     assert state.flagged == []
 
 
+def test_reprocessing_keeps_what_each_transcript_was_when_it_was_read():
+    """The analysis builds a fresh project, and this must survive the rebuild.
+
+    What each transcript said its own age was is how the window decides which
+    recordings it can skip on the next opening. Rebuilding the project without
+    it loses no words and looks harmless, and the folder is then read from end
+    to end every time it is opened, which is most of a minute of somebody
+    waiting for a window. The one entry that does go is the one belonging to a
+    recording that has left the folder, which is the same rule the occurrences
+    and the flagged words follow.
+    """
+    state, transcripts = worked_project()
+    state.transcript_times = {RECORDING: 1755421500123456789, "Interview 02.m4a": 17554215004}
+
+    state = reprocess(state, *folder(transcripts), present_recordings=[RECORDING])
+
+    assert state.transcript_times == {RECORDING: 1755421500123456789}
+
+
 def test_a_deleted_recording_never_inflates_the_sentence_read_out():
     """The defect exactly as it was reproduced: a group of 3 across 2 files."""
     words = spoken(["Bosch", "Bosh"], [0.42, 0.45])

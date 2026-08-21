@@ -146,12 +146,61 @@ def test_a_saved_project_comes_back_unchanged(tmp_path):
             )
         ],
         processed_at="2026-08-17T09:05:00",
+        transcript_times={"Interview 01.m4a": 1755421500123456700},
         last_group_id="group-1",
         last_occurrence_id="two",
     )
 
     assert store.save(state)
     assert store.load() == state
+
+
+def test_a_transcript_time_survives_the_file_exactly(tmp_path):
+    """It is compared for being the same number, so nothing may round it.
+
+    The number is a filesystem's own account of a file's age in nanoseconds,
+    and it is far too large to survive being read back as a floating point
+    number. One digit lost at the end turns "this is the file I analysed" into
+    "this is a different file", and the recording is then read again on every
+    single opening for ever.
+    """
+    store = ProjectStore(tmp_path)
+    exact = 1755421500123456789
+
+    assert store.save(ProjectState(transcript_times={"Interview 01.m4a": exact}))
+
+    assert store.load().transcript_times == {"Interview 01.m4a": exact}
+
+
+def test_a_transcript_time_that_is_not_a_whole_number_is_forgotten(tmp_path):
+    """Forgetting costs a read. Believing it would cost the recording.
+
+    Anything a hand-edited or half-written file offers here that is not a
+    plain whole number says nothing about what the file on the disk is, and
+    the only safe reading of that is that nobody knows, which sends the
+    recording to be read again.
+    """
+    write_project(
+        tmp_path,
+        {
+            "transcript_times": {
+                "Interview 01.m4a": "1755421500123456789",
+                "Interview 02.m4a": True,
+                "Interview 03.m4a": 12.5,
+                "Interview 04.m4a": 1755421500123456789,
+            }
+        },
+    )
+
+    state = ProjectStore(tmp_path).load()
+
+    assert state.transcript_times == {"Interview 04.m4a": 1755421500123456789}
+
+
+def test_a_transcript_times_field_of_the_wrong_shape_gives_an_empty_one(tmp_path):
+    write_project(tmp_path, {"transcript_times": ["Interview 01.m4a"]})
+
+    assert ProjectStore(tmp_path).load().transcript_times == {}
 
 
 def test_the_saved_file_records_the_format_version(tmp_path):

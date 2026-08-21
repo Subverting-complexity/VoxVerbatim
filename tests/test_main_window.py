@@ -9,6 +9,7 @@ these tests must not call a paid service or open a socket.
 from __future__ import annotations
 
 import inspect
+import os
 import shutil
 
 import pytest
@@ -941,6 +942,76 @@ def test_a_transcript_replaced_by_a_newer_one_is_read_again(
         assert read.count("alpha.m4a") >= 1
         state = ProjectStore(audio_folder).load()
         assert [item.detected_text for item in state.occurrences] == ["Bosh"]
+    finally:
+        close_window(window)
+
+
+def test_a_transcript_restored_from_a_backup_is_read_again_though_it_is_older(
+    qapp, monkeypatch, store, audio_folder
+):
+    """A file put back from yesterday is a different file, not an old one.
+
+    Whether a recording has to be read again is decided by asking whether its
+    transcript is still the one that was analysed, and never by asking whether
+    it is newer than the analysis. This is the case that tells the two
+    questions apart in the open. A transcript copied back from a backup, or
+    from another machine, carries the age it had there, which is older than
+    the review that has already happened here. Asked which is newer, the
+    answer says the file cannot have changed and the restored words are never
+    looked at. Asked whether it is the same file, the answer is plainly no.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+
+        read = count_transcript_reads(monkeypatch)
+        transcript_path = window._transcript_store(audio_folder / "alpha.m4a").transcript_path
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a", "Bosh"))
+        # Restored with the age it had wherever it was kept, which is a day
+        # before this folder was ever reviewed.
+        yesterday = transcript_path.stat().st_mtime - 24 * 60 * 60
+        os.utime(transcript_path, (yesterday, yesterday))
+        window.show_review()
+
+        assert "alpha.m4a" in read
+        state = ProjectStore(audio_folder).load()
+        assert [item.detected_text for item in state.occurrences] == ["Bosh"]
+    finally:
+        close_window(window)
+
+
+def test_a_transcript_that_could_not_be_read_is_tried_again_next_time(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Nothing has looked at it yet, so nothing may say it has been looked at.
+
+    A recording is spared only because the project noted what its transcript
+    was when it was analysed. One that could not be read was never analysed,
+    so no note is kept about it, and the next opening tries it again without
+    needing anything about the file to change in the meantime. Keeping the
+    note from before it went bad would pass the recording over from then on,
+    even once somebody had put a good transcript back in its place.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        for name in ("alpha.m4a", "beta.m4a"):
+            save_transcript(window, audio_folder / name, weak_transcript(name))
+        window.show_review()
+        damaged = window._transcript_store(audio_folder / "beta.m4a").transcript_path
+        damaged.write_text("this is not a transcript", encoding="utf-8")
+        window.show_review()
+        assert ProjectStore(audio_folder).load().transcript_times.get("beta.m4a") is None
+
+        read = count_transcript_reads(monkeypatch)
+        # Nothing about the file has changed since the opening that failed to
+        # read it. It is tried again all the same.
+        window.show_review()
+
+        assert "beta.m4a" in read
+        assert "alpha.m4a" not in read
     finally:
         close_window(window)
 

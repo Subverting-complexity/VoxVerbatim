@@ -48,6 +48,26 @@ it is rather than as a generic failure.
 The client library is imported inside the method that needs it, so a machine
 without the ``deepgram-sdk`` package loses this one service rather than failing
 to start.
+
+How the request reaches that library needs a word, because the library changed
+shape underneath it. Version 5 replaced the old accessor chain and the loose
+options dictionary with one generated method whose parameters are fixed at
+whatever version happens to be installed, and passing it a name it does not
+declare raises rather than sending anything. Settings promises the opposite: a
+parameter typed into the provider's parameter list is meant to reach the
+service, so that a new option can be used before this application knows about
+it. Everything therefore travels as query parameters through the library's own
+request options, which is the one route that carries a name the generated
+method has never heard of. Versions 3 and 4 cannot be reached that way at all,
+which is why the required version is 5 or later.
+
+That library also retries by itself, twice, on any 5xx. Both repeats post an
+audio stream that has already been read to the end, so the second request
+carries no audio, and what comes back is a protocol error with no status code
+on it rather than the status the service actually sent. A transient 503, which
+this application would have retried, arrives instead as a nameless failure
+that looks permanent. Its retries are switched off here and the decision about
+trying again is left where it already lives.
 """
 
 from __future__ import annotations
@@ -82,6 +102,11 @@ _log = logging.getLogger(__name__)
 #: that the distribution is named with a hyphen and imported without one.
 PACKAGE = "deepgram-sdk"
 
+#: The oldest package this adapter can call. Version 5 rebuilt the library
+#: around a generated client, and nothing older exposes the entry point used
+#: here. See the module docstring.
+MINIMUM_PACKAGE_VERSION = "5.0"
+
 #: The model. The service's own default is an older one, so this is always
 #: sent rather than left out.
 DEFAULT_MODEL = "nova-3"
@@ -99,11 +124,19 @@ DEFAULT_DIARISE_MODEL = "latest"
 #: trimmed, so the list is cut here with room to spare.
 MAXIMUM_KEYTERM_TOKENS = 500
 
-#: How many tokens a word is assumed to cost. Deepgram's own documentation
-#: puts 500 tokens at roughly 100 words, so five is their figure rather than a
-#: guess, and it is pessimistic enough to cover the unusual names and part
-#: numbers that make up most of a vocabulary list.
+#: How many tokens a word is assumed to cost. Deepgram publishes the limit but
+#: not the arithmetic behind it, so this is an estimate rather than their
+#: figure. Five is pessimistic on purpose: a vocabulary list is mostly unusual
+#: names and part numbers, which cost far more tokens than ordinary words, and
+#: overestimating costs a few terms at the tail while underestimating fails
+#: the request outright.
 TOKENS_PER_WORD = 5
+
+#: The model families that can use a key-term list. Anything else has to fall
+#: back on the older ``keywords`` feature, which this application does not use,
+#: so a key term sent to one of them is at best ignored. Matched as a prefix,
+#: because the family has variants: ``nova-3-medical`` is a Nova-3.
+KEYTERM_MODEL_PREFIXES = ("nova-3", "flux")
 
 _GIGABYTE = 1024 * 1024 * 1024
 
@@ -274,8 +307,43 @@ class DeepgramProvider(TranscriptionProvider):
             # keep with the failure.
             return ProviderResult(provider=self.provider, request=record, error=message)
 
-        metadata = _field(response, "metadata")
-        alternative = _best_alternative(response)
+        # The whole answer as the library received it, taken rather than
+        # rebuilt. The pipeline hands it to the transcript store, which writes
+        # it to a file of its own; this adapter never writes anything and knows
+        # nothing about where transcripts are kept.
+        answer = _raw_response_of(response)
+        metadata = _field(answer, "metadata")
+        alternative = _best_alternative(answer)
+
+        if alternative is None:
+            # Not a transcript. It may be the acknowledgement that a callback
+            # request gets back, which carries a request id and nothing else,
+            # or a body that is not what this adapter expects at all. Either
+            # way the one thing it must not become is a successful result with
+            # no words in it, because that is indistinguishable from a
+            # recording of silence and would be reported as one.
+            message = (
+                "Deepgram answered without a transcript in it. The reply carried no "
+                "channel this adapter could read, so there is nothing to say about "
+                "what was said. The reply itself is kept beside the transcript."
+            )
+            _log.warning("%s", message)
+            return ProviderResult(
+                provider=self.provider,
+                request=self._request_record(
+                    request,
+                    options=options,
+                    keyterms=keyterms,
+                    size_bytes=size_bytes,
+                    started_at=started_at,
+                    metadata=metadata,
+                    succeeded=False,
+                    error=message,
+                ),
+                error=message,
+                raw_response=answer,
+            )
+
         tokens = self._tokens_from(alternative, request)
         record = self._request_record(
             request,
@@ -291,13 +359,9 @@ class DeepgramProvider(TranscriptionProvider):
             provider=self.provider,
             tokens=tokens,
             request=record,
-            detected_language=Language.from_code(_detected_language_code(response)),
+            detected_language=Language.from_code(_detected_language_code(answer)),
             speakers=_speakers_in(tokens),
-            # The whole answer as the library received it, taken rather than
-            # rebuilt. The pipeline hands it to the transcript store, which
-            # writes it to a file of its own; this adapter never writes
-            # anything and knows nothing about where transcripts are kept.
-            raw_response=_raw_response_of(response),
+            raw_response=answer,
         )
 
     # -- Turning the answer into evidence -------------------------------
@@ -359,8 +423,21 @@ class DeepgramProvider(TranscriptionProvider):
         taking the head of it the right way to cut. What was dropped is logged,
         because a name that never reached the service comes back misspelled and
         nothing in the transcript explains why.
+
+        Only some models can use a key-term list at all. A model that cannot
+        gets none, which loses nothing it would have had and keeps a request
+        the service may refuse from being built.
         """
         cleaned = [term.strip() for term in terms if term and term.strip()]
+        if cleaned and not self._model_takes_keyterms():
+            _log.warning(
+                "The %d vocabulary terms were not sent to Deepgram. Key terms need "
+                "one of the %s models, and this request uses %r.",
+                len(cleaned),
+                " or ".join(KEYTERM_MODEL_PREFIXES),
+                self._model,
+            )
+            return ()
         kept: list[str] = []
         spent = 0
         for term in cleaned:
@@ -379,6 +456,11 @@ class DeepgramProvider(TranscriptionProvider):
                 self._maximum_keyterm_tokens,
             )
         return tuple(kept)
+
+    def _model_takes_keyterms(self) -> bool:
+        """Whether the chosen model can use a key-term list."""
+        name = self._model.strip().lower()
+        return name.startswith(KEYTERM_MODEL_PREFIXES)
 
     def _options_for(
         self,
@@ -532,7 +614,17 @@ class _SdkClient:
     The package reaches its pre-recorded transcription through a chain of
     accessors, and wrapping that chain here means there is exactly one place to
     change when it moves, rather than a call shape spread through the adapter
-    and every test that drives it.
+    and every test that drives it. It has moved once already: the chain this
+    calls does not exist before version 5.
+
+    The request itself is sent as query parameters rather than as arguments to
+    the library's generated method, and that is deliberate. The method declares
+    a fixed list of parameters, fixed at whatever version is installed, and it
+    raises on a name it does not know instead of sending it. Query parameters
+    are the route the library keeps open for exactly this, so a parameter typed
+    into Settings reaches the service whether or not the installed package has
+    heard of it. Deepgram takes every one of these on the query string anyway,
+    so nothing is being smuggled: it is the same request by the same road.
     """
 
     def __init__(self, api_key: str) -> None:
@@ -540,12 +632,40 @@ class _SdkClient:
             from deepgram import DeepgramClient
         except ImportError as error:
             raise ProviderUnavailable(Provider.DEEPGRAM, PACKAGE) from error
-        self._client = DeepgramClient(api_key)
+        # By keyword. Version 5 stopped taking the key positionally, and a
+        # positional call raises before anything is sent.
+        self._client = DeepgramClient(api_key=api_key)
+        self._media = _media_client_of(self._client)
 
     def transcribe(self, audio: Any, options: dict[str, Any], timeout: float | None = None) -> Any:
-        return self._client.listen.rest.v("1").transcribe_file(
-            {"buffer": audio}, options, timeout=timeout
+        request_options: dict[str, Any] = {
+            "additional_query_parameters": dict(options),
+            # None. The library would otherwise repeat a failed request twice
+            # by itself, and both repeats would post an audio stream that has
+            # already been read to the end. See the module docstring.
+            "max_retries": 0,
+        }
+        if timeout is not None:
+            request_options["timeout"] = timeout
+        return self._media.transcribe_file(request=audio, request_options=request_options)
+
+
+def _media_client_of(client: Any) -> Any:
+    """The part of the library that transcribes a file, or a plain refusal.
+
+    Reached one step at a time so that a package too old to have this can be
+    reported as the version problem it is. Left to itself the chain would raise
+    an attribute error naming whichever link is missing, which says nothing
+    about what to do next.
+    """
+    media = getattr(getattr(getattr(client, "listen", None), "v1", None), "media", None)
+    if media is None or not callable(getattr(media, "transcribe_file", None)):
+        raise ProviderError(
+            f"The installed {PACKAGE} package is too old for this application, which "
+            f"needs version {MINIMUM_PACKAGE_VERSION} or later. "
+            f"Run: pip install --upgrade '{PACKAGE}>={MINIMUM_PACKAGE_VERSION}'"
         )
+    return media
 
 
 def _build_client(api_key: str) -> Any:
@@ -574,6 +694,14 @@ def _canonical_seconds(seconds: float | None, offset: float) -> float | None:
     return seconds + offset
 
 
+#: The ways a response object of one library generation or another will hand
+#: back the plain structure it was built from, best first. ``to_dict`` was the
+#: old library's; ``model_dump`` is the current one's, and it keeps the fields
+#: the library does not declare, which is where several of the things this
+#: adapter reads now live.
+_RESPONSE_CONVERTERS = ("to_dict", "model_dump", "dict")
+
+
 def _raw_response_of(response: Any) -> Any:
     """The service's own answer, as close to untouched as it can be had.
 
@@ -583,13 +711,29 @@ def _raw_response_of(response: Any) -> Any:
     wanted is evidence of what the service said, and a reconstruction is
     evidence of what this adapter understood instead. Anything that cannot
     convert itself is passed along as it is, for the store to serialise.
+
+    Everything else in this module reads what comes back from here rather than
+    the object the library returned, and the difference is not cosmetic. The
+    current library builds typed objects whose declared shape does not always
+    match what the service sends. ``model_info`` is the clearest case: the
+    service keys it by the identifier of the model that ran, the library
+    declares it as a single named object, and reading it off the typed form
+    loses the dated build string that makes this service's provenance the best
+    of the five. Converted back to a plain structure it is a dictionary again,
+    which is what it always was on the wire.
     """
-    converter = getattr(response, "to_dict", None)
-    if callable(converter):
+    for name in _RESPONSE_CONVERTERS:
+        converter = getattr(response, name, None)
+        if not callable(converter):
+            continue
         try:
-            return converter()
-        except Exception:  # noqa: BLE001 - keeping the original still beats nothing
-            _log.debug("Deepgram's response could not be converted; keeping it as it is.")
+            converted = converter()
+        except Exception:  # noqa: BLE001 - trying the next way still beats nothing
+            _log.debug("Deepgram's response would not convert through %s.", name)
+            continue
+        if isinstance(converted, dict):
+            return converted
+    _log.debug("Deepgram's response could not be converted; keeping it as it is.")
     return response
 
 
@@ -611,10 +755,25 @@ def _best_alternative(response: Any) -> Any:
 
 
 def _detected_language_code(response: Any) -> str | None:
+    """Which language the service says it heard, wherever it chose to say it.
+
+    There are two places, and which one is filled depends on what was asked
+    for. The request this adapter usually makes names ``multi``, and a
+    multilingual answer lists every language it found on the alternative
+    itself, ordered by how many words were in each, so the first entry is the
+    dominant one. A ``detected_language`` on the channel appears only where
+    language detection was asked for outright. Reading only the second, which
+    is what this did before, meant the usual request never reported a language
+    at all.
+    """
     results = _field(response, "results")
     channels = _field(results, "channels") or []
     if not channels:
         return None
+    alternatives = _field(channels[0], "alternatives") or []
+    languages = _field(alternatives[0], "languages") if alternatives else None
+    if isinstance(languages, (list, tuple)) and languages:
+        return _as_text(languages[0])
     return _as_text(_field(channels[0], "detected_language"))
 
 
@@ -642,12 +801,27 @@ def _diarizer_of(metadata: Any) -> str | None:
     Separate from the model version on purpose: the speaker labels come from a
     different component, and a change in one explains a different answer that a
     change in the other would not.
+
+    What the service puts here is an architecture, ``v1`` or ``v2``, and the
+    identifier of the build that ran. Both are taken, in that order, because
+    the architecture is the part a person reads and the identifier is the part
+    that pins the answer down. A name and a version are accepted beside them so
+    that a service that starts reporting those is not silently ignored.
     """
     info = _field(metadata, "diarize_info")
     if info is None:
         return None
     if isinstance(info, dict):
-        parts = [str(value) for value in (info.get("name"), info.get("version")) if value]
+        parts = [
+            str(value)
+            for value in (
+                info.get("arch"),
+                info.get("name"),
+                info.get("version"),
+                info.get("model_uuid"),
+            )
+            if value
+        ]
         return " ".join(parts) or None
     return str(info)
 
@@ -722,6 +896,34 @@ def _without_credentials(parameters: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+#: Where a refusal keeps its explanation, in the order worth trying. The
+#: service writes ``err_msg``; the others cost nothing and cover a body from
+#: somewhere between here and there, such as a proxy.
+_FAILURE_MESSAGE_KEYS = ("err_msg", "message", "reason", "error", "detail")
+
+
+def _detail_of(error: Exception) -> str:
+    """What actually went wrong, in as few words as the failure allows.
+
+    Printing the exception is not good enough any more. The library raises a
+    single error type that prints itself as every response header, the status
+    and the body all run together, and that whole block would otherwise be
+    handed to the person reading the transcript's warnings. The sentence the
+    service wrote is inside it, so that is taken where it can be found and the
+    printed form is kept only as a last resort.
+    """
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        for key in _FAILURE_MESSAGE_KEYS:
+            text = _as_text(body.get(key))
+            if text and text.strip():
+                code = _as_text(body.get("err_code"))
+                return f"{text.strip()} ({code})" if code else text.strip()
+    if isinstance(body, str) and body.strip():
+        return body.strip()
+    return str(error).strip()
+
+
 def _describe_failure(error: Exception) -> tuple[str, bool, int | None]:
     """Turn whatever the library threw into a sentence, and say if it may be retried.
 
@@ -737,7 +939,7 @@ def _describe_failure(error: Exception) -> tuple[str, bool, int | None]:
     if status is None:
         status = _as_int(getattr(error, "status", None))
     name = type(error).__name__
-    detail = str(error).strip() or name
+    detail = _detail_of(error) or name
 
     if status == PROCESSING_TIMEOUT_STATUS:
         return (

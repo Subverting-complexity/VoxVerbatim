@@ -1546,6 +1546,13 @@ Nova-3 is the current general model and a sensible default. Deepgram also
 publishes models specialised for particular kinds of audio, such as telephone
 recordings, and those are worth trying if your recordings are all of one kind.
 
+One thing follows from this choice that is easy to miss. Your vocabulary lists
+reach Deepgram as key terms, and only Nova-3 and Flux accept those. Naming an
+older model here means your names and specialised words are not sent at all,
+and the transcript comes back with them spelled as the model guessed. The
+application says so in its log when it happens, but the model name is where the
+decision is made.
+
 An unknown name is refused by Deepgram with a message saying so, so a typing
 mistake shows up as an error rather than as a poor transcript.""",
     ),

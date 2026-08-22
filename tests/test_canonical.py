@@ -441,6 +441,63 @@ def test_a_window_cut_from_an_m4a_recording_can_be_read_back(tmp_path):
     assert dominant_tone(clip.path) == MARKER_TONES[2]
 
 
+def test_a_window_can_be_written_at_a_lower_rate_without_moving(tmp_path):
+    """Resampling must change the samples in the clip and nothing about where it is.
+
+    The window is chosen in the recording's own samples and only then
+    converted, so the offset, the span and the tone inside are exactly what
+    an unconverted clip would have had.
+    """
+    source = tmp_path / "marker.wav"
+    write_marker_audio(source, rate=48000)
+    canonical = prepare_canonical_audio(source, tmp_path / "work", {"wav"})
+
+    for second, tone in enumerate(MARKER_TONES):
+        clip = cut_window(
+            canonical,
+            AudioSpan(second + 0.1, second + 0.9),
+            tmp_path / f"clip{second}.flac",
+            FLAC,
+            sample_rate=16000,
+            channels=1,
+        )
+        written = probe_audio(clip.path)
+        assert clip.sample_rate == 16000 and clip.channels == 1
+        assert written.sample_rate == 16000 and written.channels == 1
+        assert written.duration == pytest.approx(0.8, abs=0.001)
+        assert clip.canonical_offset == pytest.approx(second + 0.1)
+        assert clip.span == AudioSpan(second + 0.1, second + 0.9)
+        assert dominant_tone(clip.path) == tone, f"second {second} came out wrong"
+
+
+def test_a_window_is_folded_to_mono_when_asked(tmp_path):
+    source = tmp_path / "stereo.wav"
+    write_real_audio(source, seconds=2.0, codec="pcm_s16le", layout="stereo", rate=48000)
+    canonical = prepare_canonical_audio(source, tmp_path / "work", {"wav"})
+
+    clip = cut_window(canonical, AudioSpan(0.5, 1.5), tmp_path / "clip.wav", channels=1)
+
+    written = probe_audio(clip.path)
+    assert written.channels == 1
+    assert written.sample_rate == 48000, "the rate was not asked to change"
+    assert written.duration == pytest.approx(1.0, abs=0.001)
+
+
+def test_a_window_is_never_upsampled_or_given_channels(tmp_path):
+    source = tmp_path / "marker.wav"
+    write_marker_audio(source)
+    canonical = prepare_canonical_audio(source, tmp_path / "work", {"wav"})
+
+    clip = cut_window(
+        canonical, AudioSpan(1.0, 2.0), tmp_path / "clip.wav", sample_rate=48000, channels=2
+    )
+
+    written = probe_audio(clip.path)
+    assert (clip.sample_rate, clip.channels) == (16000, 1)
+    assert (written.sample_rate, written.channels) == (16000, 1)
+    assert dominant_tone(clip.path) == MARKER_TONES[1]
+
+
 def test_a_window_goes_to_a_temporary_file_when_no_home_is_given(tmp_path):
     source = tmp_path / "marker.wav"
     write_marker_audio(source, seconds=2)

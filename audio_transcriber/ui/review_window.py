@@ -1209,6 +1209,9 @@ class ReviewWindow(QMainWindow):
         # docstring says what a dictionary of all of them would cost.
         self._cached_name: str | None = None
         self._cached_transcript: Transcript | None = None
+        # Counts the loads asked for, so that a load which was overtaken by
+        # another while it was reading can tell; see _transcript.
+        self._load_generation = 0
         self._project_store = project_store
         # Loading never fails and never returns nothing, so there is no error
         # path here. A folder nobody has reviewed and a folder whose file was
@@ -2644,9 +2647,24 @@ class ReviewWindow(QMainWindow):
         """
         if recording_name == self._cached_name:
             return self._cached_transcript
+        # The one in hand is let go before the next is read, so that two are
+        # never held at once, and the name is written only once the load has
+        # come back. A loader may let the event loop run while it parses, and
+        # a key press handled in that time can ask this window for another
+        # recording; had the name been written first, the outer load would
+        # come back and file the first recording's words under the second's
+        # name. A load that was overtaken hands its answer to its caller but
+        # leaves what the later load stored alone.
+        self._cached_name = None
+        self._cached_transcript = None
+        self._load_generation += 1
+        generation = self._load_generation
+        transcript = self._load_transcript(recording_name)
+        if generation != self._load_generation:
+            return transcript
         self._cached_name = recording_name
-        self._cached_transcript = self._load_transcript(recording_name)
-        return self._cached_transcript
+        self._cached_transcript = transcript
+        return transcript
 
     def transcript_for(self, recording_name: str) -> Transcript | None:
         """One recording's transcript, corrections included. Reads it if need be."""

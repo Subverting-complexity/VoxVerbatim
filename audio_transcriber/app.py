@@ -25,8 +25,13 @@ from audio_transcriber.ui.main_window import MainWindow
 
 _log = logging.getLogger(__name__)
 
-_LOG_MAX_BYTES = 1024 * 1024
-_LOG_BACKUP_COUNT = 2
+#: Ten megabytes a file and three files behind it. A transcription run over
+#: a day's worth of recordings writes a line for every request, retry and
+#: chunk, and at one megabyte the start of the run had rolled off the end
+#: of the log before the run had finished, which is the part somebody asks
+#: about when it goes wrong.
+_LOG_MAX_BYTES = 10 * 1024 * 1024
+_LOG_BACKUP_COUNT = 3
 
 
 def configure_logging(directory: Path) -> None:

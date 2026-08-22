@@ -26,6 +26,13 @@ little accuracy and nothing else, and even losing the backbone should
 produce a transcript rather than an error message. Every failure here ends
 up as a sentence in the transcript's warnings, which the user reads at the
 end.
+
+The chunk files are temporary. Each service's chunks are deleted as soon as
+that service's pass has been merged, and the chunk folder goes with them
+once it is empty. Fifteen recordings at three hours each would otherwise
+leave several gigabytes of re-encoded audio behind, and nothing reads the
+chunks after the merge: the provenance record names the canonical time
+range each chunk covered, which is what a later question needs.
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ from audio_transcriber.transcription import chunking
 from audio_transcriber.transcription.context import ContextPackage, adapt_for
 from audio_transcriber.transcription.model import (
     CanonicalAudio,
+    ChunkRecord,
     Language,
     Provider,
     ProviderRequestRecord,
@@ -164,10 +172,28 @@ def run_passes(
                 chunk_overlap_seconds,
             )
         for provider, future in futures.items():
-            one = future.result()
+            try:
+                one = future.result()
+            except Exception as error:  # noqa: BLE001 - one thread must not end the run
+                # _run_one_provider catches what it can, but a failure in
+                # the thread's own plumbing still surfaces here, and one
+                # service's thread dying must cost that service and nothing
+                # else.
+                _log.exception("The %s pass failed unexpectedly.", provider.display_name)
+                one = _OneProviderOutcome(
+                    result=ProviderResult(
+                        provider=provider,
+                        error=f"{provider.display_name} failed unexpectedly: {error}",
+                    ),
+                    warnings=[
+                        f"{provider.display_name} failed unexpectedly and was not used: {error}"
+                    ],
+                )
             outcome.results[provider] = one.result
             outcome.warnings.extend(one.warnings)
             gathered[provider] = one.entries
+
+    _remove_chunk_folder_if_empty(chunk_folder)
 
     # The raw answers are written after every service has finished rather
     # than as each one arrives, so that several threads are never creating
@@ -235,9 +261,7 @@ def _run_one_provider(
             result=ProviderResult(provider=provider, error=problem),
             warnings=[f"{name} was not used: {problem}"],
         )
-    entries: list[_ChunkEntry] = []
-
-    started = time.monotonic()
+    plans: list[ChunkRecord] = []
     try:
         plans = chunking.plan_and_write_chunks(
             canonical,
@@ -261,6 +285,41 @@ def _run_one_provider(
     else:
         report(0.0, f"{name} is transcribing the recording.")
 
+    try:
+        return _transcribe_chunks(
+            provider, adapter, canonical, context, configuration, plans, report, cancelled
+        )
+    except Exception as error:  # noqa: BLE001 - this thread must not raise
+        _log.exception("The %s pass failed unexpectedly.", name)
+        return _OneProviderOutcome(
+            result=ProviderResult(
+                provider=provider,
+                error=f"{name} failed unexpectedly: {error}",
+            ),
+            warnings=[f"{name} failed unexpectedly and was not used: {error}"],
+        )
+    finally:
+        # The chunks have served their purpose once the pass is over, whether
+        # it succeeded or not. A failed pass keeps nothing either: the record
+        # of what was sent names the time range, and the audio can be cut
+        # again from the canonical file if anybody needs it.
+        _delete_chunk_files(canonical, plans)
+
+
+def _transcribe_chunks(
+    provider: Provider,
+    adapter: TranscriptionProvider,
+    canonical: CanonicalAudio,
+    context: ContextPackage,
+    configuration: RecordingConfiguration,
+    plans: list[ChunkRecord],
+    report: Callable[[float, str], None],
+    cancelled: CancelCheck | None,
+) -> _OneProviderOutcome:
+    """Send each chunk, then join the answers. May raise; the caller catches."""
+    name = provider.display_name
+    entries: list[_ChunkEntry] = []
+    started = time.monotonic()
     prepared = adapt_for(context, provider, adapter.capabilities)
     tokens: list[ProviderToken] = []
     warnings: list[str] = []
@@ -268,6 +327,7 @@ def _run_one_provider(
     detected = Language.UNKNOWN
     failures = 0
     first_failure: str | None = None
+    succeeded_plans: list[ChunkRecord] = []
 
     for number, chunk in enumerate(plans, start=1):
         if cancelled is not None and cancelled():
@@ -302,8 +362,16 @@ def _run_one_provider(
             failures += 1
             if first_failure is None:
                 first_failure = result.error
-            warnings.append(f"{name} could not transcribe part {number}: {result.error}")
+            # The time range is named so a reader knows which stretch of the
+            # recording this service has no words for, without having to
+            # work it out from the chunk number.
+            warnings.append(
+                f"{name} could not transcribe part {number} of {len(plans)}, covering "
+                f"{_clock(chunk.canonical_start)}\u2013{_clock(chunk.canonical_end)}: "
+                f"{result.error}"
+            )
         else:
+            succeeded_plans.append(chunk)
             tokens.extend(result.tokens)
             for speaker in result.speakers:
                 if speaker not in speakers:
@@ -333,8 +401,14 @@ def _run_one_provider(
             warnings=warnings,
         )
 
-    if len(plans) > 1:
-        merged = chunking.merge_overlapping_tokens(tokens, plans)
+    if len(succeeded_plans) > 1:
+        # Only the chunks that answered are merged. The merge joins each
+        # chunk to the one before it on the overlap they share, and a failed
+        # chunk in the list would have no words to match against: the join
+        # would fall back to cutting a nominal number of words off the start
+        # of the chunk after it, and real words would be lost at a place
+        # where words are already missing.
+        merged = chunking.merge_overlapping_tokens(tokens, succeeded_plans)
         tokens = list(merged.tokens)
         for join in getattr(merged, "uncertain_joins", ()):
             # A seam that could not be matched confidently is not a failure,
@@ -359,6 +433,56 @@ def _run_one_provider(
         entries=entries,
         warnings=warnings,
     )
+
+
+def _clock(seconds: float) -> str:
+    """Seconds as mm:ss, or h:mm:ss past an hour, for a warning a person reads."""
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _delete_chunk_files(canonical: CanonicalAudio, plans: list[ChunkRecord]) -> None:
+    """Remove one service's chunk files now that its pass is over.
+
+    Only files that are not the canonical recording are touched: a service
+    that took the recording whole has a plan whose path is the canonical
+    path, and that file belongs to the user. Failure to delete is logged and
+    nothing more, because a leftover file is untidy and a crashed pass is
+    not.
+
+    The folder is left for :func:`_remove_chunk_folder_if_empty`, which runs
+    once every thread has finished. Removing it from here would race another
+    service's thread, which creates the folder immediately before writing
+    each chunk into it.
+    """
+    canonical_path = Path(canonical.path).resolve()
+    for chunk in plans:
+        if not chunk.path:
+            continue
+        path = Path(chunk.path)
+        try:
+            if path.resolve() == canonical_path:
+                continue
+            path.unlink(missing_ok=True)
+        except OSError:
+            _log.warning("The chunk file %s could not be deleted.", path, exc_info=True)
+
+
+def _remove_chunk_folder_if_empty(chunk_folder: Path) -> None:
+    """Remove the chunk folder once every service has deleted its chunks.
+
+    A folder that still holds something, whether a chunk that could not be
+    deleted or a file somebody else put there, is left alone.
+    """
+    try:
+        if chunk_folder.is_dir() and not any(chunk_folder.iterdir()):
+            chunk_folder.rmdir()
+    except OSError:
+        _log.debug("The chunk folder %s was left in place.", chunk_folder, exc_info=True)
 
 
 def _languages_for(configuration: RecordingConfiguration) -> tuple[Language, ...]:

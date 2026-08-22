@@ -26,10 +26,11 @@ Nothing here depends on Qt, so it can be tested on its own.
 
 from __future__ import annotations
 
+import importlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 from audio_transcriber.audio.enhance import (
     DEFAULT_CEILING_DBTP,
@@ -160,9 +161,19 @@ DEFAULT_PROVIDER_RETRY_BACKOFF_SECONDS = 2.0
 #: How much of the previous chunk each chunk repeats. A word cut in half by
 #: a chunk boundary is heard properly by neither request, so the boundary
 #: is crossed twice and the duplicated words are dropped afterwards.
+#:
+#: Eight seconds rather than two, and the reason is the join rather than the
+#: cut. The duplicated words are dropped by matching the text either side of
+#: the boundary, and that match needs at least three shared words to be sure
+#: of itself. Two seconds of speech very often holds a pause, a breath or a
+#: single word, and then the two chunks cannot be matched at all and the
+#: words at the join are either doubled or lost. Eight seconds holds enough
+#: speech for the match almost always, at the cost of eight seconds of audio
+#: being sent twice per join, which on an hour-long recording is under a
+#: minute.
 MINIMUM_CHUNK_OVERLAP_SECONDS = 0.0
 MAXIMUM_CHUNK_OVERLAP_SECONDS = 30.0
-DEFAULT_CHUNK_OVERLAP_SECONDS = 2.0
+DEFAULT_CHUNK_OVERLAP_SECONDS = 8.0
 
 #: A ceiling on how many disputes one recording may send for a second
 #: opinion. Escalation is charged per request, and a recording that
@@ -821,6 +832,58 @@ class TranscriptionSettings:
             )
         return problems
 
+    def missing_libraries(
+        self,
+        probe: Callable[[str, str | None], str | None] | None = None,
+    ) -> list[str]:
+        """Say which vendor libraries a run would need and cannot load.
+
+        This is the other half of :meth:`missing_requirements`, and it exists
+        because of what a missing library does to a run that has already
+        started. Every service's library is imported only at the moment the
+        service is first called, never when the application starts, so a
+        package that was never installed, or that was half installed, is not
+        found until the recording has been prepared and the other services
+        have been sent the audio and paid for. The run then reports that one
+        service "did not answer", which reads like a network fault and is
+        nothing of the kind.
+
+        Only the libraries of services that are switched on are tried, in the
+        same spirit as the key check: a Deepgram that nobody asked for is not
+        a problem. The try is a real import rather than a look at what is
+        installed, and for ElevenLabs it reaches for the client class rather
+        than the top-level package, because a broken installation of that
+        package imports its top level perfectly well and fails one line
+        later.
+
+        ``probe`` is how the check is tried without the libraries: it is given
+        the module name and the attribute wanted from it, and answers with
+        what went wrong or ``None``. The default does the real import.
+        """
+        tried = probe if probe is not None else _probe_library
+        problems: list[str] = []
+        wanted: list[tuple[str, str, str | None]] = []
+        if self.elevenlabs.enabled:
+            wanted.append(("ElevenLabs Scribe", "elevenlabs", "ElevenLabs"))
+        if self.openai_transcription.enabled or self.processing.adjudication_enabled:
+            wanted.append(("OpenAI", "openai", "OpenAI"))
+        if self.microsoft.enabled:
+            wanted.append(("Microsoft MAI", "httpx", None))
+        if self.assemblyai.enabled:
+            wanted.append(("AssemblyAI", "assemblyai", None))
+        if self.deepgram.enabled:
+            wanted.append(("Deepgram", "deepgram", None))
+        for name, module, attribute in wanted:
+            fault = tried(module, attribute)
+            if fault is None:
+                continue
+            problems.append(
+                f"{name} is switched on, but the {module} library it talks through "
+                f"could not be loaded: {fault} Run \"Audio Transcriber.cmd\" again to "
+                "install the libraries, or switch the service off in Settings."
+            )
+        return problems
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TranscriptionSettings":
         settings = cls()
@@ -838,6 +901,25 @@ class TranscriptionSettings:
             if isinstance(section, dict):
                 setattr(settings, name, builder.from_dict(section))
         return settings
+
+
+def _probe_library(module: str, attribute: str | None) -> str | None:
+    """Try to load one vendor library, and say what went wrong if it cannot be.
+
+    Anything at all is caught, not only ImportError. A half-installed package
+    can raise almost anything while it is being imported -- a missing
+    compiled extension, a version check, a syntax error in a file that was
+    cut short -- and every one of those means the same thing to the person
+    about to press Start.
+    """
+    try:
+        loaded = importlib.import_module(module)
+        if attribute is not None:
+            getattr(loaded, attribute)
+    except Exception as error:  # any failure here means the run cannot use it
+        reason = str(error).strip() or type(error).__name__
+        return f"{reason}."
+    return None
 
 
 @dataclass

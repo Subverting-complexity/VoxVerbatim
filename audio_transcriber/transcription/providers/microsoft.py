@@ -87,6 +87,7 @@ from audio_transcriber.transcription.providers.base import (
     ProviderUnavailable,
     TranscriptionProvider,
     TranscriptionRequest,
+    retry_after_seconds,
 )
 
 _log = logging.getLogger(__name__)
@@ -191,7 +192,9 @@ _CREDENTIAL_NAMES = (
 #: they happened before the far end answered at all. The service is known to
 #: accept a request and then time out while generating the answer, which
 #: arrives here as a network error rather than as an HTTP one.
-_RETRYABLE_ERROR_NAMES = ("timeout", "connection", "readerror", "remoteprotocol")
+#: Matched against the exception's class name. ``httpx.ConnectError`` is
+#: spelt without the "ion", which is why "connect" and not "connection".
+_RETRYABLE_ERROR_NAMES = ("timeout", "connect", "readerror", "protocol")
 
 _CONTENT_TYPES = {
     ".wav": "audio/wav",
@@ -221,9 +224,16 @@ class MicrosoftProvider(TranscriptionProvider):
         *,
         api_version: str = DEFAULT_API_VERSION,
         timeout_seconds: float = 900.0,
+        maximum_retries: int = 2,
         client: Any | None = None,
     ) -> None:
         """Set up the adapter.
+
+        ``maximum_retries`` is how many times a failed request is tried
+        again, by the retry loop in the base class. This adapter talks to
+        the service over a bare HTTP client that retries nothing by itself,
+        so without this a dropped connection on a long upload cost the chunk
+        its transcript.
 
         ``endpoint`` is the Speech resource URL, such as
         ``https://my-resource.cognitiveservices.azure.com``. It is not a
@@ -245,6 +255,7 @@ class MicrosoftProvider(TranscriptionProvider):
         self._parameters = dict(parameters or {})
         self._api_version = api_version or DEFAULT_API_VERSION
         self._timeout_seconds = timeout_seconds
+        self.maximum_retries = max(0, maximum_retries)
         self._client = client
 
     # -- What this service is ------------------------------------------
@@ -328,6 +339,8 @@ class MicrosoftProvider(TranscriptionProvider):
 
         started_at = datetime.now()
         try:
+            # Opened inside the attempt, so that a retry sends the whole file
+            # again rather than what was left of a half-read handle.
             with request.audio_path.open("rb") as handle:
                 # Both parts go in the multipart body. The definition is a
                 # JSON string inside a form part, not a JSON request body,
@@ -351,7 +364,7 @@ class MicrosoftProvider(TranscriptionProvider):
                 body = _body_of(response)
         except Exception as error:  # noqa: BLE001 - every failure becomes a result
             message, retryable, status_code = _describe_failure(error)
-            return self._failed(
+            raise self._failed(
                 request,
                 definition=definition,
                 locales=sent_locales,
@@ -364,11 +377,11 @@ class MicrosoftProvider(TranscriptionProvider):
                 status=status_code,
                 # Nothing came back at all here, so there is nothing to keep.
                 raw_response=None,
-            )
+            ) from error
 
         if status is not None and status >= 400:
             message, retryable = self._describe_rejection(status, body)
-            return self._failed(
+            raise self._failed(
                 request,
                 definition=definition,
                 locales=sent_locales,
@@ -379,6 +392,7 @@ class MicrosoftProvider(TranscriptionProvider):
                 message=message,
                 retryable=retryable,
                 status=status,
+                retry_after=retry_after_seconds(_field(response, "headers")),
                 # Kept deliberately. The body of a refusal is often the most
                 # useful thing in the whole folder: it is what says whether
                 # the model name was wrong or the resource is in a region that
@@ -389,7 +403,7 @@ class MicrosoftProvider(TranscriptionProvider):
         unusable = _unusable_answer(body)
         if unusable is not None:
             reason, retryable = unusable
-            return self._failed(
+            raise self._failed(
                 request,
                 definition=definition,
                 locales=sent_locales,
@@ -471,16 +485,17 @@ class MicrosoftProvider(TranscriptionProvider):
                 text = _field(word, "text") or ""
                 start_ms = _as_float(_field(word, "offsetMilliseconds"))
                 duration_ms = _as_float(_field(word, "durationMilliseconds"))
+                # A negative duration would put the end before the start,
+                # which nothing downstream can make sense of, so the length
+                # is never allowed below zero.
+                end_ms = None if start_ms is None else start_ms + max(0.0, duration_ms or 0.0)
                 tokens.append(
                     ProviderToken(
                         provider=self.provider,
                         index=index,
                         text=text,
                         start=_canonical_seconds(start_ms, request.canonical_offset),
-                        end=_canonical_seconds(
-                            None if start_ms is None else start_ms + (duration_ms or 0.0),
-                            request.canonical_offset,
-                        ),
+                        end=_canonical_seconds(end_ms, request.canonical_offset),
                         # No speaker, because the service does not have one,
                         # and no confidence, because the one it reports is the
                         # constant zero rather than a measurement.
@@ -682,19 +697,22 @@ class MicrosoftProvider(TranscriptionProvider):
         message: str,
         retryable: bool,
         status: int | None,
+        retry_after: float | None = None,
         raw_response: Any = None,
-    ) -> ProviderResult:
-        """Report a failure as an ordinary result rather than an exception.
+    ) -> ProviderError:
+        """Build the error for a failure, with the failed result already on it.
 
         Losing Microsoft costs a little accuracy and a language signal. It must
-        never cost the user their transcript, so the failure is written down
-        and the run carries on with the services that did answer.
+        never cost the user their transcript, so the failure is written down as
+        an ordinary result and the run carries on with the services that did
+        answer. The result rides on the error rather than being returned, so
+        that the retry loop in the base class can read the verdict, try again
+        where that may help, and hand back the full record when it gives up.
 
         Whatever the service said while refusing is carried out with the
         failure, because an explanation is worth keeping and this is the only
         route by which it can reach the folder beside the recording.
         """
-        _log.warning("Microsoft did not answer: %s", message)
         _log.debug("Microsoft failure: retryable=%s status=%s", retryable, status)
         record = self._request_record(
             request,
@@ -708,11 +726,17 @@ class MicrosoftProvider(TranscriptionProvider):
             succeeded=False,
             error=message,
         )
-        return ProviderResult(
-            provider=self.provider,
-            request=record,
-            error=message,
-            raw_response=raw_response,
+        return ProviderError(
+            message,
+            retryable=retryable,
+            status_code=status,
+            retry_after=retry_after,
+            result=ProviderResult(
+                provider=self.provider,
+                request=record,
+                error=message,
+                raw_response=raw_response,
+            ),
         )
 
     def _request_record(

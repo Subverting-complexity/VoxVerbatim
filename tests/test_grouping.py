@@ -372,6 +372,207 @@ def test_short_words_are_not_guessed_at():
     assert len(groups) == 2
 
 
+def test_a_form_reached_only_through_a_grown_cluster_still_joins():
+    """The tolerance is measured against a cluster's whole range, as it grows.
+
+    "bosc" is related to "bosch" and to nothing else, and its confidence is
+    too far from "bosch" on its own. But "bosch" has already taken in both
+    "bosche" words by the time "bosc" is looked at, and its range now
+    reaches "bosc" comfortably. This is the behaviour a union-find over
+    pairs worked out in advance would lose, and it is held down here so that
+    nobody speeds the clustering up by quietly changing what it does.
+    """
+    occurrences = occurrences_from(
+        ["bosch", "bosche", "bosche", "bosc"],
+        [0.10, 0.30, 0.70, 0.50],
+    )
+
+    groups = group_occurrences(occurrences, 0.25)
+
+    assert len(groups) == 1
+
+
+def test_the_equivalence_index_agrees_with_the_function_it_stands_in_for():
+    """The index answers pair by pair exactly as ``are_equivalent`` would.
+
+    The German direction is the delicate part: a dropped umlaut is only
+    recognised when one of the two texts actually has a German letter, so
+    "Jurgen" and "Juergen" are not equivalent to each other even though both
+    are equivalent to "Jürgen".
+    """
+    from itertools import permutations
+
+    from audio_transcriber.transcription.grouping import _equivalence_partners
+    from audio_transcriber.transcription.normalise import are_equivalent
+
+    forms = [
+        "Bosch", "bosch,", "BOSCH", "Bosh", "Jürgen", "Jurgen", "Juergen",
+        "fünf", "funf", "fuenf", "5", "five", "twenty-five", "25", "twenty five",
+        "data base", "database", "Straße", "Strasse", "strasse", "toe", "to", "",
+    ]
+
+    partners = _equivalence_partners(forms)
+
+    for left, right in permutations(forms, 2):
+        assert (right in partners.get(left, set())) == are_equivalent(left, right), (left, right)
+
+
+def test_the_similarity_index_agrees_with_the_measure_it_stands_in_for():
+    """Every pair the bounds rule out really is below the threshold.
+
+    Random forms of the lengths and alphabets real words have, measured
+    both ways round because the index keeps the two directions apart.
+    """
+    import random
+    from itertools import permutations
+
+    from audio_transcriber.transcription.grouping import _similar, _similarity_partners
+
+    rng = random.Random(7)
+    forms: set[str] = set()
+    while len(forms) < 120:
+        root = "".join(rng.choice("abcdefghüöäß") for _ in range(rng.randint(1, 9)))
+        forms.add(root)
+        forms.add(root[:-1] + rng.choice("xyz"))
+        forms.add(root + rng.choice("en"))
+    ordered = sorted(forms)
+
+    forward, reverse = _similarity_partners(ordered)
+
+    for left, right in permutations(ordered, 2):
+        expected = _similar(left, right)
+        assert (right in forward.get(left, set())) == expected, (left, right)
+        assert (left in reverse.get(right, set())) == expected, (left, right)
+
+
+def _group_occurrences_the_slow_way(
+    occurrences: list[Occurrence],
+    tolerance: float,
+) -> list[list[str]]:
+    """The clustering as it was first written, kept as the definition.
+
+    Merge the earliest pair that may join and start again from the front,
+    until no pair is left. It is hopeless past a few hundred words, which is
+    why the module no longer works this way, but it is short enough to be
+    obviously right and that is what makes it worth keeping here: the fast
+    version must give exactly this answer, groups and order alike.
+    """
+    from difflib import SequenceMatcher
+
+    from audio_transcriber.transcription.grouping import (
+        SIMILARITY_MINIMUM_LENGTH,
+        _languages_agree,
+    )
+    from audio_transcriber.transcription.normalise import are_equivalent
+
+    def similar(first: str, second: str) -> bool:
+        if not first or not second:
+            return False
+        if min(len(first), len(second)) < SIMILARITY_MINIMUM_LENGTH:
+            return False
+        return SequenceMatcher(None, first, second).ratio() >= SIMILARITY_THRESHOLD
+
+    clusters: list[dict] = []
+    for occurrence in occurrences:
+        home = next(
+            (
+                cluster
+                for cluster in clusters
+                if cluster["form"] == occurrence.normalised_text
+                and _languages_agree(cluster["language"], occurrence.language)
+            ),
+            None,
+        )
+        if home is None:
+            home = {"form": occurrence.normalised_text, "members": [], "language": "unknown"}
+            clusters.append(home)
+        home["members"].append(occurrence)
+        if home["language"] == "unknown":
+            home["language"] = occurrence.language
+
+    def strengths(cluster: dict) -> list[float]:
+        return [
+            member.confidence_strength
+            for member in cluster["members"]
+            if member.confidence_strength is not None
+        ]
+
+    def may_join(first: dict, second: dict) -> bool:
+        if not _languages_agree(first["language"], second["language"]):
+            return False
+        left, right = strengths(first), strengths(second)
+        if left and right:
+            gap = max(0.0, max(min(left), min(right)) - min(max(left), max(right)))
+            if gap > tolerance:
+                return False
+        for one in first["members"]:
+            for other in second["members"]:
+                if are_equivalent(one.detected_text, other.detected_text):
+                    return True
+        for one in {member.normalised_text for member in first["members"]}:
+            for other in {member.normalised_text for member in second["members"]}:
+                if similar(one, other):
+                    return True
+        return False
+
+    merged = True
+    while merged:
+        merged = False
+        for first in range(len(clusters)):
+            for second in range(first + 1, len(clusters)):
+                if not may_join(clusters[first], clusters[second]):
+                    continue
+                for member in clusters[second]["members"]:
+                    clusters[first]["members"].append(member)
+                    if clusters[first]["language"] == "unknown":
+                        clusters[first]["language"] = member.language
+                del clusters[second]
+                merged = True
+                break
+            if merged:
+                break
+    return [[member.id for member in cluster["members"]] for cluster in clusters]
+
+
+def test_the_fast_clustering_gives_exactly_the_slow_answer():
+    """Groups, membership order and group order, on random folders.
+
+    The forms are drawn from a small vocabulary of near neighbours so that
+    chains, umlauts, unknown languages and unmeasured strengths all turn up
+    together, which is where an "equivalent" algorithm that is not quite
+    equivalent would show.
+    """
+    import random
+
+    vocabulary = [
+        "Bosch", "Bosh", "Bosche", "bosch", "Bösch", "Boesch", "bosc", "Boschen",
+        "ledger", "ledgers", "ledge", "Jürgen", "Jurgen", "Juergen", "the", "they",
+        "form", "from", "forms", "Straße", "Strasse",
+    ]
+    for seed in range(60):
+        rng = random.Random(seed)
+        occurrences = []
+        for position in range(rng.randint(2, 40)):
+            text = rng.choice(vocabulary)
+            occurrences.append(
+                make_occurrence(
+                    id=f"occurrence-{position}",
+                    detected_text=text,
+                    normalised_text=text.lower(),
+                    confidence_strength=(
+                        None if rng.random() < 0.1 else round(rng.uniform(0.1, 0.6), 2)
+                    ),
+                    language=rng.choice(["en", "de", "unknown"]),
+                )
+            )
+        tolerance = rng.choice([0.0, 0.05, 0.2, 0.5])
+
+        groups = group_occurrences(occurrences, tolerance)
+
+        expected = _group_occurrences_the_slow_way(occurrences, tolerance)
+        assert [group.occurrence_ids for group in groups] == expected, seed
+
+
 # -- Keeping a decision across a re-transcription -------------------------
 
 

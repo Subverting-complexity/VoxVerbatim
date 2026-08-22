@@ -59,7 +59,7 @@ def build_provider(
     internally, applied one level up.
     """
     try:
-        return _BUILDERS[provider](settings)
+        adapter = _BUILDERS[provider](settings)
     except KeyError:
         _log.warning("There is no adapter for %s.", provider)
         return None
@@ -71,6 +71,12 @@ def build_provider(
             provider.display_name,
         )
         return None
+    if adapter is not None:
+        # The pause between retries is one setting for every service, and
+        # it lives on the base class rather than in each constructor, so it
+        # is set here, once, after whichever adapter was built.
+        adapter.retry_backoff_seconds = settings.processing.provider_retry_backoff_seconds
+    return adapter
 
 
 def build_providers(
@@ -170,6 +176,7 @@ def _build_microsoft(settings: TranscriptionSettings) -> TranscriptionProvider |
         parameters=dict(settings.microsoft.parameters),
         api_version=settings.microsoft.api_version,
         timeout_seconds=settings.processing.provider_timeout_seconds,
+        maximum_retries=settings.processing.provider_retry_attempts,
     )
 
 
@@ -189,6 +196,7 @@ def _build_assemblyai(settings: TranscriptionSettings) -> TranscriptionProvider 
         afrikaans_model=settings.assemblyai.afrikaans_model,
         parameters=dict(settings.assemblyai.parameters),
         timeout_seconds=settings.processing.provider_timeout_seconds,
+        maximum_retries=settings.processing.provider_retry_attempts,
     )
 
 

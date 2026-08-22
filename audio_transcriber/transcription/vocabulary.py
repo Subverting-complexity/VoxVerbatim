@@ -39,6 +39,8 @@ from audio_transcriber.json_store import read_json_object, write_json_object
 from audio_transcriber.transcription.model import Language, Provider
 from audio_transcriber.transcription.normalise import (
     EquivalenceKind,
+    _compound_form,
+    _has_german_letter,
     are_equivalent,
     equivalence_kind,
     normalise,
@@ -743,10 +745,16 @@ class VocabularyIndex:
     def __init__(self, terms: Iterable[VocabularyTerm]) -> None:
         self._terms: list[VocabularyTerm] = list(terms)
         self._by_text: dict[str, VocabularyTerm] = {}
+        self._by_dropped: dict[str, VocabularyTerm] = {}
+        self._by_dropped_german: dict[str, VocabularyTerm] = {}
         self._exact_texts: dict[str, VocabularyTerm] = {}
         self._misrecognitions: dict[str, VocabularyTerm] = {}
         for term in self._terms:
             self._by_text.setdefault(normalise(term.text), term)
+            dropped = _compound_form(term.text, True)
+            self._by_dropped.setdefault(dropped, term)
+            if _has_german_letter(term.text):
+                self._by_dropped_german.setdefault(dropped, term)
             self._exact_texts.setdefault(_plain_form(term.text), term)
             for wrong in term.common_misrecognitions:
                 self._misrecognitions.setdefault(_plain_form(wrong), term)
@@ -779,10 +787,12 @@ class VocabularyIndex:
         outright, because handing vocabulary support to the spelling they have
         already rejected is worse than giving none at all.
 
-        Only then does the spoken-equivalence comparison decide. Its own form
-        is looked up first, which settles almost every remaining call in one
-        step; a miss walks the list, because two spellings can be the same
-        word in ways no shared key can capture.
+        Only then does the spoken-equivalence comparison decide, and it is
+        answered entirely by lookup. Reconciliation asks this question several
+        times for every word of a transcript, and almost every answer is "no",
+        so a miss has to be cheap: walking three hundred terms with a
+        comparison each made a ten-thousand-word reconcile ten times slower
+        than the same reconcile with no vocabulary at all.
         """
         cleaned = text.strip() if text else ""
         if not cleaned:
@@ -794,16 +804,38 @@ class VocabularyIndex:
         if _plain_form(cleaned) in self._misrecognitions:
             return None
 
-        found = self._by_text.get(normalise(cleaned))
-        if found is None:
-            for term in self._terms:
-                if are_equivalent(term.text, cleaned):
-                    found = term
-                    break
+        found = self._equivalent_term(cleaned)
         if found is None:
             return None
         return VocabularyMatch(found, equivalence_kind(found.text, cleaned))
 
+    def _equivalent_term(self, text: str) -> VocabularyTerm | None:
+        """The first term that is the same spoken evidence as ``text``.
+
+        This gives the answer walking the terms with
+        :func:`~audio_transcriber.transcription.normalise.are_equivalent`
+        would give, without the walk. That function says two texts are the
+        same when their comparison forms agree, or -- only when one of the
+        two has a German letter in it -- when their forms with the umlauts
+        dropped agree. Both are questions about a key worked out from each
+        text alone, so each term is filed under its two keys when the index
+        is built and a text is answered by looking its own two keys up.
+
+        The German condition is what the two dropped-form tables are for.
+        A text with a German letter may meet any term through the dropped
+        form; a text without one may only meet a term that has one. There is
+        nothing the comparison can say yes to that these lookups cannot,
+        which is why no walk remains for the cases the keys miss.
+
+        Within each table the earliest term wins, as it did in the walk.
+        """
+        found = self._by_text.get(normalise(text))
+        if found is not None:
+            return found
+        dropped = _compound_form(text, True)
+        if _has_german_letter(text):
+            return self._by_dropped.get(dropped)
+        return self._by_dropped_german.get(dropped)
     def misrecognition_of(self, text: str) -> VocabularyTerm | None:
         """The term ``text`` is a known mistake for, or ``None``.
 

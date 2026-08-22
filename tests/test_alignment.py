@@ -546,3 +546,217 @@ def test_a_silence_and_a_change_of_speaker_are_natural_places_to_cut():
     assert stream.boundary_after[3] is True
     windows = _windows(stream, stream, options)
     assert [window.backbone_start for window in windows] == [0, 4]
+
+
+
+# -- The matrix gives the answer it always gave ---------------------------
+#
+# The matrix used to join and normalise the words afresh in every cell. It
+# now works everything out once per row and per column and compares
+# tuples, which is a great deal faster and must not be any different. The
+# old cell-by-cell matrix is kept here, in its simplest form, as the
+# definition the fast one is held to.
+
+
+def _align_window_cell_by_cell(backbone, other, window, provider, options):
+    """The matrix as it was first written, one question per cell."""
+    from audio_transcriber.transcription.alignment import _columns_from_moves, _similarity
+    from audio_transcriber.transcription.normalise import are_equivalent
+
+    backbone_words = backbone.words[window.backbone_start : window.backbone_end]
+    other_words = other.words[window.aligned_start : window.aligned_end]
+    backbone_forms = backbone.forms[window.backbone_start : window.backbone_end]
+    other_forms = other.forms[window.aligned_start : window.aligned_end]
+    rows, columns_count = len(backbone_words), len(other_words)
+
+    if rows and rows == columns_count and backbone_forms == other_forms:
+        moves = [(index, index + 1, index, index + 1) for index in range(rows)]
+        return _columns_from_moves(backbone, other, window, moves, provider)
+
+    def pair_cost(backbone_text, other_text, backbone_form, other_form):
+        if backbone_text == other_text:
+            return options.exact_cost
+        if backbone_form == other_form or are_equivalent(backbone_text, other_text):
+            return options.equivalent_cost
+        spread = options.maximum_substitution_cost - options.minimum_substitution_cost
+        return options.maximum_substitution_cost - spread * _similarity(backbone_form, other_form)
+
+    def phrases_agree(several, single):
+        return are_equivalent(" ".join(token.text for token in several), single.text)
+
+    infinity = float("inf")
+    cost = [[infinity] * (columns_count + 1) for _ in range(rows + 1)]
+    step = [[None] * (columns_count + 1) for _ in range(rows + 1)]
+    cost[0][0] = 0.0
+    for row in range(rows + 1):
+        for column in range(columns_count + 1):
+            if row == 0 and column == 0:
+                continue
+            best, taken = infinity, None
+            if row and column:
+                candidate = cost[row - 1][column - 1] + pair_cost(
+                    backbone_words[row - 1].text,
+                    other_words[column - 1].text,
+                    backbone_forms[row - 1],
+                    other_forms[column - 1],
+                )
+                if candidate < best:
+                    best, taken = candidate, (1, 1)
+            if row:
+                candidate = cost[row - 1][column] + options.deletion_cost
+                if candidate < best:
+                    best, taken = candidate, (1, 0)
+            if column:
+                candidate = cost[row][column - 1] + options.insertion_cost
+                if candidate < best:
+                    best, taken = candidate, (0, 1)
+            for span in range(2, options.maximum_merge_span + 1):
+                if row >= span and column:
+                    if phrases_agree(backbone_words[row - span : row], other_words[column - 1]):
+                        candidate = cost[row - span][column - 1] + options.merge_cost
+                        if candidate < best:
+                            best, taken = candidate, (span, 1)
+                if column >= span and row:
+                    if phrases_agree(other_words[column - span : column], backbone_words[row - 1]):
+                        candidate = cost[row - 1][column - span] + options.merge_cost
+                        if candidate < best:
+                            best, taken = candidate, (1, span)
+            cost[row][column] = best
+            step[row][column] = taken
+
+    moves = []
+    row, column = rows, columns_count
+    while row or column:
+        taken = step[row][column]
+        if taken is None:
+            break
+        back, across = taken
+        moves.append((row - back, row, column - across, column))
+        row, column = row - back, column - across
+    moves.reverse()
+    return _columns_from_moves(backbone, other, window, moves, provider)
+
+
+_AWKWARD_VOCABULARY = [
+    "the", "contract", "was", "signed", "data", "base", "database", "data-base",
+    "twenty", "five", "25", "twenty-five", "Jürgen", "Jurgen", "Juergen", "fünf",
+    "funf", "Straße", "Strasse", "up", "to", "date", "up-to-date", "I'm", "I", "am",
+    "Bosch", "bosch,", "BOSCH", "Bosh", "meeting.", "then", "and", "honderd", "en", "vyf",
+]
+
+
+#: What a second service might make of a word: the same thing, written
+#: differently, which is what the merge and equivalent steps exist for.
+_REWRITTEN = {
+    "database": ["data base", "data-base"],
+    "data-base": ["database", "data base"],
+    "25": ["twenty five", "twenty-five"],
+    "twenty-five": ["25", "twenty five"],
+    "Jürgen": ["Jurgen", "Juergen"],
+    "fünf": ["funf", "5", "five"],
+    "Straße": ["Strasse"],
+    "up-to-date": ["up to date"],
+    "I'm": ["I am"],
+    "Bosch": ["bosch,", "BOSCH", "Bosh"],
+}
+
+
+def _random_pair(seed: int) -> tuple[list[ProviderToken], list[ProviderToken]]:
+    """Two readings of one stretch of speech, differing the way services do."""
+    import random
+
+    rng = random.Random(seed)
+    base = [rng.choice(_AWKWARD_VOCABULARY) for _ in range(rng.randint(1, 30))]
+    other: list[str] = []
+    for word in base:
+        roll = rng.random()
+        if roll < 0.08:
+            continue
+        if roll < 0.16:
+            other.append(rng.choice(_AWKWARD_VOCABULARY))
+        elif roll < 0.24:
+            other.extend([word, rng.choice(_AWKWARD_VOCABULARY)])
+        elif roll < 0.45 and word in _REWRITTEN:
+            other.extend(rng.choice(_REWRITTEN[word]).split())
+        else:
+            other.append(word)
+    return (
+        words(Provider.ELEVENLABS, " ".join(base), timed=True),
+        words(Provider.OPENAI, " ".join(other)),
+    )
+
+
+def _column_facts(alignment: ProviderAlignment) -> list[tuple]:
+    return [
+        (
+            column.position,
+            tuple(token.text for token in column.backbone_tokens),
+            tuple(token.text for token in column.aligned_tokens),
+            column.status,
+            column.equivalence,
+            round(column.quality, 9),
+        )
+        for column in alignment.columns
+    ]
+
+
+def test_the_fast_matrix_gives_exactly_the_cell_by_cell_answer():
+    """Every column, status, kind and quality, on random awkward windows.
+
+    The vocabulary is chosen to exercise every way two texts can be
+    equivalent -- case, punctuation, a dropped umlaut, numbers in words and
+    in digits, a compound split in two, a contraction -- because those are
+    the cases where a key worked out in advance could disagree with the
+    function it stands in for.
+    """
+    from audio_transcriber.transcription import alignment as module
+
+    options = AlignmentOptions(maximum_window_words=12)
+    for seed in range(80):
+        backbone_tokens, other_tokens = _random_pair(seed)
+        if not other_tokens:
+            continue
+
+        fast = align_sequences(backbone_tokens, other_tokens, options=options)
+
+        original = module._align_window
+        module._align_window = _align_window_cell_by_cell
+        try:
+            slow = align_sequences(backbone_tokens, other_tokens, options=options)
+        finally:
+            module._align_window = original
+        assert _column_facts(fast) == _column_facts(slow), seed
+
+
+def test_the_word_keys_agree_exactly_when_the_texts_are_equivalent():
+    """The tuple comparison is ``are_equivalent`` step for step.
+
+    The delicate case is the German one. "Jurgen" and "Juergen" both answer
+    to "Jürgen" and not to each other, because a dropped umlaut is only
+    looked for when one of the two texts really has one.
+    """
+    from itertools import permutations
+
+    from audio_transcriber.transcription.alignment import _key_of, _keys_agree
+    from audio_transcriber.transcription.normalise import are_equivalent
+
+    texts = _AWKWARD_VOCABULARY + ["data base", "twenty five", "up to date", "I am", ""]
+    for left, right in permutations(texts, 2):
+        assert _keys_agree(_key_of(left), _key_of(right)) == are_equivalent(left, right), (
+            left,
+            right,
+        )
+
+
+def test_the_single_word_index_finds_exactly_the_words_the_keys_agree_with():
+    from audio_transcriber.transcription.alignment import _SingleWords, _key_of, _keys_agree
+
+    keys = [_key_of(text) for text in _AWKWARD_VOCABULARY]
+    index = _SingleWords(keys)
+
+    for phrase in _AWKWARD_VOCABULARY + ["data base", "twenty five", "up to date", "I am"]:
+        phrase_key = _key_of(phrase)
+        expected = frozenset(
+            position + 1 for position, key in enumerate(keys) if _keys_agree(phrase_key, key)
+        )
+        assert index.agreeing_with(phrase_key) == expected, phrase

@@ -8,6 +8,7 @@ back, not how the words were arrived at.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from audio_transcriber.transcription.model import (
     AlignmentStatus,
@@ -361,6 +362,74 @@ def test_making_a_store_writes_nothing(tmp_path):
     TranscriptStore(tmp_path / "talk.m4a")
 
     assert list(tmp_path.iterdir()) == []
+
+
+# -- Checking the folder before the money is spent -----------------------
+
+
+def test_a_writable_folder_passes_the_probe_and_is_left_clean(tmp_path):
+    store = TranscriptStore(tmp_path / "talk.m4a")
+
+    assert store.probe_writable() is None
+    # The folder is made, which the run would do anyway, and the probe file
+    # is not left in it.
+    assert store.folder.is_dir()
+    assert list(store.folder.iterdir()) == []
+
+
+def test_a_folder_that_cannot_be_written_is_reported_in_a_sentence(tmp_path, monkeypatch):
+    store = TranscriptStore(tmp_path / "talk.m4a")
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+    problem = store.probe_writable()
+
+    assert problem is not None
+    assert "talk.m4a" in problem
+    assert "Access is denied" in problem
+    assert "read-only" in problem
+
+
+def test_a_path_past_the_windows_limit_is_named_as_the_reason(tmp_path, monkeypatch):
+    deep = tmp_path / ("a" * 200) / ("b" * 100)
+    store = TranscriptStore(deep / "talk.m4a")
+
+    def refuse(self, *args, **kwargs):
+        raise FileNotFoundError(3, "The system cannot find the path specified")
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+    problem = store.probe_writable()
+
+    assert problem is not None
+    assert "260" in problem
+    assert "shorter path" in problem
+
+
+def test_a_transcript_held_open_is_kept_beside_the_file_rather_than_lost(tmp_path, monkeypatch):
+    """The save says it failed, and the finished transcript is still on the disk."""
+    from audio_transcriber import json_store
+
+    store = TranscriptStore(tmp_path / "talk.m4a")
+    assert store.save(Transcript(recording_name="talk.m4a")) is True
+
+    real_replace = json_store.os.replace
+
+    def held(source, destination):
+        if Path(destination) == store.transcript_path:
+            raise PermissionError(13, "The process cannot access the file")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(json_store.os, "replace", held)
+    monkeypatch.setattr(json_store.time, "sleep", lambda _seconds: None)
+
+    assert store.save(Transcript(recording_name="talk.m4a", warnings=["new"])) is False
+    assert store.unsaved_transcript_path == store.folder / "transcript.json.unsaved"
+    assert store.unsaved_transcript_path.is_file()
+    assert "new" in store.unsaved_transcript_path.read_text(encoding="utf-8")
+    # The previous transcript is untouched.
+    assert store.load() is not None
 
 
 # -- Damaged and partial files -------------------------------------------

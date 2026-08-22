@@ -448,6 +448,8 @@ def cut_window(
     span: AudioSpan,
     destination: Path | None = None,
     output_format: OutputFormat = DEFAULT_COPY_FORMAT,
+    sample_rate: int | None = None,
+    channels: int | None = None,
 ) -> AudioClip:
     """Cut one window out of the canonical recording into its own file.
 
@@ -476,10 +478,24 @@ def cut_window(
     Pass ``destination`` to choose where the clip goes. Without one a
     temporary file is made, and the caller is responsible for deleting it
     once the service has answered.
+
+    Pass ``sample_rate`` or ``channels`` to have the clip written at a lower
+    rate or with fewer channels than the canonical recording. The window is
+    still chosen in the canonical recording's own samples, so the offset and
+    the span are exactly what they would have been without the conversion;
+    only the audio inside the file is resampled or folded to mono on its way
+    out. Neither value is ever raised above the recording's own, because a
+    clip carrying more samples than the recording it came from is bigger for
+    nothing. The clip reports the rate and channel count it was actually
+    written with.
     """
     source = Path(canonical.path)
     rate = canonical.sample_rate
     total_samples = round(canonical.duration * rate)
+    output_rate = rate if sample_rate is None else max(1, min(rate, int(sample_rate)))
+    output_channels = (
+        canonical.channels if channels is None else max(1, min(canonical.channels, int(channels)))
+    )
 
     requested_start = round(span.start * rate)
     requested_end = round(span.end * rate)
@@ -497,7 +513,13 @@ def cut_window(
         destination.parent.mkdir(parents=True, exist_ok=True)
 
     written = _copy_samples(
-        source, destination, output_format.codec, start_sample, end_sample - start_sample
+        source,
+        destination,
+        output_format.codec,
+        start_sample,
+        end_sample - start_sample,
+        output_rate=output_rate,
+        output_channels=output_channels,
     )
     if written < end_sample - start_sample:
         # The recording ran out earlier than its header said it would. What
@@ -510,8 +532,8 @@ def cut_window(
         path=destination,
         span=AudioSpan(start_sample / rate, end_sample / rate),
         canonical_offset=start_sample / rate,
-        sample_rate=rate,
-        channels=canonical.channels,
+        sample_rate=output_rate,
+        channels=output_channels,
         size_bytes=destination.stat().st_size if destination.exists() else 0,
         clamped=clamped,
     )
@@ -527,6 +549,8 @@ def _copy_samples(
     codec: str,
     start_sample: int,
     wanted_samples: int | None,
+    output_rate: int | None = None,
+    output_channels: int | None = None,
 ) -> int:
     """Write ``wanted_samples`` samples of ``source``, starting at ``start_sample``.
 
@@ -544,17 +568,37 @@ def _copy_samples(
     frame decoded is checked, and a read that started too late is thrown away
     and done again from the beginning of the file.
 
-    Returns the number of samples actually written, which is less than asked
-    for only when the recording ended first.
+    ``start_sample`` and ``wanted_samples`` are always counted in the
+    source's own samples, whatever rate the output is written at. Where an
+    ``output_rate`` or ``output_channels`` is given and differs from the
+    source, the samples are converted on their way into the encoder, after
+    the counting has been done, so a conversion can never move the cut.
+
+    Returns the number of source samples actually written, which is less
+    than asked for only when the recording ended first.
     """
     try:
         return _copy_samples_once(
-            source, destination, codec, start_sample, wanted_samples, seek=start_sample > 0
+            source,
+            destination,
+            codec,
+            start_sample,
+            wanted_samples,
+            seek=start_sample > 0,
+            output_rate=output_rate,
+            output_channels=output_channels,
         )
     except _SeekOvershot:
         _log.debug("Seeking in %s overshot, so it is being read from the start.", source)
         return _copy_samples_once(
-            source, destination, codec, start_sample, wanted_samples, seek=False
+            source,
+            destination,
+            codec,
+            start_sample,
+            wanted_samples,
+            seek=False,
+            output_rate=output_rate,
+            output_channels=output_channels,
         )
 
 
@@ -565,6 +609,8 @@ def _copy_samples_once(
     start_sample: int,
     wanted_samples: int | None,
     seek: bool,
+    output_rate: int | None = None,
+    output_channels: int | None = None,
 ) -> int:
     import av
 
@@ -580,7 +626,15 @@ def _copy_samples_once(
             # The output stream is created before anything is decoded, so
             # that a window holding no samples at all still comes out as a
             # valid, empty audio file rather than as a file with no header.
-            encoder = _Encoder(output, codec, rate, _layout_name(stream))
+            layout = _layout_name(stream)
+            encoder = _Encoder(
+                output,
+                codec,
+                rate,
+                layout,
+                output_rate=output_rate,
+                output_layout=_layout_for_channels(output_channels, layout),
+            )
             position: int | None = None if seek else 0
             written = 0
 
@@ -658,18 +712,61 @@ def _layout_name(stream) -> str:
     return _LAYOUT_BY_CHANNEL_COUNT.get(int(stream.channels or 1), name or "mono")
 
 
+def _layout_for_channels(channels: int | None, source_layout: str) -> str | None:
+    """The layout name to write with, or None to keep the source's own.
+
+    Only a reduction to mono is ever asked for, because the one reason to
+    change the channel count is to make a chunk smaller for a service that
+    will fold it to mono anyway.
+    """
+    if channels is None:
+        return None
+    name = _LAYOUT_BY_CHANNEL_COUNT.get(int(channels))
+    if name is None or name == source_layout:
+        return None
+    return name
+
+
 class _Encoder:
     """Writes blocks of samples into an output file.
 
-    The sample rate and the channel arrangement are taken from the recording
-    being read and are never changed. A canonical copy that quietly became
-    mono, or that was resampled, would no longer be the recording the user
-    handed over.
+    By default the sample rate and the channel arrangement are taken from the
+    recording being read and are never changed. A canonical copy that quietly
+    became mono, or that was resampled, would no longer be the recording the
+    user handed over.
+
+    A chunk for a service is different. Every speech service folds what it is
+    sent to 16 kHz mono before it listens, so a chunk written at 48 kHz
+    stereo carries six times the bytes for nothing, and the bytes are the
+    reason the recording had to be chunked at all. So the encoder can be
+    asked to write at a lower rate or with fewer channels, and then it
+    converts each block on its way in. The conversion happens after the
+    samples have been counted out upstream, which is what keeps a resampled
+    chunk starting at exactly the canonical time it claims.
     """
 
-    def __init__(self, destination, codec: str, rate: int, layout: str) -> None:
+    def __init__(
+        self,
+        destination,
+        codec: str,
+        rate: int,
+        layout: str,
+        output_rate: int | None = None,
+        output_layout: str | None = None,
+    ) -> None:
+        import av
+
         self._destination = destination
-        self._stream = destination.add_stream(codec, rate=rate, layout=layout)
+        wanted_rate = rate if output_rate is None or output_rate >= rate else int(output_rate)
+        wanted_layout = output_layout or layout
+        self._stream = destination.add_stream(codec, rate=wanted_rate, layout=wanted_layout)
+        self._resampler = None
+        if wanted_rate != rate or wanted_layout != layout:
+            # The resampler is also asked for the encoder's own sample
+            # format, so the frames it hands out can go straight in.
+            self._resampler = av.AudioResampler(
+                format=self._stream.format.name, layout=wanted_layout, rate=wanted_rate
+            )
 
     def write(self, block) -> None:
         # The queue upstream hands out blocks of the size that was asked for
@@ -677,9 +774,24 @@ class _Encoder:
         # follow the encoder's own clock, so the encoder is left to work both
         # out for itself.
         block.pts = None
-        for packet in self._stream.encode(block):
-            self._destination.mux(packet)
+        if self._resampler is None:
+            self._encode(block)
+            return
+        for converted in self._resampler.resample(block):
+            converted.pts = None
+            self._encode(converted)
 
     def close(self) -> None:
+        if self._resampler is not None:
+            # A resampler holds back a few samples until it is told the
+            # audio has ended; without the flush the last fraction of a
+            # second of every chunk would be missing.
+            for converted in self._resampler.resample(None):
+                converted.pts = None
+                self._encode(converted)
         for packet in self._stream.encode(None):
+            self._destination.mux(packet)
+
+    def _encode(self, frame) -> None:
+        for packet in self._stream.encode(frame):
             self._destination.mux(packet)

@@ -223,6 +223,25 @@ def test_two_services_agreeing_against_a_third_is_not_everybody_disagreeing():
     assert EscalationReason.ALL_PROVIDERS_DISAGREE not in reasons_for(token)
 
 
+def test_a_disagreement_the_evidence_could_not_settle_is_escalated():
+    """Two against one is weighed by the scoring rules. Where that weighing
+    still left the word open, a fourth voice is exactly what is missing."""
+    token = word(
+        "carton",
+        1.0,
+        1.4,
+        candidates=(
+            ("carton", (Provider.ELEVENLABS,)),
+            ("garden", (Provider.OPENAI, Provider.MICROSOFT)),
+        ),
+    )
+    token.text_confidence = Confidence.UNRESOLVED
+    assert EscalationReason.UNSETTLED_DISAGREEMENT in reasons_for(token)
+
+    token.text_confidence = Confidence.HIGH
+    assert EscalationReason.UNSETTLED_DISAGREEMENT not in reasons_for(token)
+
+
 def test_two_spellings_of_the_same_number_are_not_a_disagreement():
     """Escalating these would fill the queue with differences that are not."""
     token = word(
@@ -742,3 +761,409 @@ def test_only_the_words_that_were_asked_about_count_as_answers():
     )
 
     assert [token.text for token in result.tokens_in_target()] == ["fifty"]
+
+
+# -- Choosing which windows to send when there are too many --------------
+
+
+def _window_with(reasons, candidates=("fifty", "fifteen"), start=10.0) -> EscalationWindow:
+    one = Dispute(
+        span=AudioSpan(start, start + 0.5),
+        reasons=tuple(reasons),
+        token_ids=("t",),
+        candidates=tuple(candidates),
+    )
+    return EscalationWindow(
+        span=AudioSpan(start - 1.0, start + 1.5),
+        target=one.span,
+        disputes=(one,),
+    )
+
+
+def test_real_disagreements_are_sent_before_agreed_upon_numbers():
+    """The ceiling takes the list from the front, so the front must hold
+    the windows a second opinion can actually change."""
+    from audio_transcriber.transcription.escalation import prioritise
+
+    agreed_amount = _window_with((EscalationReason.NUMBER_DIFFERS,), ("50",), start=5.0)
+    three_ways = _window_with((EscalationReason.ALL_PROVIDERS_DISAGREE,), start=100.0)
+    contested_number = _window_with((EscalationReason.NUMBER_DIFFERS,), start=200.0)
+    speaker_only = _window_with(
+        (EscalationReason.SPEAKER_BOUNDARY_UNCERTAIN,), ("yes",), start=300.0
+    )
+
+    ordered = prioritise([agreed_amount, speaker_only, contested_number, three_ways])
+
+    assert ordered[:2] == [three_ways, contested_number]
+    # Equal worth keeps time order, so a user reading the warnings can
+    # still follow the recording.
+    assert ordered[2:] == [agreed_amount, speaker_only]
+
+
+def test_escalation_reports_each_window_as_it_is_answered():
+    provider = StubProvider()
+    seen: list[tuple[int, int]] = []
+
+    escalate(
+        windows_for(3),
+        provider,
+        CanonicalAudio("a.wav", "a.wav", 100.0, 16000, 1, 100, "wav"),
+        TIGHT,
+        progress=lambda done, total: seen.append((done, total)),
+    )
+
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+# -- Putting the answers back into the transcript ------------------------
+
+
+def _answered(
+    token: FinalToken,
+    heard: tuple[tuple[str, float, float], ...],
+    strength: EvidenceStrength = EvidenceStrength.DECIDING,
+    error: str | None = None,
+) -> EscalationResult:
+    """A window over one word, and what the second service said there."""
+    one = Dispute(
+        span=token.span,
+        reasons=(EscalationReason.ALL_PROVIDERS_DISAGREE,),
+        token_ids=(token.id,),
+    )
+    window = EscalationWindow(span=token.span.padded(2.0, 2.0), target=one.span, disputes=(one,))
+    return EscalationResult(
+        window=window,
+        model="universal-3-5-pro",
+        strength=strength,
+        audio_span=window.span,
+        canonical_offset=0.0,
+        used_time_window=True,
+        tokens=tuple(
+            ProviderToken(Provider.ASSEMBLYAI, index, text, start=start, end=end)
+            for index, (text, start, end) in enumerate(heard)
+        ),
+        error=error,
+    )
+
+
+def _disputed_word() -> FinalToken:
+    token = word(
+        "fifteen",
+        10.0,
+        10.5,
+        candidates=(("fifteen", (Provider.ELEVENLABS,)), ("fifty", (Provider.OPENAI,))),
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT,),
+    )
+    token.text_confidence = Confidence.REVIEW_REQUIRED
+    return token
+
+
+def test_a_deciding_answer_that_sides_with_the_other_reading_corrects_the_word():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    outcome = EscalationOutcome(results=(_answered(token, (("fifty", 10.0, 10.5),)),))
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.settled == 1
+    assert token.text == "fifty"
+    assert token.text_source is Provider.ASSEMBLYAI
+    assert token.text_confidence is Confidence.HIGH
+    assert token.needs_review is False
+    # The timing was measured for "fifteen"; saying a different word now
+    # sits in it is what lets the timing stage look again.
+    assert token.timing_status.value == "mapped_substitution"
+    # The second service now counts as one of the voices for that reading.
+    fifty = next(candidate for candidate in token.candidates if candidate.text == "fifty")
+    assert Provider.ASSEMBLYAI in fifty.providers
+    assert applied.evidence is not None and applied.evidence.provider is Provider.ASSEMBLYAI
+
+
+def test_an_answer_that_agrees_with_the_word_confirms_it_and_clears_the_queue():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    outcome = EscalationOutcome(results=(_answered(token, (("fifteen", 10.0, 10.5),)),))
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.confirmed == 1
+    assert token.text == "fifteen"
+    assert token.text_confidence is Confidence.HIGH
+    assert token.needs_review is False
+
+
+def test_an_answer_nobody_else_offered_is_kept_as_evidence_and_never_written_in():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    outcome = EscalationOutcome(results=(_answered(token, (("sixty", 10.0, 10.5),)),))
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.unsettled == 1
+    assert token.text == "fifteen"
+    assert token.text_confidence is Confidence.REVIEW_REQUIRED
+    assert ReviewReason.ESCALATION_UNRESOLVED in token.review_reasons
+    assert [candidate.text for candidate in token.candidates] == ["fifteen", "fifty", "sixty"]
+
+
+def test_an_informing_answer_adds_evidence_but_settles_nothing():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    outcome = EscalationOutcome(
+        results=(
+            _answered(token, (("fifty", 10.0, 10.5),), strength=EvidenceStrength.INFORMING),
+        )
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.unsettled == 1
+    assert token.text == "fifteen"
+    assert token.needs_review is True
+    fifty = next(candidate for candidate in token.candidates if candidate.text == "fifty")
+    assert Provider.ASSEMBLYAI in fifty.providers
+
+
+def test_a_value_that_must_not_be_guessed_is_never_settled_by_a_second_opinion():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    token.risk_categories = [RiskCategory.MONEY]
+    outcome = EscalationOutcome(results=(_answered(token, (("fifty", 10.0, 10.5),)),))
+
+    apply_answers([token], outcome)
+
+    assert token.text == "fifteen"
+    assert token.needs_review is True
+    assert ReviewReason.ESCALATION_UNRESOLVED in token.review_reasons
+
+
+def test_a_second_opinion_clears_only_the_reasons_that_are_about_the_text():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    token.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    outcome = EscalationOutcome(results=(_answered(token, (("fifty", 10.0, 10.5),)),))
+
+    apply_answers([token], outcome)
+
+    assert token.text == "fifty"
+    assert token.review_reasons == [ReviewReason.SPEAKER_UNCERTAIN]
+    assert token.needs_review is True
+
+
+def test_silence_where_the_word_was_leaves_it_for_a_person():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    outcome = EscalationOutcome(results=(_answered(token, (("hello", 8.0, 8.4),)),))
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.unsettled == 1
+    assert token.text == "fifteen"
+    assert ReviewReason.ESCALATION_UNRESOLVED in token.review_reasons
+
+
+def test_a_person_who_already_corrected_the_word_is_not_overruled():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    token.human_corrected = True
+    outcome = EscalationOutcome(results=(_answered(token, (("fifty", 10.0, 10.5),)),))
+
+    apply_answers([token], outcome)
+
+    assert token.text == "fifteen"
+
+
+def test_everything_the_second_service_heard_is_kept_as_one_numbered_result():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    first = _disputed_word()
+    second = word("Bosh", 50.0, 50.4, candidates=(("Bosh", (Provider.ELEVENLABS,)),))
+    outcome = EscalationOutcome(
+        results=(
+            _answered(first, (("and", 9.0, 9.3), ("fifty", 10.0, 10.5))),
+            _answered(second, (("Bosch", 50.0, 50.4),)),
+        )
+    )
+
+    applied = apply_answers([first, second], outcome)
+
+    assert [token.index for token in applied.evidence.tokens] == [0, 1, 2]
+    assert [token.text for token in applied.evidence.tokens] == ["and", "fifty", "Bosch"]
+    # The reference on the word points into that numbering.
+    fifty = next(candidate for candidate in first.candidates if candidate.text == "fifty")
+    assert TokenReference(Provider.ASSEMBLYAI, 1) in fifty.source_tokens
+
+
+def test_a_neighbour_that_overlaps_by_a_few_milliseconds_is_not_part_of_the_answer():
+    """Services measure their own boundaries, and adjacent words abut, so the
+    word after the disputed one always overlaps it slightly. The answer to a
+    question about one word is one word."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()  # 10.0 to 10.5
+    outcome = EscalationOutcome(
+        results=(
+            _answered(
+                token,
+                (("we", 9.5, 9.98), ("fifty", 9.98, 10.48), ("dollars", 10.48, 10.9)),
+            ),
+        )
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.settled == 1
+    assert token.text == "fifty"
+    assert "fifty dollars" not in [candidate.text for candidate in token.candidates]
+
+
+def test_one_service_word_across_two_disputed_words_settles_neither():
+    """One word where the transcript has two is a disagreement about the word
+    count, not a confirmation of both."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    first = word("the", 10.0, 10.2, candidates=(("the", (Provider.ELEVENLABS,)), ("a", (Provider.OPENAI,))))
+    second = word("the", 10.2, 10.4, candidates=(("the", (Provider.ELEVENLABS,)), ("uh", (Provider.OPENAI,))))
+    for token in (first, second):
+        token.text_confidence = Confidence.REVIEW_REQUIRED
+        token.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+    disputes = tuple(
+        Dispute(span=token.span, reasons=(EscalationReason.ALL_PROVIDERS_DISAGREE,), token_ids=(token.id,))
+        for token in (first, second)
+    )
+    window = EscalationWindow(span=AudioSpan(8.0, 12.0), target=AudioSpan(10.0, 10.4), disputes=disputes)
+    result = EscalationResult(
+        window=window,
+        model="universal-3-5-pro",
+        strength=EvidenceStrength.DECIDING,
+        audio_span=window.span,
+        canonical_offset=0.0,
+        used_time_window=True,
+        tokens=(ProviderToken(Provider.ASSEMBLYAI, 0, "the", start=10.0, end=10.4),),
+    )
+
+    applied = apply_answers([first, second], EscalationOutcome(results=(result,)))
+
+    # The word's middle is at 10.2, on the boundary, so it answers one of
+    # the two and the other is left for a person.
+    assert applied.confirmed == 1
+    assert applied.unsettled == 1
+    assert sum(1 for token in (first, second) if token.needs_review) == 1
+
+
+def test_the_time_window_question_is_retried_like_any_other_request():
+    """A rate limit on one of two hundred short questions should cost a
+    pause, not that passage's second opinion."""
+    from audio_transcriber.transcription.providers.base import ProviderError, TranscriptionProvider
+
+    class FlakyProvider(TranscriptionProvider):
+        provider = Provider.ASSEMBLYAI
+        capabilities = ASSEMBLYAI_CAPABILITIES
+        maximum_retries = 2
+        retry_backoff_seconds = 0.0
+
+        def __init__(self):
+            self.calls = 0
+
+        @property
+        def model_identifier(self):
+            return "fake"
+
+        def is_configured(self):
+            return True
+
+        def describe_configuration_problem(self):
+            return None
+
+        def _transcribe(self, request, cancelled=None):
+            raise AssertionError("not used")
+
+        def upload(self, audio_path):
+            return "https://uploads.example/one"
+
+        def transcribe_window(self, request, *, audio_url=None, window=None, cancelled=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise ProviderError("Too many requests", retryable=True, status_code=429)
+            return ProviderResult(
+                provider=self.provider,
+                tokens=[ProviderToken(self.provider, 0, "fifty", start=window.start, end=window.start + 0.3)],
+            )
+
+    provider = FlakyProvider()
+    outcome = escalate(
+        windows_for(1),
+        provider,
+        CanonicalAudio("a.wav", "a.wav", 100.0, 16000, 1, 100, "wav"),
+        TIGHT,
+    )
+
+    assert provider.calls == 2
+    assert outcome.results[0].succeeded
+
+
+def test_a_short_word_heard_a_little_later_by_the_service_is_still_the_answer():
+    """Two engines can disagree about where a 100 ms word starts by more than
+    half its length. The word whose middle is just outside the span is it."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = word(
+        "fifteen", 1.0, 1.1,
+        candidates=(("fifteen", (Provider.ELEVENLABS,)), ("fifty", (Provider.OPENAI,))),
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT,),
+    )
+    token.text_confidence = Confidence.REVIEW_REQUIRED
+    outcome = EscalationOutcome(
+        results=(
+            _answered(token, (("and", 0.8, 0.96), ("fifty", 1.06, 1.16), ("dollars", 1.16, 1.5))),
+        )
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.settled == 1
+    assert token.text == "fifty"
+
+
+def test_a_word_the_service_split_in_two_still_confirms_it():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = word(
+        "database", 10.0, 10.5,
+        candidates=(("database", (Provider.ELEVENLABS,)), ("data bus", (Provider.OPENAI,))),
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT,),
+    )
+    token.text_confidence = Confidence.REVIEW_REQUIRED
+    outcome = EscalationOutcome(
+        results=(_answered(token, (("data", 10.0, 10.2), ("base", 10.2, 10.5))),)
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.confirmed == 1
+    assert token.needs_review is False
+
+
+def test_when_neighbours_lean_into_a_long_span_the_word_in_the_middle_answers():
+    """Two words can have their middles inside a long word's span. Joined they
+    are nobody's reading; the one nearest the middle is what was asked."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()  # 10.0 to 10.5
+    outcome = EscalationOutcome(
+        results=(_answered(token, (("fifty", 9.98, 10.30), ("dollars", 10.30, 10.7))),)
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.settled == 1
+    assert token.text == "fifty"
+    assert "fifty dollars" not in [candidate.text for candidate in token.candidates]

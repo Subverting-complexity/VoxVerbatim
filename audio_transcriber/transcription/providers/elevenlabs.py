@@ -69,6 +69,7 @@ rather than failing to start.
 from __future__ import annotations
 
 import logging
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -91,6 +92,8 @@ from audio_transcriber.transcription.providers.base import (
     ProviderUnavailable,
     TranscriptionProvider,
     TranscriptionRequest,
+    retry_after_seconds,
+    timeout_for_duration,
 )
 
 # Every limit a key term is held to is declared at the top of context.py,
@@ -187,8 +190,13 @@ ALIGNER_LANGUAGES = frozenset({Language.ENGLISH, Language.GERMAN})
 _CREDENTIAL_NAMES = ("api_key", "apikey", "xi-api-key", "key", "token", "secret", "password")
 
 #: Errors worth trying again even though they carry no HTTP status, because
-#: they happened before the far end answered at all.
-_RETRYABLE_ERROR_NAMES = ("timeout", "connection")
+#: they happened before the far end answered at all. These are matched
+#: against the exception's class name: ``httpx.ReadTimeout``,
+#: ``httpx.ConnectError`` and ``httpx.RemoteProtocolError`` are the three
+#: that a long upload actually produces, and "connection" alone would miss
+#: the second.
+_RETRYABLE_ERROR_NAMES = ("timeout", "connect", "protocol")
+
 
 _CONTENT_TYPES = {
     ".wav": "audio/wav",
@@ -251,7 +259,11 @@ class ElevenLabsProvider(TranscriptionProvider):
         self._timestamps_granularity = timestamps_granularity
         self._maximum_keyterms = max(0, maximum_keyterms)
         self._timeout_seconds = timeout_seconds
-        self._maximum_retries = maximum_retries
+        # Read by the retry loop in the base class. The library's own retry
+        # is switched off below, because the installed version sends a
+        # retried request without its form body and the retry fails with a
+        # validation error every time.
+        self.maximum_retries = max(0, maximum_retries)
         self._client = client
 
     # -- What this service is ------------------------------------------
@@ -259,6 +271,19 @@ class ElevenLabsProvider(TranscriptionProvider):
     @property
     def model_identifier(self) -> str:
         return self._model
+
+    def timeout_for(self, request: TranscriptionRequest) -> float:
+        """The request timeout, grown to fit the audio being sent.
+
+        The service is silent from the moment the upload finishes until the
+        transcript is ready, and the library's ``timeout_in_seconds`` is a
+        read timeout. A three-hour file sent with a fixed fifteen-minute
+        timeout was therefore abandoned while the service was still working
+        on it, and the retry sent it again to the same end. The allowance
+        has to cover the whole of the processing time, and that scales with
+        the length of the recording; :func:`timeout_for_duration` says how.
+        """
+        return timeout_for_duration(self._timeout_seconds, request.duration)
 
     def is_configured(self) -> bool:
         return self.describe_configuration_problem() is None
@@ -347,6 +372,9 @@ class ElevenLabsProvider(TranscriptionProvider):
 
         started_at = datetime.now()
         try:
+            # The file is opened here, inside the attempt, so that a retry
+            # sends the whole file again rather than whatever was left of a
+            # handle the failed attempt had read part of.
             with request.audio_path.open("rb") as handle:
                 response = client.speech_to_text.convert(
                     file=(
@@ -356,18 +384,25 @@ class ElevenLabsProvider(TranscriptionProvider):
                     ),
                     request_options={
                         "additional_body_parameters": body_parameters,
-                        "timeout_in_seconds": int(self._timeout_seconds),
-                        "max_retries": self._maximum_retries,
+                        "timeout_in_seconds": int(self.timeout_for(request)),
+                        # Zero, deliberately. The installed library retries a
+                        # request without its form body, so its retries can
+                        # only ever fail. The base class retries instead, and
+                        # comes back through this method, which reopens the
+                        # file and rebuilds the whole request.
+                        "max_retries": 0,
                     },
                     **arguments,
                 )
         except Exception as error:  # noqa: BLE001 - every failure becomes a result
-            # Converted here rather than allowed out, because a failed
-            # request still has provenance worth keeping: what was asked, of
-            # which model, and what came back instead of a transcript. An
-            # exception would carry the message and lose all the rest.
+            # Converted here rather than allowed out unchanged, because a
+            # failed request still has provenance worth keeping: what was
+            # asked, of which model, and what came back instead of a
+            # transcript. The record is built now and carried on the error,
+            # so the retry loop can try again where that may help and still
+            # hand back the full record when it gives up.
             failure = _as_provider_error("ElevenLabs", error)
-            _log.warning(
+            _log.debug(
                 "ElevenLabs did not answer: %s (worth retrying: %s)",
                 failure,
                 failure.retryable,
@@ -386,7 +421,7 @@ class ElevenLabsProvider(TranscriptionProvider):
                 succeeded=False,
                 error=str(failure),
             )
-            return ProviderResult(
+            failure.result = ProviderResult(
                 provider=self.provider,
                 request=record,
                 error=str(failure),
@@ -395,6 +430,7 @@ class ElevenLabsProvider(TranscriptionProvider):
                 # same footing as a successful answer.
                 raw_response=getattr(error, "body", None),
             )
+            raise failure from error
 
         tokens = self._tokens_from(response, request)
         detected = Language.from_code(_field(response, "language_code"))
@@ -437,21 +473,26 @@ class ElevenLabsProvider(TranscriptionProvider):
         for index, word in enumerate(_field(response, "words") or []):
             text = _field(word, "text") or ""
             kind = _field(word, "type") or "word"
-            start = _field(word, "start")
-            end = _field(word, "end")
+            # This is the line the whole transcript rests on. The service
+            # answers in the local time of whatever audio it was given, and
+            # adding the offset here, once, is what puts every word on the
+            # canonical timeline. Miss it and a chunked recording produces a
+            # transcript where every word after the first chunk points at
+            # the wrong sound.
+            start = _shifted(_field(word, "start"), request.canonical_offset)
+            end = _shifted(_field(word, "end"), request.canonical_offset)
+            if start is not None and end is not None and end < start:
+                # A word cannot end before it starts. The service has been
+                # seen to report that for a very short entry, and a negative
+                # length breaks anything downstream that divides by it.
+                end = start
             tokens.append(
                 ProviderToken(
                     provider=self.provider,
                     index=index,
                     text=text,
-                    # This is the line the whole transcript rests on. The
-                    # service answers in the local time of whatever audio it
-                    # was given, and adding the offset here, once, is what
-                    # puts every word on the canonical timeline. Miss it and
-                    # a chunked recording produces a transcript where every
-                    # word after the first chunk points at the wrong sound.
-                    start=_shifted(start, request.canonical_offset),
-                    end=_shifted(end, request.canonical_offset),
+                    start=start,
+                    end=end,
                     speaker=_field(word, "speaker_id"),
                     # Carried through as a log probability, not converted to
                     # a confidence. The model keeps the two apart because
@@ -764,19 +805,37 @@ class ElevenLabsForcedAligner(ForcedAligner):
         if self._client is None:
             self._client = _build_client(self._api_key)
 
-        try:
-            with audio_path.open("rb") as handle:
-                response = self._client.forced_alignment.create(
-                    file=(audio_path.name, handle, _content_type_for(audio_path)),
-                    text=text,
-                    request_options={
-                        "additional_body_parameters": dict(self._parameters),
-                        "timeout_in_seconds": int(self._timeout_seconds),
-                        "max_retries": self._maximum_retries,
-                    },
+        # The library's own retry is switched off and done here instead,
+        # for the same reason as in the transcription adapter: the installed
+        # version retries without the form body. The file is reopened on
+        # every attempt so each one sends the whole of it.
+        attempts_allowed = 1 + max(0, self._maximum_retries)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                with audio_path.open("rb") as handle:
+                    response = self._client.forced_alignment.create(
+                        file=(audio_path.name, handle, _content_type_for(audio_path)),
+                        text=text,
+                        request_options={
+                            "additional_body_parameters": dict(self._parameters),
+                            "timeout_in_seconds": int(self._timeout_seconds),
+                            "max_retries": 0,
+                        },
+                    )
+                break
+            except Exception as error:  # noqa: BLE001 - converted at this boundary
+                failure = _as_provider_error("Forced alignment", error)
+                if not failure.retryable or attempt >= attempts_allowed:
+                    raise failure from error
+                _log.warning(
+                    "Forced alignment did not answer (attempt %d of %d): %s",
+                    attempt,
+                    attempts_allowed,
+                    failure,
                 )
-        except Exception as error:  # noqa: BLE001 - converted at this boundary
-            raise _as_provider_error("Forced alignment", error) from error
+                _sleep(max(2.0 * attempt, failure.retry_after or 0.0))
 
         # Remember what this number is. It is a loss, so a small one means a
         # good alignment, which is the opposite way round to the logprob on a
@@ -1074,7 +1133,19 @@ def _as_provider_error(what: str, error: Exception) -> ProviderError:
         if status is not None
         else f"{what} could not be reached: {detail}"
     )
-    return ProviderError(message, retryable=retryable, status_code=status)
+    return ProviderError(
+        message,
+        retryable=retryable,
+        status_code=status,
+        # The library's error carries the response headers, and a rate
+        # limit says in them how long to wait. The retry loop honours it.
+        retry_after=retry_after_seconds(getattr(error, "headers", None)),
+    )
+
+
+def _sleep(seconds: float) -> None:
+    """Kept separate so a test can take the waiting out of the aligner's retry."""
+    time.sleep(seconds)
 
 
 def _detail_from(body: Any) -> str | None:

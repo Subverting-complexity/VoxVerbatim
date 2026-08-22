@@ -73,8 +73,22 @@ class FakeClient:
             # adapter has to notice rather than fall over.
             self.upload_file = None
 
-    def transcribe(self, audio: Any, parameters: dict[str, Any]) -> Any:
-        self.calls.append({"audio": audio, "parameters": dict(parameters)})
+    def transcribe(
+        self,
+        audio: Any,
+        parameters: dict[str, Any],
+        *,
+        cancelled: Any = None,
+        wait_seconds: float | None = None,
+    ) -> Any:
+        self.calls.append(
+            {
+                "audio": audio,
+                "parameters": dict(parameters),
+                "cancelled": cancelled,
+                "wait_seconds": wait_seconds,
+            }
+        )
         if self.error is not None:
             raise self.error
         return self.transcript
@@ -527,7 +541,7 @@ class FakeHttpClient:
         self.posts.append({"url": url, "json": dict(json)})
         return self.answers.pop(0) if self.answers else FakeResponse({"id": "job-1"})
 
-    def get(self, url: str) -> FakeResponse:
+    def get(self, url: str, **_options: object) -> FakeResponse:
         self.gets.append(url)
         return self.answers.pop(0) if self.answers else FakeResponse(TRANSCRIPT)
 
@@ -561,11 +575,14 @@ class FakePackage:
             def __init__(self, config: Any = None) -> None:
                 self.config = config
 
-            def transcribe(self, audio: Any) -> Any:
+            def submit(self, audio: Any) -> Any:
+                # The real ``submit`` returns a transcript object whose id
+                # the client then polls for; the poll is answered by the
+                # fake HTTP client.
                 package.transcribed.append(
                     {"audio": audio, "raw": dict(vars(self.config.raw))}
                 )
-                return TRANSCRIPT
+                return {"id": "job-1", "status": "queued"}
 
         self.TranscriptionConfig = Config
         self.Transcriber = Transcriber
@@ -770,3 +787,334 @@ def test_a_bad_answer_to_the_submission_never_looks_transcribed(tmp_path: Path) 
     assert result.error is not None
     assert result.request is not None
     assert result.request.succeeded is False
+
+
+# -- Waiting, stopping and trying again ------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    from audio_transcriber.transcription.providers import base
+
+    monkeypatch.setattr(base, "_sleep", lambda seconds: None)
+
+
+def test_the_ordinary_path_submits_and_then_polls_with_a_cancel_check(monkeypatch) -> None:
+    """The library's own ``transcribe`` cannot be interrupted, so it is not used."""
+    package = FakePackage()
+    http = FakeHttpClient(
+        [
+            FakeResponse({"id": "job-1", "status": "processing"}),
+            FakeResponse(TRANSCRIPT),
+        ]
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+
+    answer = client.transcribe(
+        "https://cdn.assemblyai.com/a.wav",
+        {"speech_models": ["universal-2"]},
+        cancelled=lambda: False,
+    )
+
+    assert answer == TRANSCRIPT
+    assert package.transcribed, "the job should have gone through the library"
+    assert http.gets == ["/v2/transcript/job-1", "/v2/transcript/job-1"]
+
+
+def test_a_stopped_run_stops_the_polling(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"id": "job-1", "status": "processing"})] * 5)
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+    polls = 0
+
+    def cancelled() -> bool:
+        return polls >= 2
+
+    original_get = http.get
+
+    def counting_get(url: str, **_options: object) -> FakeResponse:
+        nonlocal polls
+        polls += 1
+        return original_get(url)
+
+    http.get = counting_get
+
+    with pytest.raises(ProviderError) as raised:
+        client.transcribe(
+            "https://cdn.assemblyai.com/a.wav", {"new_option": 1}, cancelled=cancelled
+        )
+
+    assert "stopped" in str(raised.value)
+    assert not raised.value.retryable
+    assert polls == 2
+
+
+def test_a_job_that_outlasts_its_allowance_is_given_up_on(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient([FakeResponse({"id": "job-1", "status": "queued"})] * 50)
+    client = sdk_client_with(monkeypatch, http, package)
+    clock = [0.0]
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(assemblyai.time, "sleep", sleep)
+    monkeypatch.setattr(assemblyai.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(ProviderError) as raised:
+        client.transcribe(
+            "https://cdn.assemblyai.com/a.wav", {"new_option": 1}, wait_seconds=10.0
+        )
+
+    assert "10 seconds" in str(raised.value)
+    assert not raised.value.retryable
+    assert 2 <= len(http.gets) <= 6
+
+
+def test_the_adapter_gives_the_wait_a_ceiling_that_grows_with_the_audio(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient()
+    provider = make_provider(client, timeout_seconds=900.0)
+
+    provider.transcribe(make_request(tmp_path, duration=3 * 3600.0))
+    provider.transcribe_window(
+        make_request(tmp_path, canonical_offset=0.0),
+        audio_url="https://cdn.assemblyai.com/upload/abc",
+        window=AudioSpan(12.5, 18.25),
+    )
+
+    assert client.calls[0]["wait_seconds"] == 7200.0
+    assert client.calls[1]["wait_seconds"] == 900.0
+
+
+def test_a_stop_reported_by_the_client_is_a_failed_result_in_its_own_words(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient(
+        error=ProviderError("AssemblyAI job j was not waited for, because the run was stopped.")
+    )
+
+    result = make_provider(client, maximum_retries=3).transcribe(make_request(tmp_path))
+
+    assert not result.succeeded
+    assert result.error.endswith("because the run was stopped.")
+    assert len(client.calls) == 1
+
+
+def test_a_dropped_connection_is_tried_again(tmp_path: Path) -> None:
+    class ConnectError(Exception):
+        pass
+
+    class Recovering(FakeClient):
+        def transcribe(self, audio, parameters, *, cancelled=None, wait_seconds=None):
+            if len(self.calls) == 0:
+                self.calls.append({"audio": audio, "parameters": dict(parameters)})
+                raise ConnectError("reset")
+            return super().transcribe(
+                audio, parameters, cancelled=cancelled, wait_seconds=wait_seconds
+            )
+
+    client = Recovering()
+    result = make_provider(client, maximum_retries=1).transcribe(make_request(tmp_path))
+
+    assert result.succeeded
+    assert len(client.calls) == 2
+
+
+def test_a_server_error_that_never_clears_reports_the_attempts(tmp_path: Path) -> None:
+    client = FakeClient(error=Boom("busy", status_code=503))
+
+    result = make_provider(client, maximum_retries=2).transcribe(make_request(tmp_path))
+
+    assert not result.succeeded
+    assert len(client.calls) == 3
+    assert "failed after 3 attempts" in result.error
+    assert result.request is not None and result.request.error == result.error
+
+
+def test_an_upload_that_drops_is_tried_again(tmp_path: Path) -> None:
+    class ReadTimeout(Exception):
+        pass
+
+    class DroppingUpload(FakeClient):
+        def upload_file(self, audio_path: str) -> str:
+            self.uploaded.append(audio_path)
+            if len(self.uploaded) == 1:
+                raise ReadTimeout("slow")
+            return self.upload_url
+
+    client = DroppingUpload()
+    url = make_provider(client, maximum_retries=1).upload(audio_file(tmp_path))
+
+    assert url == client.upload_url
+    assert len(client.uploaded) == 2
+
+
+def test_an_upload_that_keeps_dropping_says_how_often_it_tried(tmp_path: Path) -> None:
+    client = FakeClient()
+    tries: list[str] = []
+
+    def drop(path: str) -> str:
+        tries.append(path)
+        raise Boom("gone", status_code=502)
+
+    client.upload_file = drop
+    with pytest.raises(ProviderError) as raised:
+        make_provider(client, maximum_retries=2).upload(audio_file(tmp_path))
+
+    assert "upload failed after 3 attempts" in str(raised.value)
+    assert len(tries) == 3
+
+
+def test_a_refused_upload_is_not_tried_again(tmp_path: Path) -> None:
+    client = FakeClient()
+    tries: list[str] = []
+
+    def refuse(path: str) -> str:
+        tries.append(path)
+        raise Boom("no", status_code=401)
+
+    client.upload_file = refuse
+    with pytest.raises(ProviderError):
+        make_provider(client, maximum_retries=3).upload(audio_file(tmp_path))
+
+    assert len(tries) == 1
+
+
+# -- Where a windowed answer's times are counted from ----------------------
+
+
+def windowed_transcript(words: list[dict]) -> dict:
+    return {**TRANSCRIPT, "words": words}
+
+
+def escalation_request(tmp_path: Path) -> TranscriptionRequest:
+    return TranscriptionRequest(
+        audio_path=tmp_path / "never-read.wav", canonical_offset=0.0, purpose="escalation"
+    )
+
+
+def test_times_counted_from_the_file_are_left_alone(tmp_path: Path, caplog) -> None:
+    """The documented behaviour, which the escalation path relies on."""
+    client = FakeClient(
+        windowed_transcript(
+            [
+                {"text": "a", "start": 600_100, "end": 600_400},
+                {"text": "b", "start": 601_000, "end": 601_500},
+            ]
+        )
+    )
+    with caplog.at_level("INFO"):
+        result = make_provider(client).transcribe_window(
+            escalation_request(tmp_path),
+            audio_url="https://cdn.assemblyai.com/upload/abc",
+            window=AudioSpan(600.0, 606.0),
+        )
+
+    assert [token.start for token in result.tokens] == pytest.approx([600.1, 601.0])
+    assert any(
+        "counted from the start of the recording" in entry.message for entry in caplog.records
+    )
+
+
+def test_times_counted_from_the_window_are_moved_into_it(tmp_path: Path, caplog) -> None:
+    """If the service ever counted from the window, every escalated word
+    would land near the start of the recording and nothing would fail."""
+    client = FakeClient(
+        windowed_transcript(
+            [
+                {"text": "a", "start": 100, "end": 400},
+                {"text": "b", "start": 1000, "end": 5500},
+            ]
+        )
+    )
+    with caplog.at_level("INFO"):
+        result = make_provider(client).transcribe_window(
+            escalation_request(tmp_path),
+            audio_url="https://cdn.assemblyai.com/upload/abc",
+            window=AudioSpan(600.0, 606.0),
+        )
+
+    assert [token.start for token in result.tokens] == pytest.approx([600.1, 601.0])
+    assert [token.end for token in result.tokens] == pytest.approx([600.4, 605.5])
+    assert any(
+        "counted from the start of the window" in entry.message for entry in caplog.records
+    )
+
+
+def test_times_that_fit_neither_reading_are_left_as_they_came(tmp_path: Path) -> None:
+    """Before the window but longer than it: not window-relative, so untouched."""
+    client = FakeClient(windowed_transcript([{"text": "a", "start": 100, "end": 20_000}]))
+
+    result = make_provider(client).transcribe_window(
+        escalation_request(tmp_path),
+        audio_url="https://cdn.assemblyai.com/upload/abc",
+        window=AudioSpan(600.0, 606.0),
+    )
+
+    assert result.tokens[0].start == pytest.approx(0.1)
+
+
+def test_a_word_that_ends_before_it_starts_is_given_no_length(tmp_path: Path) -> None:
+    client = FakeClient(windowed_transcript([{"text": "blip", "start": 900, "end": 800}]))
+
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    token = result.tokens[0]
+    assert token.end == token.start == pytest.approx(120.5 + 0.9)
+
+
+def test_a_poll_that_fails_is_polled_again_rather_than_the_job_being_submitted_again(
+    monkeypatch,
+) -> None:
+    """A job is paid for when it is submitted. A dropped connection or a 503
+    on one of the thousands of polls over a long job says nothing about the
+    job, which is still running, so the same job is asked about again. Letting
+    the fault out would have the retry loop submit a second, paid job and
+    never read the first."""
+    import httpx
+
+    package = FakePackage()
+    http = FakeHttpClient(
+        [
+            FakeResponse({"id": "job-1", "status": "processing"}),
+            FakeResponse({"error": "gateway"}, status_code=502),
+            FakeResponse(TRANSCRIPT),
+        ]
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+    original_get = http.get
+    faults = iter([None, httpx.ReadTimeout("slow"), None, None])
+
+    def faulty_get(url: str, **_options: object) -> FakeResponse:
+        fault = next(faults)
+        if fault is not None:
+            raise fault
+        return original_get(url)
+
+    http.get = faulty_get
+
+    answer = client.transcribe("https://cdn.assemblyai.com/a.wav", {"new_option": 1})
+
+    assert answer["status"] == "completed"
+    assert len(http.posts) == 1, "the job was submitted more than once"
+
+
+def test_a_poll_refused_for_a_reason_that_will_not_change_is_not_repeated(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient(
+        [FakeResponse({"id": "job-1"})]
+        + [FakeResponse({"error": "not found"}, status_code=404)] * 3
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(Exception) as raised:
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"new_option": 1})
+
+    assert getattr(raised.value, "status_code", None) == 404
+    assert len(http.gets) == 1

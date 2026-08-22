@@ -570,3 +570,74 @@ def test_a_name_that_is_somebody_elses_misspelling_is_still_a_name():
 
     assert index.knows("Mueller")
     assert index.match("Mueller").term.text == "Mueller"
+
+
+
+def _match_by_walking(terms: list[VocabularyTerm], text: str) -> VocabularyTerm | None:
+    """The lookup as it was first written, for terms with no recorded mistakes.
+
+    A term as the user wrote it won outright, then the comparison form was
+    looked up, and a miss walked the terms asking ``are_equivalent`` of
+    each. The index answers the whole thing
+    by key now, because reconciliation asks it for every word of a
+    transcript, and the walk made a large vocabulary cost more than it was
+    worth. The keys have to give this answer, first term included, and
+    this is what holds them to it.
+    """
+    from audio_transcriber.transcription.normalise import are_equivalent
+
+    by_plain: dict[str, VocabularyTerm] = {}
+    by_form: dict[str, VocabularyTerm] = {}
+    for candidate in terms:
+        by_plain.setdefault(candidate.text.strip().casefold(), candidate)
+        by_form.setdefault(normalise(candidate.text), candidate)
+    found = by_plain.get(text.strip().casefold())
+    if found is not None:
+        return found
+    found = by_form.get(normalise(text))
+    if found is not None:
+        return found
+    for candidate in terms:
+        if are_equivalent(candidate.text, text):
+            return candidate
+    return None
+
+
+def test_the_keyed_lookup_finds_exactly_the_term_the_walk_would():
+    """Every way two texts can be equivalent, and the order of the terms.
+
+    The umlaut is the delicate case in both directions: "Muller" reaches
+    "Müller" because the term has the German letter, "Müller" reaches
+    "Mueller" because the text has it, and "Muller" never reaches "Mueller"
+    because neither does. Two terms that share a key have to come back as
+    the earlier of the two, which is what "first term" meant in the walk.
+    """
+    terms = [
+        term("Müller"),
+        term("Mueller"),
+        term("Muller"),
+        term("25 Main Street"),
+        term("data base"),
+        term("Jürgen Bosch"),
+        term("Bosch"),
+        term("fünf"),
+        term("five"),
+        term("Straße"),
+        term("I'm"),
+        term("up-to-date"),
+    ]
+    texts = [candidate.text for candidate in terms] + [
+        "muller", "MÜLLER", "mueller", "Mühller", "twenty five Main Street",
+        "twenty-five main street", "database", "Data-Base", "Jurgen Bosch", "Juergen Bosch",
+        "bosch,", "funf", "fuenf", "5", "Strasse", "strasse", "I am", "im", "up to date",
+        "upto date", "nothing here", "", "   ", "Bosh",
+    ]
+    index = VocabularyIndex(terms)
+
+    for text in texts:
+        cleaned = text.strip()
+        expected = _match_by_walking(terms, cleaned) if cleaned else None
+
+        found = index.match(text)
+
+        assert (found.term if found else None) == expected, text

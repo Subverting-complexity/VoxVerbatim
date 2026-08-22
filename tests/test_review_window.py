@@ -544,6 +544,45 @@ def test_moving_through_one_recording_reads_it_once(qapp, tmp_path):
         window.close()
 
 
+def test_a_read_overtaken_by_another_does_not_file_its_transcript_under_the_wrong_name(
+    qapp, tmp_path
+):
+    """A loader may let the event loop run while it parses, and a key press
+    handled in that time can ask the window for another recording. The outer
+    read must not come back and store the first recording's words under the
+    second recording's name, which is what writing the name before the read
+    used to do.
+    """
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    re_entered: list[Transcript | None] = []
+
+    def load_and_re_enter_once(recording_name: str) -> Transcript | None:
+        if recording_name == RECORDING and not re_entered:
+            # Part way through reading the first recording, the window is
+            # asked for the second, as a key press would.
+            re_entered.append(window._transcript(OTHER_RECORDING))
+        return folder.load(recording_name)
+
+    try:
+        window._load_transcript = load_and_re_enter_once
+        window._cached_name = None
+        window._cached_transcript = None
+
+        outer = window._transcript(RECORDING)
+
+        # Each caller got the recording it asked for.
+        assert outer is folder.transcripts[RECORDING]
+        assert re_entered == [folder.transcripts[OTHER_RECORDING]]
+        # And what is held is a matching pair, not one's words under the
+        # other's name.
+        assert window._cached_name == OTHER_RECORDING
+        assert window._cached_transcript is folder.transcripts[OTHER_RECORDING]
+        assert window._transcript(OTHER_RECORDING) is folder.transcripts[OTHER_RECORDING]
+    finally:
+        window.close()
+
+
 def test_a_transcript_that_cannot_be_read_says_so_without_claiming_the_word_is_gone(
     qapp, tmp_path
 ):

@@ -749,3 +749,111 @@ def block_import(monkeypatch, name: str) -> None:
         return real_import(module, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+# -- Retrying --------------------------------------------------------------
+#
+# This adapter talks to the service over a bare HTTP client, which retries
+# nothing. The retry is the base class's; these tests hold the two together.
+
+
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    from audio_transcriber.transcription.providers import base
+
+    monkeypatch.setattr(base, "_sleep", lambda seconds: None)
+
+
+class FlakyHttpClient(FakeHttpClient):
+    """Fails a scripted number of times before answering."""
+
+    def __init__(self, errors: list[Exception], response: FakeResponse | None = None) -> None:
+        super().__init__(response)
+        self.errors = errors
+
+    def post(self, url: str, headers=None, files=None, timeout=None) -> FakeResponse:
+        if self.errors:
+            # Read the file first, as a real client would before the
+            # connection dropped.
+            files["audio"][1].read()
+            self.posts.append({"dropped": True})
+            raise self.errors.pop(0)
+        return super().post(url, headers=headers, files=files, timeout=timeout)
+
+
+def test_a_dropped_connection_is_tried_again_with_the_whole_file(tmp_path: Path) -> None:
+    class ConnectError(Exception):
+        pass
+
+    class RemoteProtocolError(Exception):
+        pass
+
+    client = FlakyHttpClient([ConnectError("reset"), RemoteProtocolError("closed")])
+
+    result = make_provider(client, maximum_retries=2).transcribe(make_request(tmp_path))
+
+    assert result.succeeded
+    assert len(client.posts) == 3
+    assert client.posts[-1]["audio_bytes"] == b"\0" * 4096
+
+
+def test_a_server_error_is_tried_again_and_the_count_is_reported(tmp_path: Path) -> None:
+    client = FakeHttpClient(FakeResponse({"error": {"message": "busy"}}, status_code=503))
+
+    result = make_provider(client, maximum_retries=2).transcribe(make_request(tmp_path))
+
+    assert not result.succeeded
+    assert len(client.posts) == 3
+    assert "failed after 3 attempts" in result.error
+    assert result.request is not None and result.request.error == result.error
+    # The body of the last refusal is still kept.
+    assert result.raw_response == {"error": {"message": "busy"}}
+
+
+def test_a_rejected_key_is_not_tried_again(tmp_path: Path) -> None:
+    client = FakeHttpClient(FakeResponse({"error": {"message": "no"}}, status_code=401))
+
+    result = make_provider(client, maximum_retries=3).transcribe(make_request(tmp_path))
+
+    assert not result.succeeded
+    assert len(client.posts) == 1
+    assert "attempts" not in result.error
+
+
+def test_the_wait_a_rate_limit_asks_for_is_read_off_the_response(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from audio_transcriber.transcription.providers import base
+
+    waits: list[float] = []
+    monkeypatch.setattr(base, "_sleep", waits.append)
+    refused = FakeResponse(
+        {"error": {"message": "slow down"}},
+        status_code=429,
+        headers={"Retry-After": "9", "apim-request-id": "r"},
+    )
+    client = FakeHttpClient(refused)
+
+    make_provider(client, maximum_retries=1).transcribe(make_request(tmp_path))
+
+    assert sum(waits) == pytest.approx(9.0)
+
+
+def test_a_negative_duration_does_not_put_the_end_before_the_start(tmp_path: Path) -> None:
+    body = {
+        "phrases": [
+            {
+                "offsetMilliseconds": 1000,
+                "durationMilliseconds": 500,
+                "text": "Odd",
+                "locale": "en-us",
+                "words": [{"text": "Odd", "offsetMilliseconds": 1000, "durationMilliseconds": -200}],
+            }
+        ]
+    }
+    client = FakeHttpClient(FakeResponse(body))
+
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    token = result.tokens[0]
+    assert token.end == token.start == pytest.approx(120.5 + 1.0)

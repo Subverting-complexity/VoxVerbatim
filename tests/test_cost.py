@@ -208,3 +208,50 @@ def test_money_is_said_with_the_currency_after_the_number():
     """A screen reader reads a leading currency symbol unreliably."""
     assert describe_money(1234.5, "USD") == "1,234.50 USD"
     assert describe_money(0.0) == "0.00 USD"
+
+
+# -- What a vocabulary adds ----------------------------------------------
+
+
+def test_elevenlabs_charges_a_fifth_more_when_vocabulary_terms_are_sent():
+    """Every run with a vocabulary carries keyterms, and ElevenLabs bills
+    any request that carries them at 20 per cent more. An estimate that
+    left that out was a fifth low on its largest line."""
+    estimate = estimate_cost(
+        600.0, [Provider.ELEVENLABS, Provider.OPENAI], RATES, vocabulary_terms_sent=True
+    )
+
+    elevenlabs, openai = estimate.per_provider
+    assert elevenlabs.is_surcharged
+    assert elevenlabs.amount == pytest.approx(0.12)
+    assert not openai.is_surcharged
+    assert openai.amount == pytest.approx(0.06)
+    assert estimate.total == pytest.approx(0.18)
+    assert estimate.surcharged == (elevenlabs,)
+
+
+def test_the_surcharge_is_left_out_unless_the_caller_says_terms_will_be_sent():
+    estimate = estimate_cost(600.0, [Provider.ELEVENLABS], RATES)
+
+    assert not estimate.per_provider[0].is_surcharged
+    assert estimate.total == pytest.approx(0.10)
+    assert estimate.surcharged == ()
+    assert "vocabulary" not in estimate.summary
+
+
+def test_the_summary_explains_the_surcharge_in_words():
+    estimate = estimate_cost(600.0, [Provider.ELEVENLABS], RATES, vocabulary_terms_sent=True)
+
+    summary = estimate.summary
+    assert "0.12 USD" in summary
+    assert "ElevenLabs Scribe figure is 20 per cent higher" in summary
+    assert "vocabulary terms" in summary
+
+
+def test_an_unpriced_elevenlabs_is_still_unpriced_with_a_vocabulary():
+    """A surcharge on no rate is still no rate, not zero."""
+    estimate = estimate_cost(600.0, [Provider.ELEVENLABS], {}, vocabulary_terms_sent=True)
+
+    assert not estimate.per_provider[0].is_priced
+    assert estimate.per_provider[0].amount is None
+    assert estimate.surcharged == ()

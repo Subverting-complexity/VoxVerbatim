@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from audio_transcriber.audio.library import AudioFile
+from audio_transcriber import settings as settings_module
 from audio_transcriber.settings import TranscriptionSettings
 from audio_transcriber.transcription import pipeline
 from audio_transcriber.transcription.model import (
@@ -39,9 +40,21 @@ from audio_transcriber.transcription.vocabulary import (
     VocabularyLevel,
     VocabularyProfile,
 )
+from audio_transcriber.ui import transcribe_dialog as transcribe_dialog_module
 from audio_transcriber.ui.transcribe_dialog import AFRIKAANS, TranscribeDialog
 
 from tests.conftest import wait_until
+
+
+@pytest.fixture(autouse=True)
+def every_library_loads(monkeypatch) -> None:
+    """Pretend every vendor library can be imported.
+
+    The dialog refuses to start a run whose libraries are not installed, and
+    this environment does not have all of them. The tests that are about that
+    refusal put a failing probe back on purpose.
+    """
+    monkeypatch.setattr(settings_module, "_probe_library", lambda module, attribute: None)
 
 
 @pytest.fixture
@@ -377,6 +390,73 @@ def test_a_missing_elevenlabs_is_explained_as_the_backbone_it_is(qapp, recording
         dialog.close()
 
 
+def test_a_library_that_cannot_be_loaded_refuses_the_run_like_a_missing_key(
+    qapp, monkeypatch, recordings
+):
+    """A package never installed is otherwise found half way through a paid run."""
+    fake_pipeline(monkeypatch, lambda *args, **kwargs: pytest.fail("Nothing should be sent."))
+    monkeypatch.setattr(
+        TranscribeDialog, "confirm_cost", lambda self, message: pytest.fail("Asked too late.")
+    )
+    monkeypatch.setattr(
+        settings_module,
+        "_probe_library",
+        lambda module, attribute: "No module named 'assemblyai'." if module == "assemblyai" else None,
+    )
+
+    dialog = open_dialog(recordings)
+    try:
+        assert dialog.start() is False
+
+        assert dialog.is_running is False
+        report = dialog._report_text.toPlainText()
+        assert "AssemblyAI is switched on, but the assemblyai library" in report
+        assert "No module named 'assemblyai'." in report
+        assert "cannot start" in dialog._progress_label.text()
+    finally:
+        dialog.close()
+
+
+def test_a_transcript_folder_that_cannot_be_written_refuses_the_run(
+    qapp, monkeypatch, recordings
+):
+    from audio_transcriber.transcription.store import TranscriptStore
+
+    fake_pipeline(monkeypatch, lambda *args, **kwargs: pytest.fail("Nothing should be sent."))
+    monkeypatch.setattr(
+        TranscribeDialog, "confirm_cost", lambda self, message: pytest.fail("Asked too late.")
+    )
+    monkeypatch.setattr(
+        TranscriptStore,
+        "probe_writable",
+        lambda self: f"The transcript folder for {self.recording_path.name} cannot be written to.",
+    )
+
+    dialog = open_dialog(recordings)
+    try:
+        assert dialog.start() is False
+
+        report = dialog._report_text.toPlainText()
+        assert "The transcript folder for alpha.m4a cannot be written to." in report
+    finally:
+        dialog.close()
+
+
+def test_the_folder_is_probed_before_any_money_is_spent(qapp, monkeypatch, recordings):
+    """The probe is made, and removed, and the run then goes ahead."""
+    silence_message_boxes(monkeypatch)
+    fake_pipeline(monkeypatch, lambda recording, *args, **kwargs: make_transcript(recording.name))
+
+    dialog = open_dialog(recordings)
+    try:
+        run_and_wait(qapp, dialog)
+        folder = recordings[0].path.parent / "alpha.m4a.transcript"
+        assert folder.is_dir()
+        assert list(folder.iterdir()) == []
+    finally:
+        dialog.close()
+
+
 def test_a_run_with_nothing_to_transcribe_says_so(qapp, monkeypatch):
     silence_message_boxes(monkeypatch)
     dialog = open_dialog([])
@@ -516,6 +596,212 @@ def test_escape_stops_a_running_job_instead_of_closing_on_top_of_it(
         release.set()
         assert wait_until(qapp, lambda: dialog.summary is not None)
         assert dialog.summary.cancelled is True
+    finally:
+        dialog.close()
+
+
+def test_a_second_cancel_closes_the_dialog_and_leaves_the_run_to_stop(
+    qapp, monkeypatch, recordings
+):
+    """A request already with a service can take minutes to come back.
+
+    The first Cancel asks the run to stop and says so. Refusing to close
+    until the service answered would hold the person in front of the dialog
+    for as long as the slowest service took, so the second press closes it,
+    and the run stops by itself afterwards without anything raising.
+    """
+    release = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        release.wait(10.0)
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    shown = silence_message_boxes(monkeypatch)
+    said: list[str] = []
+    monkeypatch.setattr(
+        transcribe_dialog_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+
+    dialog = open_dialog(recordings)
+    try:
+        dialog.show()
+        dialog.start()
+        assert wait_until(qapp, lambda: dialog.is_running)
+
+        dialog.reject()
+        assert dialog.isVisible() is True
+        assert "Press Cancel again" in dialog._progress_label.text()
+        assert any("Press Cancel again" in message for message in said)
+        assert "Press this again" in dialog._close_button.accessibleDescription()
+
+        dialog.reject()
+        assert dialog.isVisible() is False
+        assert dialog.is_stopping_in_background is True
+
+        release.set()
+        assert wait_until(qapp, lambda: dialog.summary is not None)
+        # The run finished into a closed dialog: no message box was raised on
+        # top of whatever the person is doing now.
+        assert shown == []
+        assert dialog.summary.cancelled is True
+        assert dialog.is_running is False
+    finally:
+        # A detached dialog gets rid of itself once the summary is in, so by
+        # now it may already have gone.
+        try:
+            dialog.close()
+        except RuntimeError:
+            pass
+
+
+def test_a_closed_dialog_says_nothing_more_and_hands_its_summary_to_whoever_opened_it(
+    qapp, monkeypatch, recordings
+):
+    """Once the dialog has been closed on a stopping run, nobody is looking at it.
+
+    An announcement raised from a hidden window would land on top of whatever
+    the person is doing now, so the run's progress is no longer spoken. The
+    summary still matters, and the only place left to say it is the window
+    that opened the dialog, which is handed it through a signal.
+    """
+    release = threading.Event()
+    started = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        started.set()
+        release.wait(10.0)
+        if progress is not None:
+            progress(50, "Asking a second service")
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    silence_message_boxes(monkeypatch)
+    said: list[str] = []
+    monkeypatch.setattr(
+        transcribe_dialog_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    handed_over: list[object] = []
+
+    dialog = open_dialog(recordings)
+    try:
+        dialog.show()
+        dialog.detachedRunFinished.connect(handed_over.append)
+        dialog.start()
+        assert wait_until(qapp, lambda: started.is_set())
+        dialog.reject()
+        dialog.reject()
+        assert dialog.is_stopping_in_background is True
+        said.clear()
+
+        release.set()
+        assert wait_until(qapp, lambda: dialog.summary is not None)
+
+        assert said == []
+        assert len(handed_over) == 1
+        assert handed_over[0] is dialog.summary
+    finally:
+        try:
+            dialog.close()
+        except RuntimeError:
+            pass
+
+
+def test_closing_the_window_on_a_stopping_run_lets_go_of_it_once(
+    qapp, monkeypatch, recordings
+):
+    """The close box reaches _detach twice, from the close event and from reject
+    underneath it. Letting go twice would arrange for the dialog to be deleted
+    twice once the summary arrived.
+    """
+    release = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        release.wait(10.0)
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    silence_message_boxes(monkeypatch)
+    deletions: list[str] = []
+    monkeypatch.setattr(TranscribeDialog, "deleteLater", lambda self: deletions.append("gone"))
+
+    dialog = open_dialog(recordings)
+    try:
+        dialog.show()
+        dialog.start()
+        assert wait_until(qapp, lambda: dialog.is_running)
+        assert dialog.close() is False
+        assert dialog.close() is True
+        assert dialog.is_stopping_in_background is True
+
+        release.set()
+        assert wait_until(qapp, lambda: dialog.summary is not None)
+        assert deletions == ["gone"]
+    finally:
+        dialog.close()
+
+
+def test_closing_a_dialog_on_a_run_that_was_never_cancelled_stops_it_first(
+    qapp, monkeypatch, recordings
+):
+    release = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        release.wait(10.0)
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    silence_message_boxes(monkeypatch)
+
+    dialog = open_dialog(recordings)
+    try:
+        dialog.show()
+        dialog.start()
+        assert wait_until(qapp, lambda: dialog.is_running)
+
+        # The close box is the same decision as Cancel, answered the same way.
+        assert dialog.close() is False
+        assert dialog.isVisible() is True
+        assert dialog.close() is True
+        assert dialog.isVisible() is False
+    finally:
+        release.set()
+        wait_until(qapp, lambda: not dialog.is_running)
+
+
+def test_a_finished_run_comes_to_the_front_before_it_speaks(qapp, monkeypatch, recordings):
+    """A run lasts long enough for anybody to go and do something else."""
+    fake_pipeline(monkeypatch, lambda recording, *args, **kwargs: make_transcript(recording.name))
+    order: list[str] = []
+    monkeypatch.setattr(
+        TranscribeDialog, "_show_completion_message", lambda self, message: order.append("box")
+    )
+    monkeypatch.setattr(TranscribeDialog, "confirm_cost", lambda self, message: True)
+    monkeypatch.setattr(
+        TranscribeDialog, "_come_to_the_front", lambda self: order.append("front")
+    )
+
+    dialog = open_dialog(recordings)
+    try:
+        run_and_wait(qapp, dialog)
+        assert order == ["front", "box"]
+    finally:
+        dialog.close()
+
+
+def test_coming_to_the_front_flashes_the_taskbar(qapp, monkeypatch, recordings):
+    from PySide6.QtWidgets import QApplication
+
+    alerted: list[object] = []
+    monkeypatch.setattr(QApplication, "alert", staticmethod(lambda widget, msec=0: alerted.append(widget)))
+    dialog = open_dialog(recordings)
+    try:
+        dialog._come_to_the_front()
+        assert alerted == [dialog]
     finally:
         dialog.close()
 

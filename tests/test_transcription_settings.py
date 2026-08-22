@@ -119,7 +119,7 @@ def test_the_processing_defaults_are_the_ones_the_specification_asks_for():
     assert processing.provider_timeout_seconds == DEFAULT_PROVIDER_TIMEOUT_SECONDS
     assert processing.provider_retry_attempts == DEFAULT_PROVIDER_RETRY_ATTEMPTS
     assert processing.provider_retry_backoff_seconds == DEFAULT_PROVIDER_RETRY_BACKOFF_SECONDS
-    assert processing.provider_chunk_overlap_seconds == DEFAULT_CHUNK_OVERLAP_SECONDS == 2.0
+    assert processing.provider_chunk_overlap_seconds == DEFAULT_CHUNK_OVERLAP_SECONDS == 8.0
     assert processing.forced_alignment_enabled is True
     assert processing.escalation_enabled is True
     assert processing.adjudication_enabled is True
@@ -269,6 +269,74 @@ def test_a_service_nobody_asked_for_is_not_a_problem():
     transcription.assemblyai.enabled = False
 
     assert transcription.missing_requirements() == []
+
+
+# -- The libraries a run would need --------------------------------------
+
+
+def _probe_that_fails(*broken: str):
+    """A probe that says every module in ``broken`` cannot be loaded."""
+    tried: list[tuple[str, str | None]] = []
+
+    def probe(module: str, attribute: str | None) -> str | None:
+        tried.append((module, attribute))
+        return "No module named it." if module in broken else None
+
+    probe.tried = tried  # type: ignore[attr-defined]
+    return probe
+
+
+def test_only_the_libraries_of_services_that_are_switched_on_are_tried():
+    transcription = TranscriptionSettings()
+    transcription.microsoft.enabled = False
+    transcription.assemblyai.enabled = False
+    transcription.deepgram.enabled = False
+    probe = _probe_that_fails()
+
+    assert transcription.missing_libraries(probe) == []
+    modules = [module for module, _attribute in probe.tried]
+    assert modules == ["elevenlabs", "openai"]
+    # ElevenLabs is asked for its client class, because a half-installed
+    # package imports its top level and fails one line later.
+    assert ("elevenlabs", "ElevenLabs") in probe.tried
+
+
+def test_a_library_that_cannot_be_loaded_is_named_with_its_reason():
+    transcription = TranscriptionSettings()
+    transcription.microsoft.enabled = True
+    transcription.assemblyai.enabled = True
+    probe = _probe_that_fails("assemblyai", "httpx")
+
+    problems = transcription.missing_libraries(probe)
+
+    assert len(problems) == 2
+    assert "Microsoft MAI" in problems[0] and "httpx" in problems[0]
+    assert "AssemblyAI" in problems[1] and "assemblyai" in problems[1]
+    assert all("No module named it." in problem for problem in problems)
+    assert all("Audio Transcriber.cmd" in problem for problem in problems)
+
+
+def test_adjudication_needs_the_openai_library_even_with_transcription_off():
+    transcription = TranscriptionSettings()
+    transcription.openai_transcription.enabled = False
+    transcription.processing.adjudication_enabled = True
+    transcription.microsoft.enabled = False
+    transcription.assemblyai.enabled = False
+    probe = _probe_that_fails("openai")
+
+    problems = transcription.missing_libraries(probe)
+
+    assert len(problems) == 1
+    assert "openai" in problems[0]
+
+
+def test_the_real_probe_reports_any_failure_rather_than_only_a_missing_module():
+    """A half-installed package can raise almost anything while importing."""
+    from audio_transcriber.settings import _probe_library
+
+    assert _probe_library("json", None) is None
+    assert _probe_library("json", "NoSuchName") is not None
+    assert _probe_library("no_such_module_anywhere_at_all", None) is not None
 
 
 # -- The round trip to disk and back -------------------------------------

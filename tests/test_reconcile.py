@@ -651,6 +651,24 @@ def test_a_split_spelling_shares_one_span_and_invents_no_join() -> None:
     assert can.start == backbone.tokens[1].start
 
 
+def test_a_different_word_over_a_merged_span_is_a_substitution_not_an_exact_time() -> None:
+    """The span a merged winner inherits is the backbone's, so the comparison is
+    with what the backbone wrote there. "databus" over "data base" is a
+    different word in the same place, and must say so; it used to be
+    compared with its own reading and reported as an exact provider time.
+    """
+    backbone = spoken(Provider.ELEVENLABS, ["the", "data", "base", "is", "down"])
+    openai = spoken(Provider.OPENAI, ["the", "databus", "is", "down"], timed=False)
+    table = table_of(backbone, openai)
+    vocabulary = _index(VocabularyTerm(text="databus"))
+
+    tokens = reconcile(table, vocabulary=vocabulary)
+    chosen = token_at(tokens, "databus")
+
+    assert chosen.timing_status is TimingStatus.MAPPED_SUBSTITUTION
+    assert chosen.alignment_status is not AlignmentStatus.EXACT
+
+
 def test_a_joined_spelling_is_not_forced_on_a_recording_that_did_not_ask() -> None:
     # Without a reason to prefer it, the backbone's own word count stands,
     # and both of its words keep the times measured for them.
@@ -715,6 +733,113 @@ def test_a_weakly_supported_insertion_is_kept_out_of_the_transcript() -> None:
 
     assert "will" not in texts_of(tokens)
     assert any(token.rejected_tokens for token in tokens)
+
+
+# -- Words the backbone may have imagined ----------------------------------
+
+
+def _long_recording(count: int = 60) -> list[str]:
+    return [f"word{index}" for index in range(count)]
+
+
+def test_a_word_two_services_missed_while_the_backbone_was_unsure_is_removed() -> None:
+    words = _long_recording()
+    backbone = spoken(Provider.ELEVENLABS, words, confidences=[0.3] * len(words))
+    missing_one = [*words[:15], *words[16:]]
+    openai = spoken(Provider.OPENAI, missing_one, timed=False)
+    microsoft = spoken(Provider.MICROSOFT, missing_one, timed=False)
+
+    tokens = reconcile(table_of(backbone, openai, microsoft))
+
+    assert "word15" not in texts_of(tokens)
+    assert len(tokens) == len(words) - 1
+
+
+def test_a_service_that_stopped_half_way_does_not_delete_the_rest_of_the_recording() -> None:
+    """Silence after the point where a service stopped is not a deletion.
+
+    A chunk that failed, or a request that timed out after partial output,
+    leaves a service with words for the first part of the recording and
+    nothing for the rest. It is not in the table's list of missing services,
+    because it did say something. Counting every later word as one it
+    failed to hear let two such services, with an unsure backbone, remove
+    the whole second half of a recording.
+    """
+    words = _long_recording()
+    backbone = spoken(Provider.ELEVENLABS, words, confidences=[0.3] * len(words))
+    openai = spoken(Provider.OPENAI, words[:20], timed=False)
+    microsoft = spoken(Provider.MICROSOFT, words[:20], timed=False)
+
+    tokens = reconcile(table_of(backbone, openai, microsoft))
+
+    assert texts_of(tokens) == words
+
+
+def test_a_service_that_started_late_does_not_delete_the_start_of_the_recording() -> None:
+    words = _long_recording()
+    backbone = spoken(Provider.ELEVENLABS, words, confidences=[0.3] * len(words))
+    openai = spoken(Provider.OPENAI, words[40:], timed=False)
+    microsoft = spoken(Provider.MICROSOFT, words[40:], timed=False)
+
+    tokens = reconcile(table_of(backbone, openai, microsoft))
+
+    assert texts_of(tokens) == words
+
+
+def test_a_service_absent_from_the_whole_neighbourhood_is_not_a_deletion() -> None:
+    """Inside a long gap a service is as absent as one that never answered.
+
+    Near the edges of the gap its silence still counts, because a service
+    that dropped a word or two beside words it did hear is exactly the
+    case the hallucination rule is for.
+    """
+    words = _long_recording(120)
+    backbone = spoken(Provider.ELEVENLABS, words, confidences=[0.3] * len(words))
+    with_gap = [*words[:10], *words[110:]]
+    openai = spoken(Provider.OPENAI, with_gap, timed=False)
+    microsoft = spoken(Provider.MICROSOFT, with_gap, timed=False)
+
+    tokens = reconcile(table_of(backbone, openai, microsoft))
+    kept = texts_of(tokens)
+
+    reach = DEFAULT_OPTIONS.absence_reach
+    assert "word60" in kept
+    assert all(words[index] in kept for index in range(10 + reach, 110 - reach))
+    assert "word10" not in kept
+    assert "word109" not in kept
+
+
+# -- The risk window ----------------------------------------------------------
+
+
+def test_risk_is_judged_from_the_words_within_reach_and_no_further() -> None:
+    """The windowed copy must answer exactly as the whole recording did."""
+    from audio_transcriber.transcription.reconcile import _risk_for
+    from audio_transcriber.transcription.risk import RISK_WINDOW, risk_at
+
+    words = ["pay", "fifteen", "thousand", "rand", *(["word"] * 40), "on", "the", "fifteenth"]
+
+    class _Candidate:
+        def __init__(self, display: str) -> None:
+            self.display = display
+
+    def by_copying_everything(scope, groups):
+        found = []
+        for group in groups:
+            copy = list(words)
+            copy[scope[0] : scope[0] + len(scope)] = [group.display]
+            for category in risk_at(copy, scope[0]):
+                if category not in found:
+                    found.append(category)
+        return tuple(found)
+
+    for position in range(len(words)):
+        for scope in ((position,), (position, position + 1)):
+            if scope[-1] >= len(words):
+                continue
+            groups = [_Candidate("fifty"), _Candidate("fifteen"), _Candidate("two words")]
+            assert _risk_for(scope, words, groups) == by_copying_everything(scope, groups)
+    assert RISK_WINDOW < 40
 
 
 # -- Speakers, said separately again ---------------------------------------

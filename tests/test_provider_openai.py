@@ -725,3 +725,77 @@ def test_an_empty_answer_is_an_empty_result_rather_than_a_failure(request_for):
 
     assert result.succeeded
     assert result.tokens == []
+
+
+# -- Retrying --------------------------------------------------------------
+#
+# The library's own retry is sound, but it is switched off so that the one
+# in the base class is the only one: two retry loops stacked multiply.
+
+
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    from audio_transcriber.transcription.providers import base
+
+    monkeypatch.setattr(base, "_sleep", lambda seconds: None)
+
+
+def test_the_library_is_built_with_its_own_retry_switched_off(monkeypatch):
+    built: list[dict] = []
+
+    class FakeOpenAI:
+        def __init__(self, **arguments) -> None:
+            built.append(arguments)
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    provider = build_provider(client=None, maximum_retries=4)
+
+    provider._resolve_client()
+
+    assert built == [{"api_key": API_KEY, "max_retries": 0}]
+    assert provider.maximum_retries == 4
+
+
+class FlakyTranscriptions(FakeTranscriptions):
+    def __init__(self, response, errors: list[Exception]) -> None:
+        super().__init__(response)
+        self.errors = errors
+        self.bytes_seen: list[bytes] = []
+        self.with_raw_response = FakeWithRawResponse(self)
+
+
+def test_a_timeout_is_tried_again_with_the_whole_file(request_for):
+    class APITimeoutError(Exception):
+        pass
+
+    client = FakeClient(transcription(SAMPLE_TEXT))
+    flaky = FlakyTranscriptions(transcription(SAMPLE_TEXT), [APITimeoutError("slow")])
+    original = flaky.with_raw_response.create
+
+    def create(**arguments):
+        flaky.bytes_seen.append(arguments["file"][1].read())
+        flaky.error = flaky.errors.pop(0) if flaky.errors else None
+        return original(**arguments)
+
+    flaky.with_raw_response.create = create
+    client.transcriptions = flaky
+    client.audio = SimpleNamespace(transcriptions=flaky)
+
+    result = build_provider(client, maximum_retries=1).transcribe(request_for())
+
+    assert result.succeeded
+    assert len(flaky.calls) == 2
+    assert flaky.bytes_seen == [b"RIFF----WAVEfmt ", b"RIFF----WAVEfmt "]
+
+
+def test_a_rate_limit_that_never_lifts_reports_the_attempts(request_for):
+    failure = RuntimeError("Rate limit reached")
+    failure.status_code = 429
+    client = FakeClient(error=failure)
+
+    result = build_provider(client, maximum_retries=2).transcribe(request_for())
+
+    assert not result.succeeded
+    assert len(client.transcriptions.calls) == 3
+    assert "failed after 3 attempts" in result.error
+    assert result.request is not None and result.request.error == result.error

@@ -74,10 +74,10 @@ Nothing here depends on Qt, so it can be tested on its own.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from audio_transcriber.transcription.canonical import AudioClip, cut_window
 from audio_transcriber.transcription.model import (
@@ -92,10 +92,13 @@ from audio_transcriber.transcription.model import (
     ProviderResult,
     ProviderToken,
     ReviewReason,
+    ReviewStatus,
     RiskCategory,
+    TimingStatus,
+    TokenReference,
     Transcript,
 )
-from audio_transcriber.transcription.normalise import normalise, read_number
+from audio_transcriber.transcription.normalise import are_equivalent, normalise, read_number
 from audio_transcriber.transcription.providers.base import (
     CancelCheck,
     ProviderError,
@@ -130,6 +133,9 @@ DEFAULT_LANGUAGE_CERTAINTY = 0.75
 #: matters: getting one wrong produces a wrong value that reads perfectly
 #: well, which is exactly the damage that must never be settled by
 #: plausibility alone.
+#: The confidence levels at which reconciliation has left a word open.
+_UNSETTLED = frozenset({Confidence.UNRESOLVED, Confidence.REVIEW_REQUIRED})
+
 _NUMERIC_RISKS = frozenset(
     {
         RiskCategory.MONEY,
@@ -158,6 +164,7 @@ class EscalationReason(str, Enum):
     """
 
     ALL_PROVIDERS_DISAGREE = "all_providers_disagree"
+    UNSETTLED_DISAGREEMENT = "unsettled_disagreement"
     PROPER_NOUN_DIFFERS = "proper_noun_differs"
     NUMBER_DIFFERS = "number_differs"
     TECHNICAL_TERM_DIFFERS = "technical_term_differs"
@@ -179,6 +186,7 @@ class EscalationReason(str, Enum):
 
 _ESCALATION_REASON_DISPLAY_NAMES: dict[EscalationReason, str] = {
     EscalationReason.ALL_PROVIDERS_DISAGREE: "Every service heard something different",
+    EscalationReason.UNSETTLED_DISAGREEMENT: "The services disagree and the evidence did not settle it",
     EscalationReason.PROPER_NOUN_DIFFERS: "A name differs between services",
     EscalationReason.NUMBER_DIFFERS: "A number, date or amount differs between services",
     EscalationReason.TECHNICAL_TERM_DIFFERS: "A known term differs between services",
@@ -191,6 +199,7 @@ _ESCALATION_REASON_DISPLAY_NAMES: dict[EscalationReason, str] = {
 
 _REVIEW_REASON_FOR_ESCALATION: dict[EscalationReason, ReviewReason] = {
     EscalationReason.ALL_PROVIDERS_DISAGREE: ReviewReason.PROVIDER_DISAGREEMENT,
+    EscalationReason.UNSETTLED_DISAGREEMENT: ReviewReason.PROVIDER_DISAGREEMENT,
     EscalationReason.PROPER_NOUN_DIFFERS: ReviewReason.PROPER_NAME_DISAGREEMENT,
     EscalationReason.NUMBER_DIFFERS: ReviewReason.NUMERIC_DISAGREEMENT,
     EscalationReason.TECHNICAL_TERM_DIFFERS: ReviewReason.PROVIDER_DISAGREEMENT,
@@ -570,6 +579,14 @@ def reasons_for(
 
     if disagreement and _every_service_differs(token.candidates, texts):
         reasons.append(EscalationReason.ALL_PROVIDERS_DISAGREE)
+    if disagreement and token.text_confidence in _UNSETTLED:
+        # Two services against one is evidence the scoring rules weigh on
+        # their own, and where they could weigh it the word is settled. Where
+        # they could not, which is what the confidence says, a fourth voice
+        # is exactly the evidence that is missing. Without this rule the
+        # commonest dispute of all, an ordinary word heard two ways and left
+        # unresolved, would never be asked about.
+        reasons.append(EscalationReason.UNSETTLED_DISAGREEMENT)
     if disagreement and any(_looks_like_a_name(text) for text in texts):
         reasons.append(EscalationReason.PROPER_NOUN_DIFFERS)
     if (disagreement and any(_looks_numeric(text) for text in texts)) or _is_numeric_risk(token):
@@ -870,6 +887,13 @@ def prefers_time_window(provider: Any) -> bool:
     )
 
 
+#: Told how many windows have been answered out of how many will be sent.
+#: Each window is a separate request that is submitted and polled, so a
+#: recording with a hundred of them spends many minutes here, and a progress
+#: bar that does not move for that long is indistinguishable from a hang.
+EscalationProgress = Callable[[int, int], None]
+
+
 def escalate(
     windows: Sequence[EscalationWindow],
     provider: Any,
@@ -877,6 +901,7 @@ def escalate(
     options: EscalationOptions | None = None,
     folder: Path | None = None,
     cancelled: CancelCheck | None = None,
+    progress: EscalationProgress | None = None,
 ) -> EscalationOutcome:
     """Ask a service about each window, and never fail the transcript.
 
@@ -931,6 +956,8 @@ def escalate(
                 cancelled=cancelled,
             )
         )
+        if progress is not None:
+            progress(index + 1, min(len(windows), allowed))
 
     failures = [result for result in results if not result.succeeded]
     if failures:
@@ -1040,10 +1067,15 @@ def _ask_by_time_window(
         model=model,
         index=index,
     )
+    ask = lambda: provider.transcribe_window(  # noqa: E731 - a thunk for the retry loop
+        request, audio_url=audio_url, window=window.span, cancelled=cancelled
+    )
     try:
-        result = provider.transcribe_window(
-            request, audio_url=audio_url, window=window.span, cancelled=cancelled
-        )
+        # Through the adapter's own retry loop where it has one, so that a
+        # rate limit on the fortieth of two hundred short questions costs a
+        # pause rather than that passage's second opinion.
+        retrying = getattr(provider, "call_with_retries", None)
+        result = retrying(ask, cancelled) if callable(retrying) else ask()
     except ProviderError as error:
         result = ProviderResult(provider=_provider_of(provider), error=str(error))
     except Exception as error:  # noqa: BLE001 - a second opinion never fails a transcript
@@ -1085,7 +1117,11 @@ def _ask_by_clip(
     """
     destination = None if folder is None else folder / f"escalation-{index:04d}.wav"
     try:
-        clip = cut_window(canonical, window.span, destination=destination)
+        # Speech services work at 16 kHz mono internally, so a clip at the
+        # recording's own rate is a bigger upload carrying nothing extra.
+        clip = cut_window(
+            canonical, window.span, destination=destination, sample_rate=16000, channels=1
+        )
     except Exception as error:  # noqa: BLE001 - a clip that cannot be cut is a failure like any
         _log.exception("A window could not be cut out of the recording.")
         return EscalationResult(
@@ -1201,6 +1237,346 @@ def _provider_of(provider: Any) -> Provider:
 
 
 # -- Putting the outcome back into the transcript ------------------------
+
+
+
+# -- Choosing which windows to send when there are too many ----------------
+
+
+#: The reasons that mean the services genuinely heard different words. A
+#: window carrying one of these is where a second opinion changes the
+#: transcript; a window that is only there because a number appeared, with
+#: every service agreeing on it, is insurance rather than a dispute.
+_DISAGREEMENT_REASONS = frozenset(
+    {
+        EscalationReason.ALL_PROVIDERS_DISAGREE,
+        EscalationReason.UNSETTLED_DISAGREEMENT,
+        EscalationReason.PROPER_NOUN_DIFFERS,
+        EscalationReason.TECHNICAL_TERM_DIFFERS,
+        EscalationReason.LOW_PROBABILITY_BACKBONE_WORD,
+    }
+)
+
+
+def window_priority(window: EscalationWindow) -> int:
+    """How much a second opinion on this window is worth, higher first.
+
+    The ceiling on requests is applied to a list, and whatever order the
+    list is in decides which passages are asked about and which are left
+    for a person. In time order the ceiling cuts off the end of the
+    recording, so a long interview would have every agreed-upon number in
+    its first hour checked and every three-way disagreement in its last
+    hour ignored. Ranking by what the window is about sends the money
+    where it buys a correction.
+    """
+    reasons = set(window.reasons)
+    contested = any(len(dispute.candidates) > 1 for dispute in window.disputes)
+    if reasons & _DISAGREEMENT_REASONS:
+        return 3
+    if EscalationReason.NUMBER_DIFFERS in reasons and contested:
+        return 3
+    if EscalationReason.LANGUAGE_BOUNDARY_UNCLEAR in reasons:
+        return 2
+    if contested:
+        return 2
+    return 1
+
+
+def prioritise(windows: Sequence[EscalationWindow]) -> list[EscalationWindow]:
+    """Order the windows so that the most valuable are sent first.
+
+    Windows of equal worth are kept in time order. The caller still applies
+    the ceiling by taking the list from the front; this only decides what
+    the front holds.
+    """
+    return sorted(windows, key=lambda window: (-window_priority(window), window.span.start))
+
+
+# -- Putting the answers back into the transcript ---------------------------
+
+
+#: The review reasons that are about the text of a word. These are the ones
+#: a second opinion on the text can answer. A reason about the speaker or
+#: the timing is left exactly where it was, because the second opinion was
+#: not asked about those and must not be allowed to clear them.
+_TEXT_REVIEW_REASONS = frozenset(
+    {
+        ReviewReason.PROVIDER_DISAGREEMENT,
+        ReviewReason.PROPER_NAME_DISAGREEMENT,
+        ReviewReason.NUMERIC_DISAGREEMENT,
+        ReviewReason.LOW_ACOUSTIC_CONFIDENCE,
+        ReviewReason.ESCALATION_UNRESOLVED,
+    }
+)
+
+
+@dataclass(frozen=True)
+class EscalationApplication:
+    """What applying the second opinions did to the transcript."""
+
+    settled: int = 0
+    """Words whose text the second opinion decided."""
+
+    confirmed: int = 0
+    """Words the second opinion agreed with as they already stood."""
+
+    unsettled: int = 0
+    """Words that were asked about and still need a person."""
+
+    evidence: ProviderResult | None = None
+    """Everything the escalation service said, as one result, so that the
+    review window and the exports can show it beside the other services."""
+
+    @property
+    def sentence(self) -> str:
+        parts = []
+        if self.settled:
+            parts.append(f"{self.settled} corrected")
+        if self.confirmed:
+            parts.append(f"{self.confirmed} confirmed")
+        if self.unsettled:
+            parts.append(f"{self.unsettled} still waiting for you")
+        if not parts:
+            return "The second opinions changed nothing."
+        return "Second opinions: " + ", ".join(parts) + "."
+
+
+def apply_answers(
+    tokens: Sequence[FinalToken],
+    outcome: EscalationOutcome,
+) -> EscalationApplication:
+    """Weigh what the second opinions said against the words in dispute.
+
+    This is the step that turns an escalation from an expense into a
+    correction, and it is deliberately conservative in three ways.
+
+    The second opinion may only choose between the readings the other
+    services already offered. A reading nobody else heard is kept as
+    evidence, for the review window and for the language model, and is
+    never written into the transcript: a service asked about fifteen
+    seconds of audio has less context than the services that heard the
+    whole recording, and an answer that matches none of them is as likely
+    to be its mistake as theirs.
+
+    Only an answer strong enough to settle a dispute settles one. An
+    Afrikaans answer comes from a weaker model and is marked as informing,
+    so it is added to the evidence and lifts nothing out of the review
+    queue. The ceiling on :class:`EvidenceStrength` is what enforces that.
+
+    And a value that must not be guessed is never settled here, however
+    clear the answer. Two services against one on an amount of money is
+    evidence, and the specification is explicit that it is still not a
+    reason to write the amount down as though it were known. Those words
+    keep the answer as evidence and go to a person.
+
+    Settling changes the text and nothing else. Timing and speaker come
+    from their own sources, which is the idea the whole design rests on; a
+    word whose spelling changed is marked as a substitution so that the
+    timing stage knows to look at it again.
+    """
+    by_id = {token.id: token for token in tokens}
+    settled = confirmed = unsettled = 0
+    heard_everywhere: list[ProviderToken] = []
+
+    # Every answer is renumbered into one running sequence first, so that
+    # the references written onto the words point into the one result that
+    # is kept, rather than into a per-window numbering nobody will have.
+    for result in outcome.results:
+        if not result.succeeded:
+            continue
+        for token in result.tokens:
+            if token.is_spoken_word:
+                heard_everywhere.append(_renumbered(token, len(heard_everywhere)))
+
+    evidence = None
+    if heard_everywhere:
+        evidence = ProviderResult(
+            provider=heard_everywhere[0].provider,
+            tokens=heard_everywhere,
+            speakers=list(
+                dict.fromkeys(word.speaker for word in heard_everywhere if word.speaker)
+            ),
+        )
+
+    for result in outcome.results:
+        if not result.succeeded:
+            continue
+        target = result.window.target
+        in_target = [word for word in heard_everywhere if _span_of(word).overlaps(target)]
+        used: set[int] = set()
+        for dispute in result.window.disputes:
+            heard = _words_for(dispute, in_target, used)
+            for token_id in dispute.token_ids:
+                token = by_id.get(token_id)
+                if token is None or token.human_corrected:
+                    continue
+                verdict = _apply_one(token, heard, result)
+                if verdict == "settled":
+                    settled += 1
+                elif verdict == "confirmed":
+                    confirmed += 1
+                else:
+                    unsettled += 1
+
+    return EscalationApplication(
+        settled=settled, confirmed=confirmed, unsettled=unsettled, evidence=evidence
+    )
+
+
+def _words_for(
+    dispute: Dispute,
+    candidates: Sequence[ProviderToken],
+    used: set[int],
+) -> list[ProviderToken]:
+    """The service's words that answer this dispute, and only this one.
+
+    A dispute is one word's span as the backbone measured it, and the
+    service measures its own boundaries. Adjacent words from a service abut,
+    so the neighbour of the disputed word overlaps the dispute's span
+    whenever the two services' boundaries differ by a few milliseconds,
+    which they always do. Matching on any overlap would therefore hand back
+    "fifty dollars" for a question about "fifty", which matches nothing and
+    settles nothing. So a word answers a dispute when its middle falls
+    inside the dispute's span, and as many words are taken as the dispute
+    has tokens, nearest the middle first.
+
+    The test has some give in it. Two engines can disagree about where a
+    short word begins by more than half its length, so a word whose middle
+    falls just outside the span, within a twentieth of a second or half
+    the span's length, is still the answer; so is a word that contains the
+    span's own middle, which is what a service hearing one long word where
+    the backbone heard a short one looks like. Every word inside the span
+    itself is taken, so a service that heard "fif teen" for "fifteen" still
+    answers the question; the caller falls back to the nearest word alone
+    when the joined words match nothing.
+
+    A word is used once. A single service word that straddles two disputed
+    words is one word where the transcript has two, which is a disagreement
+    about the word count rather than a confirmation of both.
+    """
+    span = dispute.span
+    centre = (span.start + span.end) / 2.0
+    give = max(_MATCH_TOLERANCE_SECONDS, 0.5 * span.duration)
+    fresh = [word for word in candidates if id(word) not in used]
+    inside = [word for word in fresh if span.start <= _midpoint(word) <= span.end]
+    if not inside:
+        near = [
+            word
+            for word in fresh
+            if span.start - give <= _midpoint(word) <= span.end + give
+            or _span_of(word).start <= centre <= _span_of(word).end
+        ]
+        if not near:
+            return []
+        inside = [min(near, key=lambda word: abs(_midpoint(word) - centre))]
+    inside.sort(key=_midpoint)
+    used.update(id(word) for word in inside)
+    return inside
+
+
+#: How far outside a disputed word's span a service word's middle may fall
+#: and still be the answer to it.
+_MATCH_TOLERANCE_SECONDS = 0.05
+
+
+def _midpoint(word: ProviderToken) -> float:
+    span = _span_of(word)
+    return (span.start + span.end) / 2.0
+
+
+def _span_of(word: ProviderToken) -> AudioSpan:
+    """A word's span, tolerating a service that puts the end before the start."""
+    start = word.start if word.start is not None else 0.0
+    end = word.end if word.end is not None else start
+    return AudioSpan(start, max(start, end))
+
+
+def _apply_one(
+    token: FinalToken,
+    heard: Sequence[ProviderToken],
+    result: EscalationResult,
+) -> str:
+    """Weigh one answer against one word. Returns what became of it."""
+    if not heard:
+        # The service was asked about this moment and reported no word in
+        # it. That is not an answer a person can act on, so the word stays
+        # where it was and is marked as still needing one.
+        token.flag(ReviewReason.ESCALATION_UNRESOLVED)
+        return "unsettled"
+
+    provider = heard[0].provider
+    heard_text = " ".join(word.text for word in heard if word.text).strip()
+    references = tuple(TokenReference(provider, word.index) for word in heard)
+    matched = _attach_evidence(token, heard_text, provider, references, record_miss=len(heard) == 1)
+    if matched is None and len(heard) > 1:
+        # Several words fell inside the span and together they are nobody's
+        # reading. The one nearest the middle is what was asked about; the
+        # others are the neighbours' words leaning in.
+        centre = (token.start + token.end) / 2.0 if token.span else _midpoint(heard[0])
+        nearest = min(heard, key=lambda word: abs(_midpoint(word) - centre))
+        heard_text = nearest.text.strip()
+        references = (TokenReference(provider, nearest.index),)
+        matched = _attach_evidence(token, heard_text, provider, references)
+
+    if matched is None or not result.settles_disputes or token.risk_categories:
+        token.flag(ReviewReason.ESCALATION_UNRESOLVED)
+        return "unsettled"
+
+    changed = not are_equivalent(matched.text, token.text)
+    if changed:
+        token.text = matched.text
+        token.normalised_text = normalise(matched.text)
+        token.text_source = provider
+        if token.start is not None and token.end is not None:
+            # The span still belongs to the word that was measured; a
+            # different word now sits in it. Saying so is what lets the
+            # timing stage decide whether to measure again.
+            token.timing_status = TimingStatus.MAPPED_SUBSTITUTION
+    token.text_confidence = result.strength.confidence_ceiling
+    for reason in list(token.review_reasons):
+        if reason in _TEXT_REVIEW_REASONS:
+            token.review_reasons.remove(reason)
+    if not token.review_reasons and token.review_status is ReviewStatus.PENDING:
+        token.review_status = ReviewStatus.SETTLED
+    return "settled" if changed else "confirmed"
+
+
+def _attach_evidence(
+    token: FinalToken,
+    heard_text: str,
+    provider: Provider,
+    references: tuple[TokenReference, ...],
+    record_miss: bool = True,
+) -> Candidate | None:
+    """Record what the second opinion heard among the word's candidates.
+
+    Returns the candidate it agreed with, or ``None`` where it agreed with
+    nobody, in which case what it heard is added as a candidate of its own
+    so that the review window can show it, and so that the language model
+    sees it, without it ever being taken as the answer.
+    """
+    if not heard_text:
+        return None
+    for position, candidate in enumerate(token.candidates):
+        if are_equivalent(candidate.text, heard_text):
+            if provider in candidate.providers:
+                return candidate
+            updated = replace(
+                candidate,
+                providers=(*candidate.providers, provider),
+                source_tokens=(*candidate.source_tokens, *references),
+            )
+            token.candidates[position] = updated
+            return updated
+    if record_miss:
+        token.candidates.append(
+            Candidate(text=heard_text, providers=(provider,), source_tokens=references)
+        )
+    return None
+
+
+def _renumbered(token: ProviderToken, index: int) -> ProviderToken:
+    return replace(token, index=index)
 
 
 def apply_outcome(transcript: Transcript, outcome: EscalationOutcome) -> None:

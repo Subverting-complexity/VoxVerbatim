@@ -18,7 +18,14 @@ looks like nothing happened.
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.model import Confidence, FinalToken, Transcript
+from audio_transcriber.transcription.model import (
+    Confidence,
+    FinalToken,
+    Provider,
+    ProviderResult,
+    ProviderToken,
+    Transcript,
+)
 from audio_transcriber.transcription.normalise import normalise
 
 
@@ -138,3 +145,72 @@ def test_correcting_a_word_does_not_change_the_transcript_it_came_from() -> None
     transcript.with_correction(token.id, text="Bosch")
     assert transcript.tokens[0].text == "Bosh"
     assert transcript.tokens[0].normalised_text == normalise("Bosh")
+
+
+
+# -- Finding a service's token by its number ------------------------------
+#
+# ``ProviderResult.token_at`` is asked once for every reference in every
+# column by three different callers, so it answers from a lookup built the
+# first time. The result is a mutable dataclass, and the lookup must not
+# outlive the tokens it was built from.
+
+
+def _word(index: int, text: str) -> ProviderToken:
+    return ProviderToken(provider=Provider.OPENAI, index=index, text=text)
+
+
+def test_a_token_is_found_by_the_number_its_service_gave_it() -> None:
+    result = ProviderResult(provider=Provider.OPENAI, tokens=[_word(0, "we"), _word(1, "signed")])
+    assert result.token_at(1) is result.tokens[1]
+    assert result.token_at(0) is result.tokens[0]
+    assert result.token_at(7) is None
+
+
+def test_the_first_of_two_tokens_with_one_number_wins() -> None:
+    """As it did when the lookup was a scan from the front."""
+    first, second = _word(4, "first"), _word(4, "second")
+    result = ProviderResult(provider=Provider.OPENAI, tokens=[first, second])
+    assert result.token_at(4) is first
+
+
+def test_the_lookup_follows_a_fresh_list_of_tokens() -> None:
+    result = ProviderResult(provider=Provider.OPENAI, tokens=[_word(0, "old")])
+    assert result.token_at(0).text == "old"
+
+    result.tokens = [_word(0, "new"), _word(1, "word")]
+
+    assert result.token_at(0).text == "new"
+    assert result.token_at(1).text == "word"
+
+
+def test_the_lookup_follows_tokens_added_to_or_taken_from_the_list() -> None:
+    result = ProviderResult(provider=Provider.OPENAI, tokens=[_word(0, "we")])
+    assert result.token_at(1) is None
+
+    result.tokens.append(_word(1, "signed"))
+    assert result.token_at(1).text == "signed"
+
+    result.tokens.pop(0)
+    assert result.token_at(0) is None
+    assert result.token_at(1).text == "signed"
+
+
+def test_a_list_replaced_by_an_equal_sized_one_is_not_mistaken_for_the_old() -> None:
+    """Two lists of the same length at, possibly, the same address.
+
+    The lookup keeps hold of the list it was built from, so a replacement
+    that happens to be allocated where the old list was cannot pass for it.
+    """
+    result = ProviderResult(provider=Provider.OPENAI, tokens=[_word(0, "old")])
+    assert result.token_at(0).text == "old"
+    for _ in range(50):
+        result.tokens = [_word(0, "new")]
+        assert result.token_at(0).text == "new"
+        result.tokens = [_word(0, "old")]
+        assert result.token_at(0).text == "old"
+
+
+def test_an_empty_result_answers_none_without_complaint() -> None:
+    result = ProviderResult(provider=Provider.OPENAI, error="it fell over")
+    assert result.token_at(0) is None

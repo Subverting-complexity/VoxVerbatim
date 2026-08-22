@@ -27,6 +27,7 @@ from audio_transcriber.audio.enhance import (
     Outcome,
     enhance_files,
 )
+from audio_transcriber.transcription.runner import keep_system_awake
 
 _log = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ class EnhanceRunner(QObject):
         application = QCoreApplication.instance()
         if application is not None:
             application.aboutToQuit.connect(self.stop)
+        self.runFinished.connect(self._let_the_system_sleep)
 
     @property
     def is_running(self) -> bool:
@@ -100,6 +102,10 @@ class EnhanceRunner(QObject):
             daemon=True,
         )
         self._thread.start()
+        # Enhancing a folder of long recordings takes long enough for a
+        # laptop to decide nobody is using it. Same arrangement as the
+        # transcription runner, and withdrawn on the same thread.
+        keep_system_awake(True)
         return True
 
     def cancel(self) -> None:
@@ -117,6 +123,10 @@ class EnhanceRunner(QObject):
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout_seconds)
+        keep_system_awake(False)
+
+    def _let_the_system_sleep(self, _summary: object) -> None:
+        keep_system_awake(False)
 
     # -- The background thread -------------------------------------------
 
@@ -126,17 +136,34 @@ class EnhanceRunner(QObject):
         Working through the list is the engine's job, not this class's. All
         that happens here is that each thing the engine says on the way is
         passed on to the main thread.
+
+        The engine is meant to turn every failure into a result, and almost
+        always does. Whatever escapes it anyway is caught here, because this
+        thread has no window to show an error in and an exception ending it
+        would end the run silently: the summary would never be sent, and the
+        dialog would stay with its controls switched off, saying it was
+        working, for as long as it was left open.
         """
-        results = enhance_files(
-            files,
-            options,
-            progress=lambda fraction: self._report(cancel, fraction),
-            cancelled=cancel.is_set,
-            on_start=lambda source, number, total: self._emit(
-                cancel, self.fileStarted, source.name, number, total
-            ),
-            on_result=lambda result: self._emit(cancel, self.fileFinished, result),
-        )
+        reported: list[FileResult] = []
+
+        def note(result: FileResult) -> None:
+            reported.append(result)
+            self._emit(cancel, self.fileFinished, result)
+
+        try:
+            results = enhance_files(
+                files,
+                options,
+                progress=lambda fraction: self._report(cancel, fraction),
+                cancelled=cancel.is_set,
+                on_start=lambda source, number, total: self._emit(
+                    cancel, self.fileStarted, source.name, number, total
+                ),
+                on_result=note,
+            )
+        except Exception as error:  # the dialog must be told, whatever happened
+            _log.exception("The enhancement run stopped unexpectedly.")
+            results = reported + _failed_results(files[len(reported):], error)
         # The summary goes out even when the run was cancelled, because the
         # dialog has to switch its controls back on and say what was done
         # before the user stopped it.
@@ -162,3 +189,21 @@ class EnhanceRunner(QObject):
             _log.debug("An enhancement result was dropped because its receiver has gone.")
             return False
         return True
+
+
+def _failed_results(files: list[Path], error: Exception) -> list[FileResult]:
+    """One failed result for each file the run never got to say anything about.
+
+    Every file is accounted for rather than only the one in hand, so that the
+    dialog's report lists what was not done, and nobody takes a silence for
+    a file that was skipped on purpose.
+    """
+    reason = str(error).strip() or type(error).__name__
+    return [
+        FileResult(
+            source=source,
+            outcome=Outcome.FAILED,
+            message=f"{source.name} was not enhanced. The run stopped unexpectedly: {reason}",
+        )
+        for source in files
+    ]

@@ -277,11 +277,98 @@ _KEYWORDS: tuple[tuple[frozenset[str], RiskCategory, bool, str], ...] = (
 )
 
 
+# -- Ordinals, which name a day of the month ------------------------------
+#
+# "On the fifteenth" and "am ersten" are dates with no digit anywhere in
+# them, so neither the number reader nor the shapes below can see them. The
+# words are written out in full, one language at a time, for the same
+# reason the keyword tables are.
+#
+# The first three are kept apart. "The second item", "die erste Frage" and
+# "die eerste keer" are everyday phrases that have nothing to do with a
+# calendar, so those ordinals only count as a date with a month, a weekday,
+# a year or a date word within reach. From the fourth upwards, an ordinal
+# standing on its own is nearly always a day of the month, and the module's
+# bias says to flag it.
+
+_LOW_ORDINAL_WORDS = frozenset(
+    {
+        "first", "second", "third",
+        "eerste", "tweede", "derde",
+    }
+)
+
+_HIGH_ORDINAL_WORDS = frozenset(
+    {
+        "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+        "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth",
+        "sixteenth", "seventeenth", "eighteenth", "nineteenth", "twentieth",
+        "thirtieth",
+        "vierde", "vyfde", "sesde", "sewende", "agste", "agtste", "negende",
+        "tiende", "elfde", "twaalfde", "dertiende", "veertiende", "vyftiende",
+        "sestiende", "sewentiende", "agtiende", "negentiende", "twintigste",
+        "dertigste",
+    }
+)
+
+#: German ordinals decline, so "erste", "ersten", "erster" and "erstes" are
+#: all the same word. The stem is matched and the ending allowed to vary.
+#: "acht" is with the low ordinals rather than the high ones, although
+#: eighth is not a low number, because "achte", "achten" and "achter" are
+#: also forms of the everyday verb "achten", to pay attention to. On its own
+#: the word is far more often the verb; next to a month or a lead-in such as
+#: "am" it is the date.
+_GERMAN_LOW_ORDINAL = re.compile(r"^(erst|zweit|dritt|acht)(e|en|er|es|em)$")
+_GERMAN_HIGH_ORDINAL = re.compile(
+    r"^(viert|f(ü|ue)nft|sechst|siebt|neunt|zehnt|elft|zw(ö|oe)lft"
+    r"|(drei|vier|f(ü|ue)nf|sech|sieb|acht|neun)zehnt"
+    r"|\w+und(zwanzig|drei(ß|ss)ig)st|(zwanzig|drei(ß|ss)ig)st)(e|en|er|es|em)$"
+)
+
+#: "twenty-first" and "een-en-twintigste" arrive as one word with hyphens in
+#: it. The tens in front settle the question: nobody says "the twenty-first"
+#: about anything but a day or a century.
+_HYPHENATED_ORDINAL = re.compile(
+    r"^(twenty|thirty)-(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)$"
+    r"|^\w+-en-(twintig|dertig)ste$"
+)
+
+_ORDINAL_DATE_CONTEXT = _MONTH_WORDS | _WEEKDAY_WORDS | _DATE_WORDS
+
+#: The short phrases that put a low ordinal on the calendar with nothing
+#: else said: "am ersten", "on the first", "op die eerste". German "am" is
+#: "an dem", and "am ersten" is a date however the sentence goes on.
+_ORDINAL_DATE_LEAD_INS: tuple[tuple[str, ...], ...] = (
+    ("am",), ("vom",), ("zum",), ("bis",),
+    ("on", "the"), ("by", "the"), ("from", "the"), ("until", "the"),
+    ("op", "die"), ("teen", "die"), ("vanaf", "die"), ("tot", "die"),
+)
+
+
+def _ordinal_rank(cleaned: str) -> str | None:
+    """Whether this word is an ordinal, and whether it is a date on its own.
+
+    Returns ``"high"`` for an ordinal that is a date by itself, ``"low"`` for
+    one that needs a date word nearby, and ``None`` for anything else.
+    """
+    if cleaned in _HIGH_ORDINAL_WORDS or _HYPHENATED_ORDINAL.match(cleaned):
+        return "high"
+    if _GERMAN_HIGH_ORDINAL.match(cleaned):
+        return "high"
+    if cleaned in _LOW_ORDINAL_WORDS or _GERMAN_LOW_ORDINAL.match(cleaned):
+        return "low"
+    return None
+
+
 # -- Shapes that speak for themselves ------------------------------------
 
 _CLOCK = re.compile(r"^\d{1,2}[:h.]\d{2}(:\d{2})?$")
 _ISO_DATE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
 _WRITTEN_DATE = re.compile(r"^\d{1,2}[-/.]\d{1,2}([-/.]\d{2,4})?$")
+#: A day and a month, or a month and a year, with nothing else: "12/05" and
+#: "05/2024". Only the slash is accepted here. "12.05" with one full stop is
+#: a decimal number to a German reader, and is left to the separator rule.
+_SHORT_DATE = re.compile(r"^\d{1,2}/(\d{2}|\d{4})$")
 _YEAR = re.compile(r"^(19|20)\d{2}$")
 _ORDINAL_DAY = re.compile(r"^\d{1,2}(st|nd|rd|th|\.)$")
 _VERSION = re.compile(r"^v\d+(\.\d+)*$|^\d+(\.\d+){2,}$", re.IGNORECASE)
@@ -394,6 +481,8 @@ def _self_evident(cleaned: str) -> list[tuple[RiskCategory, str]]:
         found.append((RiskCategory.DATE, "a date"))
     elif _WRITTEN_DATE.match(cleaned) and cleaned.count(".") + cleaned.count("/") >= 2:
         found.append((RiskCategory.DATE, "a date"))
+    elif _SHORT_DATE.match(cleaned):
+        found.append((RiskCategory.DATE, "a date"))
     if _ORDINAL_DAY.match(cleaned) or _YEAR.match(cleaned):
         found.append((RiskCategory.DATE, "a date"))
     if _VERSION.match(cleaned):
@@ -443,13 +532,56 @@ def find_risks(words: Sequence[str]) -> tuple[RiskFinding, ...]:
             findings.append(RiskFinding(category, positions, detail))
 
     findings.extend(_spoken_digit_runs(cleaned))
+    findings.extend(_ordinal_dates(cleaned))
     # A number nobody else claimed is still a number somebody said, and a
     # wrong one is still wrong. Quantity is the honest description of it.
+    # Anything with a digit in it counts, whether or not it can be read as
+    # one number: "1/2", "3/4" and "24/7" could not be read and used to slip
+    # through here, and a wrong fraction is as wrong as a wrong integer.
     claimed = {position for finding in findings for position in finding.positions}
     for index, word in enumerate(cleaned):
-        if numeric[index] and index not in claimed and read_number(word) is not None:
+        if index in claimed or not numeric[index]:
+            continue
+        if any(character.isdigit() for character in word) or read_number(word) is not None:
             findings.append(RiskFinding(RiskCategory.QUANTITY, (index,), "a number"))
     return tuple(findings)
+
+
+def _ordinal_dates(cleaned: Sequence[str]) -> list[RiskFinding]:
+    """Find days of the month named by an ordinal word rather than a digit.
+
+    "The fifteenth" is a date on its own. "The first" is only a date when a
+    month, a weekday, a year or a date word is within reach, or when it is
+    led in by a phrase such as "on the" or German "am". The finding then
+    covers the ordinal and everything up to that word, so that "first of
+    March" is protected in the middle as well as at its ends.
+    """
+    findings: list[RiskFinding] = []
+    for index, word in enumerate(cleaned):
+        rank = _ordinal_rank(word)
+        if rank is None:
+            continue
+        if rank == "high":
+            findings.append(RiskFinding(RiskCategory.DATE, (index,), "a day of the month"))
+            continue
+        start = max(0, index - RISK_WINDOW)
+        end = min(len(cleaned), index + RISK_WINDOW + 1)
+        context = tuple(
+            position
+            for position in range(start, end)
+            if position != index
+            and (cleaned[position] in _ORDINAL_DATE_CONTEXT or _YEAR.match(cleaned[position]))
+        )
+        if not context:
+            for lead_in in _ORDINAL_DATE_LEAD_INS:
+                before = tuple(cleaned[max(0, index - len(lead_in)) : index])
+                if before == lead_in:
+                    context = (index - len(lead_in),)
+                    break
+        if context:
+            positions = tuple(sorted({index, *context, *_between(index, context)}))
+            findings.append(RiskFinding(RiskCategory.DATE, positions, "a day of the month"))
+    return findings
 
 
 def _numbers_near(numeric: Sequence[bool], index: int) -> tuple[int, ...]:

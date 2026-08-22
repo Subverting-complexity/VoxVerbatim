@@ -74,6 +74,7 @@ from audio_transcriber.transcription.providers.base import (
     ProviderUnavailable,
     TranscriptionProvider,
     TranscriptionRequest,
+    retry_after_seconds,
 )
 
 # Somebody else's rule about what a keyword may contain, read from the one
@@ -134,7 +135,10 @@ _CREDENTIAL_NAMES = ("api_key", "apikey", "key", "token", "secret", "password", 
 
 #: Errors worth trying again even though they carry no HTTP status, because
 #: they happened before the far end answered at all.
-_RETRYABLE_ERROR_NAMES = ("timeout", "connection")
+#: Matched against the exception's class name. The library raises
+#: ``APITimeoutError`` and ``APIConnectionError``; the underlying
+#: ``httpx.ConnectError`` is spelt without the "ion", so "connect".
+_RETRYABLE_ERROR_NAMES = ("timeout", "connect", "protocol")
 
 #: How the extras are merged, which is what makes the two lists below
 #: necessary. They go to the library as ``extra_body``, which it lays *over*
@@ -252,7 +256,11 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
         self._temperature = temperature
         self._chunking_strategy = chunking_strategy
         self._timeout_seconds = timeout_seconds
-        self._maximum_retries = maximum_retries
+        # Read by the retry loop in the base class. The library's own retry
+        # is switched off in ``_build_client`` so that nothing is retried
+        # twice over: the library's retries multiplied by ours would turn
+        # two configured retries into eight attempts on a dead service.
+        self.maximum_retries = max(0, maximum_retries)
         self._client = client
 
     # -- What this service is ------------------------------------------
@@ -326,6 +334,8 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
 
         started_at = datetime.now()
         try:
+            # Opened inside the attempt, so that a retry sends the whole file
+            # again rather than what was left of a half-read handle.
             with request.audio_path.open("rb") as handle:
                 # Through the raw response, because the transcription itself
                 # carries no identifier of any kind and the request id in the
@@ -352,7 +362,7 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
             # request still has provenance worth keeping: what was asked, of
             # which model, and what came back instead of a transcript.
             failure = _as_provider_error(error)
-            _log.warning(
+            _log.debug(
                 "OpenAI did not answer: %s (worth retrying: %s)",
                 failure,
                 failure.retryable,
@@ -371,7 +381,10 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
                 succeeded=False,
                 error=str(failure),
             )
-            return ProviderResult(
+            # The record rides on the error rather than being returned, so
+            # the retry loop in the base class can try again where that may
+            # help and still hand back the full record when it gives up.
+            failure.result = ProviderResult(
                 provider=self.provider,
                 request=record,
                 error=str(failure),
@@ -380,6 +393,7 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
                 # same footing as a successful answer.
                 raw_response=_raw_body_of_failure(error),
             )
+            raise failure from error
 
         detected = _detected_languages(_field(response, "languages"))
         tokens = self._tokens_from(_field(response, "text") or "", request)
@@ -525,7 +539,10 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
             from openai import OpenAI
         except ImportError as error:
             raise ProviderUnavailable(self.provider, PACKAGE) from error
-        return OpenAI(api_key=self._api_key, max_retries=self._maximum_retries)
+        # Zero, so that the only retry is the one in the base class. The
+        # library's retry is sound, unlike another library's here, but two
+        # retry loops stacked multiply rather than add.
+        return OpenAI(api_key=self._api_key, max_retries=0)
 
 
 # -- Helpers -------------------------------------------------------------
@@ -811,7 +828,15 @@ def _as_provider_error(error: Exception) -> ProviderError:
     )
     if request_id:
         sentence += f" (request {request_id})"
-    return ProviderError(sentence, retryable=retryable, status_code=status)
+    response = getattr(error, "response", None)
+    return ProviderError(
+        sentence,
+        retryable=retryable,
+        status_code=status,
+        # A rate limit says in its headers how long to wait, and the retry
+        # loop honours it rather than calling back sooner to be refused again.
+        retry_after=retry_after_seconds(getattr(response, "headers", None)),
+    )
 
 
 def _as_int(value: Any) -> int | None:

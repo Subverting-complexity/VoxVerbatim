@@ -593,10 +593,15 @@ request hears the whole word. The duplicated words are then matched up and
 dropped afterwards, which is done for you and is why you never see the
 repeated seconds in a transcript.
 
-Two seconds covers any single word and most short phrases. Raising it costs
-money, because the overlapping audio is sent and charged twice, and it buys
-very little past a few seconds. Lowering it to zero saves a trivial amount
-and reintroduces broken words at every join, which is a bad trade.""",
+Eight seconds is the default, and the reason it is not shorter is the
+matching rather than the cutting. The duplicated words can only be matched up
+when both chunks heard the same three words or more, and two seconds of a
+recording very often holds a pause, a breath or a single word, in which case
+nothing matches and the words at the join are doubled or lost. Eight seconds
+nearly always holds enough speech to match on. Raising it further costs
+money, because the overlapping audio is sent and charged twice, and buys very
+little. Lowering it to zero saves a trivial amount and reintroduces broken
+words at every join, which is a bad trade.""",
     ),
     SettingNote(
         key="processing.forced_alignment_enabled",

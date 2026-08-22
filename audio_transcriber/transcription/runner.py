@@ -27,27 +27,66 @@ losing one recording out of five is no reason to abandon the other four.
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
 
 from audio_transcriber.transcription import pipeline
 from audio_transcriber.transcription.model import Transcript
+from audio_transcriber.transcription.store import transcript_folder_for
 
 _log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class RecordingOutcome:
-    """What became of one recording, whether or not it worked."""
+    """What became of one recording, whether or not it worked.
+
+    This carries numbers and sentences rather than the transcript itself,
+    and the difference is measured in hundreds of megabytes. A transcript
+    holds every service's answer for every word and every candidate that
+    was weighed, so a three-hour recording parses to something like 90 MB,
+    and a run over a day's worth of recordings that kept each one would be
+    holding the whole day in memory by the time it finished, for a dialog
+    that only ever shows a word count. The transcript is saved to its folder
+    the moment it is made, and anything that wants the words reads it from
+    there.
+    """
 
     path: Path
-    transcript: Transcript | None = None
+    transcribed: bool = False
+    """Whether a transcript was made for this recording."""
+    word_count: int = 0
+    review_count: int = 0
+    """How many words this recording is waiting for a person to settle."""
+    warnings: tuple[str, ...] = ()
+    transcript_folder: Path | None = None
+    """Where the transcript and everything that explains it were written."""
     error: str = ""
     """Why there is no transcript, where there is none."""
+
+    @classmethod
+    def of_transcript(
+        cls,
+        path: Path,
+        transcript: Transcript,
+        transcript_folder: Path | None = None,
+    ) -> "RecordingOutcome":
+        """What there is to say about a finished transcript, without keeping it."""
+        return cls(
+            path=path,
+            transcribed=True,
+            word_count=len(transcript.tokens),
+            review_count=len(transcript.review_tokens),
+            warnings=tuple(transcript.warnings),
+            transcript_folder=transcript_folder,
+        )
 
     @property
     def name(self) -> str:
@@ -55,16 +94,7 @@ class RecordingOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return self.transcript is not None
-
-    @property
-    def word_count(self) -> int:
-        return len(self.transcript.tokens) if self.transcript is not None else 0
-
-    @property
-    def review_count(self) -> int:
-        """How many words this recording is waiting for a person to settle."""
-        return len(self.transcript.review_tokens) if self.transcript is not None else 0
+        return self.transcribed
 
     @property
     def message(self) -> str:
@@ -76,7 +106,7 @@ class RecordingOutcome:
         them behind a count would leave the user trusting a transcript they
         would have questioned.
         """
-        if self.transcript is None:
+        if not self.transcribed:
             return f"{self.name} could not be transcribed. {self.error}".strip()
         words = _count(self.word_count, "word")
         if self.review_count:
@@ -84,7 +114,7 @@ class RecordingOutcome:
         else:
             waiting = "nothing waiting for review"
         lines = [f"{self.name}: {words}, with {waiting}."]
-        lines.extend(self.transcript.warnings)
+        lines.extend(self.warnings)
         return "\n".join(lines)
 
 
@@ -145,6 +175,11 @@ class TranscriptionRunner(QObject):
         application = QCoreApplication.instance()
         if application is not None:
             application.aboutToQuit.connect(self.stop)
+        # The request to stay awake is per thread, so it has to be withdrawn
+        # on the thread that made it. This object lives on the main thread and
+        # the summary arrives there through a queued signal, so a slot on the
+        # object itself is the right place rather than the end of the worker.
+        self.runFinished.connect(self._let_the_system_sleep)
 
     @property
     def is_running(self) -> bool:
@@ -167,6 +202,7 @@ class TranscriptionRunner(QObject):
             daemon=True,
         )
         self._thread.start()
+        keep_system_awake(True)
         return True
 
     def cancel(self) -> None:
@@ -186,6 +222,10 @@ class TranscriptionRunner(QObject):
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout_seconds)
+        keep_system_awake(False)
+
+    def _let_the_system_sleep(self, _summary: object) -> None:
+        keep_system_awake(False)
 
     # -- The background thread -------------------------------------------
 
@@ -239,7 +279,13 @@ class TranscriptionRunner(QObject):
         except Exception as error:  # a bad recording must not end the run
             _log.exception("%s could not be transcribed.", recording)
             return RecordingOutcome(path=recording, error=_reason(error))
-        return RecordingOutcome(path=recording, transcript=transcript)
+        # The transcript is let go here, on purpose. It has been saved to its
+        # folder by the pipeline, and keeping it would hold the whole run's
+        # worth of transcripts in memory for a dialog that shows a count.
+        folder = transcript_folder_for(
+            recording, options.settings.processing.transcript_folder_suffix
+        )
+        return RecordingOutcome.of_transcript(recording, transcript, folder)
 
     def _report(
         self,
@@ -282,6 +328,49 @@ class TranscriptionRunner(QObject):
             _log.debug("A transcription result was dropped because its receiver has gone.")
             return False
         return True
+
+
+# -- Keeping the machine awake -------------------------------------------
+
+#: The two flags this application asks Windows for. ES_CONTINUOUS makes the
+#: request hold until it is withdrawn; ES_SYSTEM_REQUIRED stops the machine
+#: going to sleep. The display is deliberately not kept on: a run lasts
+#: hours, nobody needs to watch it, and a screen that will not turn off is
+#: a nuisance rather than a help.
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def _windows_thread_execution_state(flags: int) -> None:
+    """Ask Windows to hold the machine awake, or let it go. Windows only."""
+    ctypes.windll.kernel32.SetThreadExecutionState(flags)  # type: ignore[attr-defined]
+
+
+#: How the request reaches the operating system. A module-level name so that
+#: a test can stand in for it and see what was asked.
+set_thread_execution_state: Callable[[int], None] = _windows_thread_execution_state
+
+
+def keep_system_awake(awake: bool) -> None:
+    """Stop Windows sleeping while a run is going, and let it sleep again after.
+
+    A transcription run is hours of waiting on services with nobody touching
+    the keyboard, which is exactly what a laptop's power settings read as a
+    machine nobody is using. Left to itself it sleeps, every request in
+    flight dies, and the run is found the next morning stopped part way
+    through with the early recordings paid for and the later ones untouched.
+
+    Nothing here may raise. A machine that cannot be asked -- not Windows,
+    or a Windows where the call fails -- transcribes exactly as before, and
+    the worst that happens is the sleep this was meant to prevent.
+    """
+    if sys.platform != "win32":
+        return
+    flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED if awake else ES_CONTINUOUS
+    try:
+        set_thread_execution_state(flags)
+    except Exception:  # staying awake is a convenience, never a reason to stop
+        _log.debug("Could not change the system's sleep setting.", exc_info=True)
 
 
 def summarise(summary: RunSummary) -> str:

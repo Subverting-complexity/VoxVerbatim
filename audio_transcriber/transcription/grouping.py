@@ -84,7 +84,8 @@ from difflib import SequenceMatcher
 
 from audio_transcriber.transcription.model import FinalToken, Language, Transcript
 from audio_transcriber.transcription.normalise import (
-    are_equivalent,
+    _compound_form,
+    _has_german_letter,
     is_punctuation_only,
     normalise,
 )
@@ -276,7 +277,7 @@ def _now() -> str:
 # -- Gathering them into groups ------------------------------------------
 
 
-@dataclass
+@dataclass(eq=False)
 class _Cluster:
     """Occurrences being gathered, and the facts that decide what may join.
 
@@ -284,6 +285,10 @@ class _Cluster:
     because the tolerance is a question about how far apart two words are and
     the answer has to be measured against the nearest member rather than
     against an average that no member actually has.
+
+    Clusters are compared by identity rather than by content, so that the
+    index in :class:`_Relations` can hold them in sets while their contents
+    change underneath it.
     """
 
     members: list[Occurrence] = field(default_factory=list)
@@ -305,6 +310,16 @@ class _Cluster:
 
     lowest: float | None = None
     highest: float | None = None
+
+    position: int = 0
+    """Where this cluster stood in the order the clusters were made.
+
+    Survivors keep their relative order as clusters are absorbed, so this
+    stays the cluster's rank for the rest of the run.
+    """
+
+    alive: bool = True
+    """False once this cluster has been absorbed into an earlier one."""
 
     def absorb(self, occurrence: Occurrence) -> None:
         self.members.append(occurrence)
@@ -419,36 +434,290 @@ def _initial_clusters(occurrences: list[Occurrence]) -> list[_Cluster]:
 def _join_clusters(clusters: list[_Cluster], tolerance: float) -> None:
     """Merge clusters that may join, until nothing else can, in place.
 
-    Merging repeatedly from the front rather than scoring every pair once,
-    because joining is a chain: ``Bosh`` reaches ``Bosche`` only through
-    ``Bosch``, and a single pass comparing pairs of the original clusters
-    would leave the two ends in separate groups. The loop always merges the
-    earliest pair it finds, so the outcome depends on the order the
-    occurrences arrived in and on nothing else.
+    The result is defined by a simple rule: find the earliest pair of
+    clusters that may join, merge the later one into the earlier one, and
+    start again from the front, until no pair is left. "Earliest" is by the
+    position of the first cluster and then of the second, so the outcome
+    depends on the order the occurrences arrived in and on nothing else.
+
+    That rule is not the same as "merge everything that is related to
+    anything", and the difference matters, which is why this is not a
+    union-find over a relation worked out once:
+
+    * A cluster carries one known language, taken from the first member that
+      had one. A cluster of unknown language that reaches both an English
+      cluster and a German one joins whichever the rule reaches first and is
+      then English or German, and closed to the other. Joining everything
+      related would put the two known languages in one group by way of the
+      word nobody could place.
+    * A cluster's confidence range widens as it grows, and the tolerance is
+      measured against that range. A form within tolerance of nothing on its
+      own can fall inside the range of a cluster that has grown around it.
+      The merge order decides what has grown by the time each pair is
+      looked at.
+
+    So the rule is kept exactly, and what changed is how much work finding
+    the earliest pair costs. The obvious loop restarts from the front after
+    every merge and tests every pair again, which is cubic in the number of
+    clusters and, with a string similarity at the bottom of each test, took
+    over a minute and a half for two thousand words. Three facts make most
+    of that work unnecessary:
+
+    * Whether two forms answer to each other never changes, so the
+      relation between forms is worked out once, up front, by
+      :class:`_Relations`, and a cluster's candidates are read off it
+      rather than found by trying every other cluster in turn.
+    * After a merge, only the cluster that grew has changed. Every pair that
+      was rejected before and does not involve it is still rejected. So the
+      next earliest pair either involves the grown cluster, or sits beyond
+      the row the scan had reached. Each merge is therefore followed by
+      settling the grown cluster -- trying it against everything before it
+      (merging upward and trying again from the front, as the rule
+      requires), then against everything after it -- and the scan resumes
+      where it was, skipping the rows already known to be clean.
+    * Survivors keep their relative order, so a cluster's position in the
+      original list serves as its position for the rest of the run, and
+      nothing has to be renumbered when a cluster is absorbed.
     """
-    merged = True
-    while merged:
-        merged = False
-        for first in range(len(clusters)):
-            for second in range(first + 1, len(clusters)):
-                if not _may_join(clusters[first], clusters[second], tolerance):
-                    continue
-                for member in clusters[second].members:
-                    clusters[first].absorb(member)
-                del clusters[second]
-                merged = True
-                break
-            if merged:
-                break
+    relations = _Relations(clusters)
+    for row in clusters:
+        if not row.alive:
+            continue
+        partner = relations.first_partner_after(row, tolerance)
+        if partner is None:
+            continue
+        relations.merge(row, partner)
+        relations.settle(row, tolerance)
+        # The loop carries on with the cluster after ``row`` in the original
+        # order. Every live cluster before it, ``row`` included if it is
+        # still alive, is now known to have no partner anywhere.
+    clusters[:] = [cluster for cluster in clusters if cluster.alive]
+
+
+class _Relations:
+    """Which clusters could join which, kept current as clusters merge.
+
+    Built once from the forms every cluster starts with. The relation
+    between two forms never changes, so it is worked out here in full and
+    the clustering then only asks which clusters currently hold the forms
+    related to a given cluster's forms, which is a few dictionary lookups
+    rather than a walk over every cluster with a string comparison at each
+    step.
+
+    Two relations are kept, one for each way two texts can answer to each
+    other:
+
+    * ``equivalent``, over the forms as the services spelled them, answers
+      to :func:`~audio_transcriber.transcription.normalise.are_equivalent`.
+      That function says yes when the normalised forms agree, or when one
+      text has a German letter and the forms with the umlaut dropped agree,
+      so the detected forms are bucketed by those two keys and the buckets
+      give the answer without calling it once per pair.
+    * ``similar`` and its reverse, over the normalised forms, answer to
+      :func:`_similar`, which is a string similarity ratio. Measuring every
+      pair of forms would be most of the old cost all over again, so pairs
+      are first ruled out by two cheap upper bounds on the ratio -- the two
+      lengths alone, and the number of characters the forms share in any
+      order -- and only the pairs that survive both are measured. The ratio
+      is not promised to be the same with the strings swapped, so each pair
+      is measured in both orders and the two directions are kept apart.
+    """
+
+    def __init__(self, clusters: list[_Cluster]) -> None:
+        for position, cluster in enumerate(clusters):
+            cluster.position = position
+        self._holding_form: dict[str, set[_Cluster]] = {}
+        self._holding_detected: dict[str, set[_Cluster]] = {}
+        for cluster in clusters:
+            for form in cluster.forms:
+                self._holding_form.setdefault(form, set()).add(cluster)
+            for detected in cluster.detected_forms:
+                self._holding_detected.setdefault(detected, set()).add(cluster)
+        self._equivalent = _equivalence_partners(list(self._holding_detected))
+        self._similar, self._similar_reverse = _similarity_partners(list(self._holding_form))
+
+    def merge(self, keep: _Cluster, absorbed: _Cluster) -> None:
+        """Fold ``absorbed`` into ``keep`` and mark it gone."""
+        for member in absorbed.members:
+            keep.absorb(member)
+        for form in absorbed.forms:
+            holders = self._holding_form[form]
+            holders.discard(absorbed)
+            holders.add(keep)
+        for detected in absorbed.detected_forms:
+            holders = self._holding_detected[detected]
+            holders.discard(absorbed)
+            holders.add(keep)
+        absorbed.alive = False
+
+    def settle(self, grown: _Cluster, tolerance: float) -> None:
+        """Carry out every merge the rule demands because ``grown`` grew.
+
+        Repeats until the grown cluster has no partner before it and none
+        after it, which is exactly when the front-to-back rule would have
+        moved past it. A partner before it takes the grown cluster in, and
+        the search starts from the front again because that earlier cluster
+        has now grown.
+        """
+        while True:
+            earlier = self.first_partner_before(grown, tolerance)
+            if earlier is not None:
+                self.merge(earlier, grown)
+                grown = earlier
+                continue
+            later = self.first_partner_after(grown, tolerance)
+            if later is None:
+                return
+            self.merge(grown, later)
+
+    def first_partner_before(self, cluster: _Cluster, tolerance: float) -> _Cluster | None:
+        """The earliest live cluster before this one that it may join."""
+        best: _Cluster | None = None
+        for candidate in self._candidates(cluster, self._similar_reverse):
+            if candidate.position >= cluster.position:
+                continue
+            if best is not None and candidate.position >= best.position:
+                continue
+            if _may_join(candidate, cluster, tolerance):
+                best = candidate
+        return best
+
+    def first_partner_after(self, cluster: _Cluster, tolerance: float) -> _Cluster | None:
+        """The earliest live cluster after this one that it may join."""
+        best: _Cluster | None = None
+        for candidate in self._candidates(cluster, self._similar):
+            if candidate.position <= cluster.position:
+                continue
+            if best is not None and candidate.position >= best.position:
+                continue
+            if _may_join(cluster, candidate, tolerance):
+                best = candidate
+        return best
+
+    def _candidates(
+        self,
+        cluster: _Cluster,
+        similar: dict[str, set[str]],
+    ) -> set[_Cluster]:
+        """Every live cluster holding a form related to one of this cluster's.
+
+        ``similar`` is the direction of :func:`_similar` that matches which
+        side of the pair this cluster is on: an earlier cluster's forms are
+        always the first argument.
+        """
+        found: set[_Cluster] = set()
+        for detected in cluster.detected_forms:
+            for partner in self._equivalent.get(detected, ()):
+                found.update(self._holding_detected[partner])
+        for form in cluster.forms:
+            for partner in similar.get(form, ()):
+                found.update(self._holding_form[partner])
+        found.discard(cluster)
+        return found
+
+
+def _equivalence_partners(detected_forms: list[str]) -> dict[str, set[str]]:
+    """For each detected form, the others :func:`are_equivalent` accepts.
+
+    Worked out through the same two keys that function compares, so that
+    the answer is the one it would give, pair by pair, without asking it
+    pair by pair. The German direction is one-sided by design: a form with
+    no German letter in it is only reached through the dropped-umlaut key
+    by a form that has one.
+    """
+    by_normalised: dict[str, list[str]] = {}
+    by_dropped: dict[str, list[str]] = {}
+    german: set[str] = set()
+    for detected in detected_forms:
+        by_normalised.setdefault(normalise(detected), []).append(detected)
+        by_dropped.setdefault(_compound_form(detected, True), []).append(detected)
+        if _has_german_letter(detected):
+            german.add(detected)
+    partners: dict[str, set[str]] = {}
+    for detected in detected_forms:
+        found = set(by_normalised[normalise(detected)])
+        dropped = by_dropped[_compound_form(detected, True)]
+        if detected in german:
+            found.update(dropped)
+        else:
+            found.update(other for other in dropped if other in german)
+        found.discard(detected)
+        if found:
+            partners[detected] = found
+    return partners
+
+
+def _similarity_partners(
+    forms: list[str],
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """For each normalised form, the others :func:`_similar` accepts.
+
+    Returns the relation in both directions: ``forward[a]`` holds every
+    ``b`` with ``_similar(a, b)``, and ``reverse[b]`` holds every ``a`` for
+    the same pairs.
+
+    The ratio :func:`_similar` measures is twice the matched characters
+    over the two lengths, and the matched characters can be no more than
+    the shorter length and no more than the characters the two forms have
+    in common counted without regard to order. Both give an upper bound on
+    the ratio, both are cheap, and a pair that fails either cannot pass the
+    threshold, so only the pairs that pass both are measured for real.
+    """
+    forward: dict[str, set[str]] = {}
+    reverse: dict[str, set[str]] = {}
+    eligible = [form for form in forms if len(form) >= SIMILARITY_MINIMUM_LENGTH]
+    by_length: dict[int, list[str]] = {}
+    for form in eligible:
+        by_length.setdefault(len(form), []).append(form)
+    counts = {form: Counter(form) for form in eligible}
+    lengths = sorted(by_length)
+    for shorter_length in lengths:
+        # The longer form may be at most this long before the length bound
+        # alone rules the pair out: 2 * shorter / (shorter + longer) must
+        # reach the threshold.
+        longest = int(shorter_length * (2 - SIMILARITY_THRESHOLD) / SIMILARITY_THRESHOLD)
+        for longer_length in lengths:
+            if longer_length < shorter_length or longer_length > longest:
+                continue
+            shorter_forms = by_length[shorter_length]
+            longer_forms = by_length[longer_length]
+            total = shorter_length + longer_length
+            for index, shorter in enumerate(shorter_forms):
+                shorter_counts = counts[shorter]
+                # Two forms of the same length meet once, as shorter and
+                # longer, and both directions are measured then.
+                if longer_length == shorter_length:
+                    others = longer_forms[index + 1 :]
+                else:
+                    others = longer_forms
+                for longer in others:
+                    longer_counts = counts[longer]
+                    shared = sum(
+                        min(count, longer_counts.get(character, 0))
+                        for character, count in shorter_counts.items()
+                    )
+                    if 2 * shared / total < SIMILARITY_THRESHOLD:
+                        continue
+                    if _similar(shorter, longer):
+                        forward.setdefault(shorter, set()).add(longer)
+                        reverse.setdefault(longer, set()).add(shorter)
+                    if _similar(longer, shorter):
+                        forward.setdefault(longer, set()).add(shorter)
+                        reverse.setdefault(shorter, set()).add(longer)
+    return forward, reverse
 
 
 def _may_join(first: _Cluster, second: _Cluster, tolerance: float) -> bool:
-    """Whether these two clusters are probably about the same word."""
+    """Whether two clusters whose texts are related may become one.
+
+    Only the language and the confidence gap are asked here. Whether the
+    texts are related at all is settled once, up front, by
+    :class:`_Relations`, which only ever offers a pair whose texts are; the
+    two tests left are the ones whose answer changes as clusters grow.
+    """
     if not _languages_agree(first.language, second.language):
         return False
-    if _confidence_gap(first, second) > tolerance:
-        return False
-    return _texts_related(first, second)
+    return _confidence_gap(first, second) <= tolerance
 
 
 def _languages_agree(first: str, second: str) -> bool:
@@ -481,21 +750,14 @@ def _confidence_gap(first: _Cluster, second: _Cluster) -> float:
     return max(0.0, max(first.lowest, second.lowest) - min(first.highest, second.highest))
 
 
-def _texts_related(first: _Cluster, second: _Cluster) -> bool:
-    """Whether any form in one cluster answers to any form in the other."""
-    for left in first.detected_forms:
-        for right in second.detected_forms:
-            if are_equivalent(left, right):
-                return True
-    for left in first.forms:
-        for right in second.forms:
-            if _similar(left, right):
-                return True
-    return False
-
-
 def _similar(first: str, second: str) -> bool:
-    """Whether two normalised forms are close enough to suggest one word."""
+    """Whether two normalised forms are close enough to suggest one word.
+
+    This is the measure :class:`_Relations` builds its similarity index
+    from. It is only ever asked about a pair in one particular order -- the
+    earlier cluster's form first -- because the matcher's answer is not
+    guaranteed to be the same with the two strings swapped.
+    """
     if not first or not second:
         return False
     if min(len(first), len(second)) < SIMILARITY_MINIMUM_LENGTH:

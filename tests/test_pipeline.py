@@ -26,12 +26,18 @@ import pytest
 from audio_transcriber.settings import TranscriptionSettings
 from audio_transcriber.transcription import exports, pipeline
 from audio_transcriber.transcription.model import (
+    Candidate,
+    Confidence,
+    FinalToken,
     Language,
     Provider,
+    ProviderResult,
     RecordingConfiguration,
+    ReviewReason,
     Transcript,
 )
 from audio_transcriber.transcription.providers import registry
+from audio_transcriber.transcription.providers.assemblyai import ASSEMBLYAI_CAPABILITIES
 from audio_transcriber.transcription.store import TranscriptStore
 
 from tests.conftest import write_real_audio
@@ -107,6 +113,8 @@ def transcribe(recording, monkeypatch):
         configuration=None,
         cancelled=None,
         progress=None,
+        escalation_provider=None,
+        aligner=None,
     ) -> Run:
         services = three_services() if services is None else services
         settings = settings or offline_settings()
@@ -118,11 +126,11 @@ def transcribe(recording, monkeypatch):
 
         def build_escalation_provider(_settings):
             calls.append("escalation")
-            return None
+            return escalation_provider
 
         def build_forced_aligner(_settings):
             calls.append("forced aligner")
-            return None
+            return aligner
 
         monkeypatch.setattr(registry, "build_providers", build_providers)
         monkeypatch.setattr(registry, "build_escalation_provider", build_escalation_provider)
@@ -326,8 +334,12 @@ def test_losing_every_timed_service_leaves_the_words_without_playable_times(tran
     assert run.store.transcript_path.is_file()
 
 
-def test_services_that_answer_with_no_words_at_all_say_nothing_can_be_played(transcribe):
-    """Every service answered, and every answer was empty."""
+def test_services_that_answer_with_no_words_at_all_say_so(transcribe):
+    """Every service answered, and every answer was empty.
+
+    The warning names what happened, no words at all, rather than the old
+    sentence about timings, which described a different failure.
+    """
     services = {
         provider: FakeService(provider, [])
         for provider in (Provider.ELEVENLABS, Provider.OPENAI, Provider.MICROSOFT)
@@ -336,7 +348,7 @@ def test_services_that_answer_with_no_words_at_all_say_nothing_can_be_played(tra
     run = transcribe(services)
 
     assert run.transcript.tokens == []
-    assert run.warned_about("No service returned word timings")
+    assert run.warned_about("No service returned any words")
     assert run.store.transcript_path.is_file()
 
 
@@ -564,3 +576,367 @@ def test_the_recording_remembers_whether_afrikaans_was_allowed(transcribe):
 
     assert run.transcript.configuration.afrikaans_enabled is True
     assert run.saved["configuration"]["afrikaans_enabled"] is True
+
+
+# -- The second opinion, wired all the way through ----------------------
+
+
+class SecondOpinion:
+    """An escalation service that answers every window with one reading.
+
+    It remembers the requests so a test can see what it was told, and it
+    answers with the word it was built with at the time of the window it
+    was asked about, which is how a real time-window answer arrives.
+    """
+
+    provider = Provider.ASSEMBLYAI
+    capabilities = ASSEMBLYAI_CAPABILITIES
+
+    def __init__(self, hears: str, problem: str | None = None) -> None:
+        self.hears = hears
+        self.problem = problem
+        self.windows: list = []
+        self.requests: list = []
+
+    def describe_configuration_problem(self):
+        return self.problem
+
+    def upload(self, audio_path):
+        return "https://uploads.example/recording"
+
+    def transcribe_window(self, request, *, audio_url=None, window=None, cancelled=None):
+        from audio_transcriber.transcription.model import ProviderToken
+
+        self.windows.append(window)
+        self.requests.append(request)
+        return ProviderResult(
+            provider=self.provider,
+            tokens=[
+                ProviderToken(
+                    provider=self.provider,
+                    index=0,
+                    text=self.hears,
+                    start=window.start + 0.01,
+                    end=window.end - 0.01,
+                    confidence=0.95,
+                )
+            ],
+        )
+
+
+#: A sentence with no amount, date or number in it. Those are values the
+#: application refuses to settle by any opinion, so a test of settling has
+#: to stay away from them, and from the words next to them, which share
+#: their risk.
+PLAIN_SENTENCE = "we spoke with Peter about the garden this morning"
+
+
+def disagreeing_services(
+    elevenlabs: str = "Peter",
+    openai: str = "Pieter",
+    microsoft: str = "Petrus",
+    target: str = "Peter",
+) -> dict[Provider, FakeService]:
+    """The three services, each hearing one word its own way."""
+    from tests.test_passes import BACKBONE_CAPABILITIES
+
+    def saying(provider, name, **extra):
+        return FakeService(
+            provider,
+            spoken_words(provider, PLAIN_SENTENCE.replace(target, name), **extra),
+            model=f"{provider.value}-fake",
+            **({"capabilities": BACKBONE_CAPABILITIES, "speakers": ("speaker_0",)}
+               if provider is Provider.ELEVENLABS else {}),
+        )
+
+    return {
+        Provider.ELEVENLABS: saying(
+            Provider.ELEVENLABS, elevenlabs, timed=True, speaker="speaker_0"
+        ),
+        Provider.OPENAI: saying(Provider.OPENAI, openai),
+        Provider.MICROSOFT: saying(Provider.MICROSOFT, microsoft),
+    }
+
+
+def test_a_second_opinion_that_sides_with_one_service_corrects_the_word(transcribe):
+    """The whole point of escalation, end to end: the answer reaches the word."""
+    second = SecondOpinion(hears="Pieter")
+    settings = offline_settings(escalation_enabled=True)
+
+    run = transcribe(
+        disagreeing_services(), settings=settings, escalation_provider=second
+    )
+
+    assert second.windows, "the disputed word was never sent for a second opinion"
+    name = run.transcript.tokens[3]
+    assert name.text == "Pieter"
+    assert name.text_source is Provider.ASSEMBLYAI
+    assert name.needs_review is False
+    # What the second service said is kept beside the other services, so
+    # the review window and the report can show it.
+    assert Provider.ASSEMBLYAI in run.transcript.provider_results
+    assert run.transcript.provider_results[Provider.ASSEMBLYAI].tokens[0].text == "Pieter"
+
+
+def test_the_escalation_settings_and_the_recording_reach_the_second_service(transcribe):
+    """The speaker count, the context and the vocabulary are not decoration."""
+    second = SecondOpinion(hears="Pieter")
+    settings = offline_settings(escalation_enabled=True)
+    configuration = RecordingConfiguration(
+        expected_speaker_count=3, recording_context="A board meeting."
+    )
+
+    transcribe(
+        disagreeing_services(),
+        settings=settings,
+        configuration=configuration,
+        escalation_provider=second,
+    )
+
+    assert second.requests
+    assert second.requests[0].expected_speaker_count == 3
+    assert "board meeting" in second.requests[0].context_prompt
+
+
+def test_a_second_opinion_nobody_else_offered_is_evidence_not_an_answer(transcribe):
+    second = SecondOpinion(hears="Petra")
+    settings = offline_settings(escalation_enabled=True)
+
+    run = transcribe(
+        disagreeing_services(), settings=settings, escalation_provider=second
+    )
+
+    name = run.transcript.tokens[3]
+    assert name.text != "Petra"
+    assert name.needs_review is True
+    assert "Petra" in [candidate.text for candidate in name.candidates]
+
+
+def test_an_escalation_service_with_a_problem_is_reported_before_anything_is_sent(
+    transcribe,
+):
+    second = SecondOpinion(hears="Pieter", problem="No AssemblyAI API key is set.")
+    settings = offline_settings(escalation_enabled=True)
+
+    run = transcribe(
+        disagreeing_services(), settings=settings, escalation_provider=second
+    )
+
+    assert second.windows == []
+    assert run.warned_about("no escalation service is set up", "No AssemblyAI API key")
+    assert run.transcript.tokens[3].needs_review is True
+
+
+def test_escalation_progress_is_reported_window_by_window(transcribe):
+    second = SecondOpinion(hears="Pieter")
+    settings = offline_settings(escalation_enabled=True)
+    sentences: list[str] = []
+
+    transcribe(
+        disagreeing_services(),
+        settings=settings,
+        escalation_provider=second,
+        progress=lambda report: sentences.append(report.stage),
+    )
+
+    assert any(sentence.startswith("Second opinion 1 of") for sentence in sentences)
+
+
+# -- A later stage failing never costs the words ------------------------
+
+
+def test_a_stage_that_breaks_after_the_services_answered_keeps_the_transcript(
+    transcribe, monkeypatch
+):
+    """Everything after reconciliation is a refinement of words already paid for."""
+    from audio_transcriber.transcription import escalation
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("a bug in planning")
+
+    monkeypatch.setattr(escalation, "plan_escalation", broken)
+    settings = offline_settings(escalation_enabled=True)
+
+    run = transcribe(disagreeing_services(), settings=settings)
+
+    assert run.transcript.verbatim_text.startswith("we spoke with")
+    assert run.warned_about("second opinions stage failed", "a bug in planning")
+    assert run.store.transcript_path.is_file()
+
+
+# -- What the language model is asked about, and in what size -----------
+
+
+class BatchCountingAdjudicator:
+    """Answers nothing, remembers how it was asked."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.batches: list[int] = []
+
+    def is_configured(self) -> bool:
+        return True
+
+    def adjudicate(self, disputes, **kwargs):
+        from audio_transcriber.transcription.adjudication import AdjudicationOutcome
+
+        self.batches.append(len(disputes))
+        for dispute in disputes:
+            for token in dispute.tokens:
+                token.flag(ReviewReason.ADJUDICATION_DECLINED)
+        return AdjudicationOutcome(unanswered=tuple(d.span_id for d in disputes))
+
+
+def test_only_words_whose_text_is_in_doubt_are_put_to_the_language_model():
+    """A word in the queue for its speaker has nothing for the model to decide."""
+    disagreement = FinalToken(
+        text="fifteen",
+        text_confidence=Confidence.REVIEW_REQUIRED,
+        candidates=[Candidate("fifteen"), Candidate("fifty")],
+    )
+    disagreement.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+    speaker_only = FinalToken(
+        text="yes", text_confidence=Confidence.HIGH, candidates=[Candidate("yes")]
+    )
+    speaker_only.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    one_reading = FinalToken(
+        text="um", text_confidence=Confidence.REVIEW_SUGGESTED, candidates=[Candidate("um")]
+    )
+    one_reading.flag(ReviewReason.LOW_ACOUSTIC_CONFIDENCE)
+
+    disputes = pipeline._build_disputes(
+        [disagreement, speaker_only, one_reading], Transcript(recording_name="a")
+    )
+
+    assert [dispute.tokens for dispute in disputes] == [(disagreement,)]
+
+
+def test_disputes_go_to_the_language_model_in_batches(monkeypatch):
+    from audio_transcriber.transcription import adjudication
+
+    built: list[BatchCountingAdjudicator] = []
+
+    def build(*args, **kwargs):
+        adjudicator = BatchCountingAdjudicator()
+        built.append(adjudicator)
+        return adjudicator
+
+    monkeypatch.setattr(adjudication, "Adjudicator", build)
+    tokens = []
+    for number in range(75):
+        token = FinalToken(
+            text=f"w{number}",
+            start=float(number),
+            end=number + 0.5,
+            text_confidence=Confidence.REVIEW_REQUIRED,
+            candidates=[Candidate(f"w{number}"), Candidate(f"v{number}")],
+        )
+        token.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+        tokens.append(token)
+    # Settled words between them keep each dispute separate.
+    spaced = []
+    for token in tokens:
+        spaced.append(token)
+        spaced.append(FinalToken(text="and", text_confidence=Confidence.HIGH))
+    transcript = Transcript(recording_name="a", tokens=spaced)
+    settings = TranscriptionSettings()
+    settings.openai_adjudication.api_key = "key"
+
+    class Context:
+        recording_context = ""
+        term_texts = ()
+        languages = ()
+
+    pipeline._adjudicate(spaced, transcript, settings, Context(), pipeline._Reporter(None), None)
+
+    assert built[0].batches == [30, 30, 15]
+
+
+# -- Timing is measured phrase by phrase, against a clip -----------------
+
+
+def test_moved_words_are_gathered_into_phrases_by_adjacency_and_time():
+    from audio_transcriber.transcription.model import TimingStatus
+
+    def moved(text, start, end):
+        return FinalToken(
+            text=text, start=start, end=end, timing_status=TimingStatus.MAPPED_SUBSTITUTION
+        )
+
+    def fine(text, start, end):
+        return FinalToken(
+            text=text, start=start, end=end, timing_status=TimingStatus.EXACT_PROVIDER_TIME
+        )
+
+    tokens = [
+        moved("a", 0.0, 0.3),
+        moved("b", 0.35, 0.6),
+        fine("c", 0.65, 0.9),
+        moved("d", 1.0, 1.2),
+        moved("e", 5.0, 5.3),
+    ]
+
+    phrases = pipeline._phrases_to_realign(tokens)
+
+    assert [[token.text for token in phrase] for phrase in phrases] == [["a", "b"], ["d"], ["e"]]
+
+
+class ClipRecordingAligner:
+    """A forced aligner that records what audio it was handed."""
+
+    provider = Provider.ELEVENLABS
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, float]] = []
+
+    def is_configured(self) -> bool:
+        return True
+
+    def supports(self, language) -> bool:
+        return True
+
+    def align(self, audio_path, text, language, canonical_offset):
+        from audio_transcriber.transcription.canonical import probe_audio
+
+        duration = probe_audio(audio_path).duration
+        self.calls.append((text, str(audio_path), duration))
+        words = text.split()
+        step = duration / max(1, len(words))
+        return [
+            {
+                "text": word,
+                "start": canonical_offset + index * step,
+                "end": canonical_offset + (index + 1) * step,
+                "loss": 0.1,
+            }
+            for index, word in enumerate(words)
+        ]
+
+
+def test_forced_alignment_is_given_a_clip_of_the_phrase_not_the_whole_recording(transcribe):
+    """An aligner must place every word of the text it is given somewhere in
+    the audio it is given. Hand it the whole recording and a few scattered
+    words, and it places them at moments that have nothing to do with where
+    they were said."""
+    aligner = ClipRecordingAligner()
+    settings = offline_settings(forced_alignment_enabled=True, escalation_enabled=True)
+
+    # The backbone hears an ordinary word differently from the other two,
+    # and the second opinion sides with them, so the word is a substitution
+    # sitting in a span measured for another word: exactly what is worth
+    # measuring again.
+    run = transcribe(
+        disagreeing_services("carton", "garden", "garden", target="garden"),
+        settings=settings,
+        escalation_provider=SecondOpinion(hears="garden"),
+        aligner=aligner,
+    )
+
+    assert run.transcript.tokens[6].text == "garden"
+    assert aligner.calls, "nothing was realigned"
+    assert aligner.calls[0][0] == "garden"
+    assert run.transcript.tokens[6].timing_status.value == "forced_aligned"
+    for text, path, duration in aligner.calls:
+        assert duration < 2.0, "the aligner was handed the whole recording"
+        assert "alignment" in path
+    # The clips are working files and do not stay behind.
+    assert not (run.store.folder / "alignment").exists()

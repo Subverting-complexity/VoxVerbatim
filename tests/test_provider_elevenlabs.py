@@ -898,3 +898,155 @@ def test_the_adapters_are_reachable_from_the_package():
     assert providers.__doc__  # the package explains itself
     assert ElevenLabsProvider(api_key="k").provider is Provider.ELEVENLABS
     assert ElevenLabsForcedAligner(api_key="k").provider is Provider.ELEVENLABS
+
+
+# -- Retrying, and how long to wait ---------------------------------------
+#
+# The installed library retries a request without its form body, so its
+# retry can only ever fail. The adapter switches it off and the base class
+# retries instead, reopening the file each time.
+
+
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    """Take the backoff out, so a retried request does not slow the suite."""
+    from audio_transcriber.transcription.providers import base
+
+    monkeypatch.setattr(base, "_sleep", lambda seconds: None)
+    monkeypatch.setattr(elevenlabs_module, "_sleep", lambda seconds: None)
+
+
+def test_the_library_is_never_allowed_to_retry(request_for):
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    build_provider(client, maximum_retries=3).transcribe(request_for())
+
+    assert client.speech_to_text.calls[0]["request_options"]["max_retries"] == 0
+
+
+class CountingSpeechToText(FakeSpeechToText):
+    """Fails a scripted number of times, and reads the file each time."""
+
+    def __init__(self, response, errors: list[Exception]) -> None:
+        super().__init__(response)
+        self.errors = errors
+        self.bytes_seen: list[bytes] = []
+
+    def convert(self, **arguments):
+        self.calls.append(arguments)
+        self.bytes_seen.append(arguments["file"][1].read())
+        if self.errors:
+            raise self.errors.pop(0)
+        return self.response
+
+
+def test_a_dropped_connection_is_tried_again_with_the_whole_file(request_for):
+    class ConnectError(Exception):
+        """Named like httpx's, which carries no status code."""
+
+    client = FakeClient()
+    client.speech_to_text = CountingSpeechToText(
+        transcription(SAMPLE_WORDS), [ConnectError("reset"), ConnectError("reset")]
+    )
+
+    result = build_provider(client, maximum_retries=2).transcribe(request_for())
+
+    assert result.succeeded
+    assert len(client.speech_to_text.calls) == 3
+    # Every attempt read the file from the start, not from where the
+    # previous attempt left it.
+    assert len(set(client.speech_to_text.bytes_seen)) == 1
+    assert client.speech_to_text.bytes_seen[0].startswith(b"RIFF")
+
+
+def test_a_retry_that_never_succeeds_says_how_many_times_it_tried(request_for):
+    class ReadTimeout(Exception):
+        pass
+
+    client = FakeClient()
+    client.speech_to_text = CountingSpeechToText(
+        transcription(SAMPLE_WORDS), [ReadTimeout("slow")] * 3
+    )
+
+    result = build_provider(client, maximum_retries=2).transcribe(request_for())
+
+    assert not result.succeeded
+    assert "failed after 3 attempts" in result.error
+    assert result.request is not None
+    assert result.request.error == result.error
+
+
+def test_the_wait_a_rate_limit_asks_for_is_read_off_the_error(monkeypatch, request_for):
+    from audio_transcriber.transcription.providers import base
+
+    waits: list[float] = []
+    monkeypatch.setattr(base, "_sleep", waits.append)
+    failure = RuntimeError("slow down")
+    failure.status_code = 429
+    failure.headers = {"retry-after": "5"}
+    client = FakeClient()
+    client.speech_to_text = CountingSpeechToText(transcription(SAMPLE_WORDS), [failure])
+
+    result = build_provider(client, maximum_retries=1).transcribe(request_for())
+
+    assert result.succeeded
+    assert sum(waits) == pytest.approx(5.0)
+
+
+def test_a_refused_key_is_not_tried_again(request_for):
+    failure = RuntimeError("bad key")
+    failure.status_code = 401
+    client = FakeClient(error=failure)
+
+    result = build_provider(client, maximum_retries=3).transcribe(request_for())
+
+    assert not result.succeeded
+    assert len(client.speech_to_text.calls) == 1
+
+
+def test_the_timeout_grows_with_the_length_of_the_audio(request_for):
+    """The service is silent until the transcript is ready, so the read
+    timeout has to cover the whole of a three-hour file's processing."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, timeout_seconds=900.0)
+
+    provider.transcribe(request_for(duration=12.0))
+    provider.transcribe(request_for(duration=3 * 3600.0))
+    provider.transcribe(request_for(duration=3600.0))
+
+    sent = [call["request_options"]["timeout_in_seconds"] for call in client.speech_to_text.calls]
+    assert sent == [900, 7200, 3900]
+
+
+def test_a_word_that_ends_before_it_starts_is_given_no_length(request_for):
+    words = [word("blip", start=1.00, end=0.90)]
+    client = FakeClient(transcription(words))
+
+    result = build_provider(client).transcribe(request_for())
+
+    token = result.tokens[0]
+    assert token.end == token.start == pytest.approx(OFFSET + 1.00)
+
+
+def test_the_aligner_also_reopens_the_file_and_tries_again(audio):
+    class ReadTimeout(Exception):
+        pass
+
+    client = FakeClient(alignment=alignment([aligned_word("hello", 0.1, 0.4)]))
+    client.forced_alignment.error = ReadTimeout("slow")
+    calls = client.forced_alignment.calls
+
+    original = client.forced_alignment.create
+
+    def create_then_recover(**arguments):
+        if len(calls) >= 1:
+            client.forced_alignment.error = None
+        return original(**arguments)
+
+    client.forced_alignment.create = create_then_recover
+    aligner = ElevenLabsForcedAligner(api_key=API_KEY, client=client, maximum_retries=2)
+
+    aligned = aligner.align(audio, "hello", Language.ENGLISH, canonical_offset=10.0)
+
+    assert aligned == [("hello", 10.1, 10.4)]
+    assert len(calls) == 2
+    assert all(call["request_options"]["max_retries"] == 0 for call in calls)

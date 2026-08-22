@@ -173,3 +173,52 @@ def test_the_note_sends_people_to_the_folder_their_settings_are_really_in() -> N
     """
     text = READ_ME.read_text(encoding="utf-8")
     assert f"{ORGANISATION_NAME}\\{APPLICATION_NAME}" in text
+
+
+# -- The launcher --------------------------------------------------------
+
+LAUNCHER = REPOSITORY_ROOT / "Audio Transcriber.cmd"
+
+
+def _launcher_import_check() -> set[str]:
+    """The libraries the launcher imports to decide the installation is whole."""
+    script = LAUNCHER.read_text(encoding="utf-8")
+    match = re.search(r'set "ALL_LIBRARIES=([^"]+)"', script)
+    assert match is not None, "The launcher no longer lists the libraries it checks."
+    return {name.strip() for name in match.group(1).split(",")}
+
+
+def test_the_launcher_checks_every_library_the_application_needs() -> None:
+    """A library the launcher does not check is one it will not install.
+
+    The launcher skips the install when everything it checks imports, so a
+    service library left out of the check is installed on the first run and
+    never again. On a machine set up before that library was added, the
+    service then fails half way through a paid run rather than at start-up.
+    """
+    import_names = _import_names()
+    required = {import_names.get(name, name) for name in _required_distributions()}
+    checked = _launcher_import_check()
+    assert required <= checked, (
+        f"The launcher does not check {sorted(required - checked)}. Add them to "
+        f"ALL_LIBRARIES in {LAUNCHER.name}."
+    )
+
+
+def test_the_launcher_installs_again_when_the_requirements_change() -> None:
+    """The import check alone cannot see a library that was added to the list.
+
+    So the launcher keeps a copy of requirements.txt from the last install
+    and compares the two on every start, installing when they differ or
+    when the copy is missing. The copy is taken only after pip succeeded, so
+    a failed install is tried again rather than remembered as done.
+    """
+    script = LAUNCHER.read_text(encoding="utf-8")
+    assert r'set "INSTALLED_STAMP=%VENV_DIR%\requirements.installed"' in script
+    assert 'if not exist "%INSTALLED_STAMP%" set "NEEDS_INSTALL=1"' in script
+    assert 'fc /b "requirements.txt" "%INSTALLED_STAMP%"' in script
+    install = script[script.index(":install_requirements") :]
+    pip = install.index("-r requirements.txt")
+    copied = install.index('copy /y "requirements.txt" "%INSTALLED_STAMP%"')
+    assert pip < copied
+    assert "if errorlevel 1 exit /b 1" in install[pip:copied]

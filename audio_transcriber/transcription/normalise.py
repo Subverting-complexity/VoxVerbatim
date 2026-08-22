@@ -143,7 +143,9 @@ _APOSTROPHES = frozenset("'’‘ʼʹ‛′`´")
 #: Every shape a hyphen or a joining slash arrives in. These become spaces
 #: rather than disappearing, so that "twenty-five" becomes two words and
 #: can be read as a number, and "data-base" waits until the last stage to
-#: meet "database".
+#: meet "database". A slash standing between two digits is the exception:
+#: it is kept, because "1/2" is a half and "24/7" is round the clock, and
+#: neither is the number the digits spell when run together.
 _DASHES = frozenset("-‐‑‒–—―−/_")
 
 #: The German letters and what they are also written as. Note that
@@ -224,8 +226,13 @@ _THOUSAND_WORDS = ("thousand", "tausend", "duisend")
 #: "und" and "en" join a unit to a tens word, as in "fünfundzwanzig" and
 #: "vyfentwintig". English "and" never does that in speech people actually
 #: use, so it is kept apart: it may only follow a hundred or a thousand, as
-#: in "one hundred and one". Letting English "and" join freely would turn
-#: "five and ten" into fifteen.
+#: in "one hundred and one" and "two thousand and five". Letting English
+#: "and" join freely would turn "five and ten" into fifteen.
+#:
+#: "und" and "en" also do the job "and" does after a scale word, as in
+#: "tausend und eins" and "honderd en vyf". That is the one place a unit may
+#: follow them, and :func:`_accumulate` allows it only there, so that "vyf
+#: en ses" stays two numbers rather than becoming eleven.
 _COMPOUND_JOINERS = ("und", "en")
 _SCALE_JOINERS = ("and",)
 
@@ -244,10 +251,12 @@ _MAY_FOLLOW: dict[str, frozenset[str]] = {
     _UNIT: frozenset({_HUNDRED, _THOUSAND, _JOIN_COMPOUND}),
     _TENS: frozenset({_UNIT, _THOUSAND}),
     _HUNDRED: frozenset({_UNIT, _TENS, _THOUSAND, _JOIN_SCALE, _JOIN_COMPOUND}),
-    _THOUSAND: frozenset({_UNIT, _TENS, _HUNDRED}),
+    _THOUSAND: frozenset({_UNIT, _TENS, _HUNDRED, _JOIN_SCALE, _JOIN_COMPOUND}),
     _JOIN_COMPOUND: frozenset({_TENS}),
     _JOIN_SCALE: frozenset({_UNIT, _TENS}),
 }
+
+_SCALE_KINDS = frozenset({_HUNDRED, _THOUSAND})
 
 _JOINER_KINDS = frozenset({_JOIN_COMPOUND, _JOIN_SCALE})
 
@@ -397,12 +406,17 @@ def _plain_form(text: str) -> str:
     source = _case_form(text)
     characters: list[str] = []
     for index, character in enumerate(source):
-        if character in _DASHES:
+        if character in ",./" and _between_digits(source, index):
+            # The slash is kept for the same reason as the comma and the
+            # full stop: "1/2" and "12" are different things, and turning
+            # the slash into a space would make the first look like the
+            # digits one and two read out separately. This test comes
+            # before the dash test because the slash is also a dash.
+            characters.append(character)
+        elif character in _DASHES:
             characters.append(" ")
         elif character in _APOSTROPHES:
             continue
-        elif character in ",." and _between_digits(source, index):
-            characters.append(character)
         elif unicodedata.category(character).startswith("P"):
             continue
         else:
@@ -425,14 +439,28 @@ def _number_form(text: str, dropped: bool) -> str:
 
 @lru_cache(maxsize=100_000)
 def _compound_form(text: str, dropped: bool) -> str:
-    """Contractions and word boundaries settled: the most permissive form."""
+    """Contractions and word boundaries settled: the most permissive form.
+
+    The words are run together so that "data base" meets "database". One
+    boundary survives: the one between a word ending in a digit and a word
+    starting with one. "1 2" is two numbers and "12" is one, and running
+    them together would make a half and twelve, or "twenty 5" and "205",
+    the same evidence. A digit next to a letter still joins, so "3kg" and
+    "3 kg" meet as before.
+    """
     words = _number_form(text, dropped).split()
     expanded: list[str] = []
     for word in words:
         expanded.extend(_CONTRACTIONS.get(word, word).split())
-    return "".join(expanded)
+    joined: list[str] = []
+    for word in expanded:
+        if joined and joined[-1][-1:].isdigit() and word[:1].isdigit():
+            joined.append(" ")
+        joined.append(word)
+    return "".join(joined)
 
 
+@lru_cache(maxsize=100_000)
 def _has_german_letter(text: str) -> bool:
     return any(character in _GERMAN_LETTERS for character in unicodedata.normalize("NFKC", text))
 
@@ -469,19 +497,36 @@ def _accumulate(items: Sequence[tuple[str, int]]) -> int | None:
     total = 0
     current = 0
     previous: str | None = None
+    before_previous: str | None = None
     for kind, value in items:
         if previous is None:
             if kind in _JOINER_KINDS:
                 return None
         elif kind not in _MAY_FOLLOW[previous]:
-            return None
+            # "und" and "en" normally lead to a tens word. Straight after a
+            # hundred or a thousand they may lead to a unit as well, as in
+            # "honderd en een", and nowhere else, because "vyf en ses" is
+            # not eleven.
+            scale_joiner = (
+                kind == _UNIT
+                and previous == _JOIN_COMPOUND
+                and before_previous in _SCALE_KINDS
+            )
+            if not scale_joiner:
+                return None
         if kind in (_UNIT, _TENS):
             current += value
         elif kind == _HUNDRED:
-            current = (current or 1) * 100
+            # A scale atom normally carries its own value, 100 or 1000. A
+            # joined compound such as "zweihundert" or "tweeduisend" arrives
+            # as one atom carrying the whole product, and that product is
+            # used as it is, so that "zweitausend fünf" reads as 2005 rather
+            # than as a thousand and five.
+            current = current * 100 if current else value
         elif kind == _THOUSAND:
-            total += (current or 1) * 1000
+            total += current * 1000 if current else value
             current = 0
+        before_previous = previous
         previous = kind
     if previous is None or previous in _JOINER_KINDS:
         return None
@@ -572,9 +617,14 @@ def _read_run(run: Sequence[tuple[str, int]]) -> int | None:
     nineteen followed by an eighty-four would drop the fact that the three
     words belong together, and the words are left exactly as they are
     instead. A run also has to name a quantity: a lone "thousand" with
-    nothing in front of it is the ordinary word, not the number 1000.
+    nothing in front of it is the ordinary word, not the number 1000. A
+    joined compound such as "zweihundert" has its quantity inside it, and
+    shows that by carrying a value other than the bare scale.
     """
-    if not any(kind in (_UNIT, _TENS) for kind, _value in run):
+    if not any(
+        kind in (_UNIT, _TENS) or (kind in _SCALE_KINDS and value not in (100, 1000))
+        for kind, value in run
+    ):
         return None
     return _accumulate(run)
 

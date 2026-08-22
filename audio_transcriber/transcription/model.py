@@ -891,11 +891,44 @@ class ProviderResult:
         """The spoken words, without punctuation, spacing or audio events."""
         return [token for token in self.tokens if token.is_spoken_word]
 
+    _by_index: tuple[list[ProviderToken], int, dict[int, ProviderToken]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    """A lookup from ``ProviderToken.index`` to the token, built when first
+    needed. See :meth:`token_at` for why it is keyed the way it is."""
+
     def token_at(self, index: int) -> ProviderToken | None:
-        for token in self.tokens:
-            if token.index == index:
-                return token
-        return None
+        """The token this service numbered ``index``, or ``None``.
+
+        Escalation planning, dispute building and the review report each
+        ask this once for every reference in every column, and a scan of
+        the token list for each of those took eight seconds per caller on
+        a three-hour recording. The answer comes from a dictionary instead,
+        built the first time it is needed.
+
+        This is a mutable dataclass, so the dictionary has to notice when
+        the tokens change underneath it. It remembers the very list it was
+        built from and that list's length, and is rebuilt when either
+        differs: a new list assigned to ``tokens``, or a token added to or
+        removed from the old one. Holding the list itself rather than its
+        identity means a list freed and replaced by another at the same
+        address cannot pass for it. What it cannot notice is a token being
+        replaced in place, ``tokens[3] = other``, with the length unchanged;
+        nothing in the application does that, and a caller that does must
+        assign a fresh list.
+
+        Where two tokens carry the same index, the first in the list wins,
+        as it did when this was a scan.
+        """
+        tokens = self.tokens
+        cached = self._by_index
+        if cached is None or cached[0] is not tokens or cached[1] != len(tokens):
+            by_index: dict[int, ProviderToken] = {}
+            for token in tokens:
+                by_index.setdefault(token.index, token)
+            self._by_index = (tokens, len(tokens), by_index)
+            cached = self._by_index
+        return cached[2].get(index)
 
 
 @dataclass

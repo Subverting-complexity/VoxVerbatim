@@ -22,12 +22,14 @@ import pytest
 
 from audio_transcriber.audio.enhance import OUTPUT_FORMATS
 from audio_transcriber.transcription.canonical import (
+    CanonicalAudioError,
     cut_window,
     prepare_canonical_audio,
     probe_audio,
 )
 from audio_transcriber.transcription.chunking import (
     ChunkingOptions,
+    chunk_rate_and_channels,
     merge_overlapping_tokens,
     plan_and_write_chunks,
     plan_chunks,
@@ -42,6 +44,7 @@ from audio_transcriber.transcription.model import (
 )
 from audio_transcriber.transcription.providers.base import ProviderCapabilities
 
+from tests.conftest import write_real_audio
 from tests.test_canonical import MARKER_TONES, dominant_tone, write_marker_audio
 
 WAV16, _WAV24, FLAC = OUTPUT_FORMATS
@@ -97,12 +100,38 @@ def write_gapped_audio(
             container.mux(packet)
 
 
-@pytest.fixture
-def canonical(tmp_path) -> CanonicalAudio:
-    """Six seconds of marker audio, settled as the canonical recording."""
+@pytest.fixture(params=[16000, 48000], ids=["16kHz", "48kHz"])
+def canonical(request, tmp_path) -> CanonicalAudio:
+    """Six seconds of marker audio, settled as the canonical recording.
+
+    It is made at two rates, because chunks are written at 16 kHz and the
+    recording that has to be resampled on its way out is the one whose
+    timing could be moved by the resampling.
+    """
     source = tmp_path / "marker.wav"
-    write_marker_audio(source)
+    write_marker_audio(source, rate=request.param)
     return prepare_canonical_audio(source, tmp_path / "work", {"wav"})
+
+
+#: A three-hour recording at the rate and channel count a phone or a field
+#: recorder produces, described rather than written: planning never opens
+#: the file for anything but the level measurement, which it can do without.
+THREE_HOURS_STEREO = CanonicalAudio(
+    path="missing-three-hour-recording.m4a",
+    original_path="missing-three-hour-recording.m4a",
+    duration=3 * 3600.0,
+    sample_rate=48000,
+    channels=2,
+    size_bytes=200 * 1024 * 1024,
+    container="m4a",
+)
+
+OPENAI_LIMIT = ProviderCapabilities(
+    maximum_file_bytes=25 * 1024 * 1024, accepted_containers=frozenset({"flac", "m4a"})
+)
+MICROSOFT_LIMIT = ProviderCapabilities(
+    maximum_file_bytes=250 * 1024 * 1024, accepted_containers=frozenset({"flac"})
+)
 
 
 # -- Planning -------------------------------------------------------------
@@ -132,7 +161,7 @@ def test_nothing_is_written_for_a_service_that_needs_no_chunks(canonical, tmp_pa
     written = write_chunks(canonical, plan_chunks(canonical, Provider.ELEVENLABS, GENEROUS), folder)
 
     assert written[0].path == canonical.path
-    assert list(folder.iterdir()) == []
+    assert not folder.exists(), "a folder with nothing in it is clutter beside the transcript"
 
 
 def test_a_service_with_a_tight_limit_gets_several_chunks(canonical):
@@ -195,15 +224,15 @@ def test_a_boundary_moves_to_the_quiet_moment_near_it(tmp_path):
     boundary is taken in preference to the boundary itself.
     """
     source = tmp_path / "gapped.wav"
-    write_gapped_audio(source, seconds=6, silent_from=1.3, silent_until=1.5)
+    write_gapped_audio(source, seconds=6, silent_from=1.05, silent_until=1.25)
     canonical = prepare_canonical_audio(source, tmp_path / "work", {"wav"})
 
     chunks = plan_chunks(canonical, Provider.OPENAI, TIGHT)
 
-    # The arithmetic would put the first hand-over at 1.25 seconds, in the
+    # The arithmetic would put the first hand-over at 1.0 seconds, in the
     # middle of the tone. The silence a little after it wins instead.
     handover = chunks[1].canonical_start + chunks[1].overlap_before
-    assert 1.3 <= handover <= 1.5
+    assert 1.05 <= handover <= 1.25
 
 
 def test_the_boundaries_are_the_same_every_time_the_same_recording_is_planned(tmp_path):
@@ -219,6 +248,69 @@ def test_the_boundaries_are_the_same_every_time_the_same_recording_is_planned(tm
     ]
 
 
+def test_chunks_are_planned_at_the_rate_they_will_be_written_at():
+    """Sizes are worked out from 16 kHz mono, because that is what is written.
+
+    Planned from the recording's own 48 kHz stereo, three hours would come
+    out as nearly ninety two-minute pieces for OpenAI, every one of them a
+    seam to be stitched on words alone. Planned from what the chunks really
+    hold, it is a dozen or so pieces of about a quarter of an hour.
+    """
+    options = ChunkingOptions(overlap_seconds=8.0)
+
+    openai = plan_chunks(THREE_HOURS_STEREO, Provider.OPENAI, OPENAI_LIMIT, options)
+    microsoft = plan_chunks(THREE_HOURS_STEREO, Provider.MICROSOFT, MICROSOFT_LIMIT, options)
+
+    assert 12 <= len(openai) <= 15
+    assert len(microsoft) == 2
+    for chunk in openai:
+        assert 10 * 60 <= chunk.canonical_end - chunk.canonical_start <= 15 * 60
+        assert chunk.encoded_size_bytes <= OPENAI_LIMIT.maximum_file_bytes
+    assert chunk_rate_and_channels(THREE_HOURS_STEREO, options) == (16000, 1)
+
+
+def test_a_recording_is_never_upsampled_or_given_channels_for_its_chunks():
+    low = CanonicalAudio(
+        path="low.wav",
+        original_path="low.wav",
+        duration=60.0,
+        sample_rate=8000,
+        channels=1,
+        size_bytes=960_000,
+        container="wav",
+    )
+
+    assert chunk_rate_and_channels(low, ChunkingOptions()) == (8000, 1)
+    assert chunk_rate_and_channels(
+        THREE_HOURS_STEREO, ChunkingOptions(chunk_sample_rate=22050, chunk_channels=2)
+    ) == (22050, 2)
+
+
+def test_the_pieces_are_the_same_length_rather_than_leaving_a_scrap_at_the_end():
+    """Three hours should not end in a twenty-second chunk that costs a request."""
+    chunks = plan_chunks(THREE_HOURS_STEREO, Provider.OPENAI, OPENAI_LIMIT)
+
+    lengths = [chunk.canonical_end - chunk.canonical_start for chunk in chunks]
+    assert max(lengths) - min(lengths) < 30.0
+
+
+def test_a_recording_the_levels_of_which_cannot_be_measured_is_still_chunked(
+    monkeypatch, canonical
+):
+    """Quiet boundaries are a preference; a transcript is not to be lost over them."""
+    import av
+
+    def broken_open(*args, **kwargs):
+        raise RuntimeError("no decoder today")
+
+    monkeypatch.setattr(av, "open", broken_open)
+
+    chunks = plan_chunks(canonical, Provider.OPENAI, TIGHT)
+
+    assert len(chunks) > 1
+    assert chunks[-1].canonical_end == pytest.approx(canonical.duration)
+
+
 def test_a_recording_in_a_format_a_service_will_not_take_is_converted_whole(canonical):
     """One chunk, covering everything, but written out rather than pointed at."""
     capabilities = ProviderCapabilities(accepted_containers=frozenset({"mp3"}))
@@ -229,6 +321,46 @@ def test_a_recording_in_a_format_a_service_will_not_take_is_converted_whole(cano
     assert chunks[0].canonical_offset == 0.0
     assert chunks[0].canonical_end == pytest.approx(canonical.duration)
     assert chunks[0].path is None, "it has to be written before it can be sent"
+
+
+def test_the_overlap_is_widened_until_it_holds_speech(tmp_path):
+    """An overlap counted back from a pause holds the pause, not words.
+
+    The boundary is put in the silence on purpose, so the seconds before it
+    are silent too, and a join made on words has nothing to work with. The
+    overlap therefore grows backwards until enough of it is above the noise
+    floor, within the bound the size arithmetic holds back for it.
+    """
+    source = tmp_path / "gapped.wav"
+    write_gapped_audio(source, seconds=6, silent_from=1.3, silent_until=1.6)
+    canonical = prepare_canonical_audio(source, tmp_path / "work", {"wav"})
+    capabilities = ProviderCapabilities(
+        maximum_file_bytes=5 * 1024 * 1024 * 1024, maximum_duration_seconds=4.0
+    )
+    widened = ChunkingOptions(
+        overlap_seconds=0.1,
+        maximum_overlap_seconds=0.4,
+        minimum_voiced_overlap_seconds=0.2,
+        boundary_search_seconds=0.4,
+        minimum_chunk_seconds=0.4,
+    )
+    plain = ChunkingOptions(
+        overlap_seconds=0.1,
+        maximum_overlap_seconds=0.4,
+        minimum_voiced_overlap_seconds=0.0,
+        boundary_search_seconds=0.4,
+        minimum_chunk_seconds=0.4,
+    )
+
+    with_speech = plan_chunks(canonical, Provider.OPENAI, capabilities, widened)
+    without = plan_chunks(canonical, Provider.OPENAI, capabilities, plain)
+
+    handover = with_speech[1].canonical_start + with_speech[1].overlap_before
+    assert 1.3 <= handover <= 1.6, "the boundary should still fall in the pause"
+    assert without[1].overlap_before == pytest.approx(0.1)
+    assert with_speech[1].overlap_before > 0.1
+    assert with_speech[1].overlap_before <= 0.4
+    assert with_speech[1].canonical_start <= 1.3 - 0.2, "two tenths of tone should be inside"
 
 
 # -- Writing --------------------------------------------------------------
@@ -245,6 +377,107 @@ def test_the_chunk_files_are_written_and_are_as_long_as_they_claim(canonical, tm
         )
         assert chunk.encoded_size_bytes == written.size_bytes
         assert chunk.encoded_size_bytes <= TIGHT.maximum_file_bytes
+
+
+def test_the_chunks_are_written_as_sixteen_kilohertz_mono_flac(tmp_path):
+    """What a service folds the audio to anyway is all a chunk need carry.
+
+    The canonical recording is left at 48 kHz stereo; only the pieces written
+    for the service are reduced, and each says what it was written as.
+    """
+    source = tmp_path / "stereo.wav"
+    write_real_audio(source, seconds=3.0, codec="pcm_s16le", layout="stereo", rate=48000)
+    canonical = prepare_canonical_audio(source, tmp_path / "work", {"wav"})
+    assert canonical.sample_rate == 48000 and canonical.channels == 2
+
+    chunks = plan_and_write_chunks(canonical, Provider.OPENAI, TIGHT, tmp_path / "chunks")
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        written = probe_audio(Path(chunk.path))
+        assert written.sample_rate == 16000
+        assert written.channels == 1
+        assert written.codec == "flac"
+        assert written.duration == pytest.approx(
+            chunk.canonical_end - chunk.canonical_start, abs=0.01
+        )
+    untouched = probe_audio(Path(canonical.path))
+    assert untouched.sample_rate == 48000 and untouched.channels == 2
+
+
+def test_the_chunk_rate_is_an_option_so_it_can_be_turned_off(canonical, tmp_path):
+    options = ChunkingOptions(chunk_sample_rate=96000, chunk_channels=8)
+
+    chunks = plan_and_write_chunks(canonical, Provider.OPENAI, TIGHT, tmp_path / "chunks", options)
+
+    for chunk in chunks:
+        written = probe_audio(Path(chunk.path))
+        assert written.sample_rate == canonical.sample_rate
+        assert written.channels == canonical.channels
+
+
+def test_a_chunk_that_comes_out_over_the_limit_is_cut_again(canonical, tmp_path):
+    """An estimate can be wrong; a chunk the service will refuse must not be sent.
+
+    The plan here claims the whole recording fits in one piece, and the
+    limit is set below what that piece really comes to, so the writer has to
+    notice and cut the piece in two until everything fits.
+    """
+    whole = ChunkRecord(
+        provider=Provider.OPENAI,
+        chunk_index=0,
+        canonical_start=0.0,
+        canonical_end=canonical.duration,
+        canonical_offset=0.0,
+        encoded_size_bytes=1,
+    )
+    folder = tmp_path / "chunks"
+    as_one_piece = cut_window(
+        canonical,
+        AudioSpan(0.0, canonical.duration),
+        tmp_path / "whole.flac",
+        FLAC,
+        sample_rate=16000,
+        channels=1,
+    )
+    limit = ProviderCapabilities(maximum_file_bytes=int(as_one_piece.size_bytes * 0.6))
+
+    written = write_chunks(canonical, [whole], folder, capabilities=limit)
+
+    assert len(written) > 1
+    assert [chunk.chunk_index for chunk in written] == list(range(len(written)))
+    assert written[0].canonical_start == 0.0
+    assert written[-1].canonical_end == pytest.approx(canonical.duration, abs=0.01)
+    for chunk in written:
+        assert chunk.encoded_size_bytes <= limit.maximum_file_bytes
+        assert Path(chunk.path).name == f"openai-chunk-{chunk.chunk_index:03d}.flac"
+        assert chunk.canonical_offset == chunk.canonical_start
+    for earlier, later in zip(written, written[1:]):
+        assert later.canonical_start < earlier.canonical_end, "the halves must overlap"
+        assert later.overlap_before == pytest.approx(earlier.canonical_end - later.canonical_start)
+    assert sorted(path.name for path in folder.iterdir()) == [
+        Path(chunk.path).name for chunk in written
+    ], "the piece that was too big must not be left on disc"
+
+
+def test_a_chunk_that_cannot_be_cut_small_enough_is_refused_in_words(canonical, tmp_path):
+    scrap = ChunkRecord(
+        provider=Provider.OPENAI,
+        chunk_index=0,
+        canonical_start=1.0,
+        canonical_end=1.5,
+        canonical_offset=1.0,
+        encoded_size_bytes=1,
+    )
+    impossible = ProviderCapabilities(maximum_file_bytes=10)
+
+    with pytest.raises(CanonicalAudioError) as caught:
+        write_chunks(canonical, [scrap], tmp_path / "chunks", capabilities=impossible)
+
+    message = str(caught.value)
+    assert "Chunk 0" in message
+    assert "OpenAI" in message
+    assert "10 byte limit" in message
 
 
 def test_a_time_inside_a_chunk_adds_up_to_the_right_canonical_time(canonical, tmp_path):

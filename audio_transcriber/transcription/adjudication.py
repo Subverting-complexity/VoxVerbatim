@@ -679,7 +679,12 @@ class Adjudicator:
         """
         _log.info("Adjudication settled nothing this time: %s", reason)
         for dispute in disputes:
-            _decline(dispute, reason)
+            # The model did not decline these; it was never heard. The words
+            # keep the confidence reconciliation gave them and are flagged,
+            # rather than being marked unresolved, because a request that
+            # failed is not evidence that a word is wrong, and marking it so
+            # would print every one of them as [UNCERTAIN] in the export.
+            _decline(dispute, reason, lower_confidence=False)
         record = None
         if arguments is not None:
             record = self._request_record(
@@ -1126,10 +1131,18 @@ def _identity_of(token: FinalToken) -> tuple[Any, ...]:
     )
 
 
-def _decline(dispute: Dispute, reason: str) -> None:
-    """Leave the span exactly as it was, and make sure a person sees it."""
+def _decline(dispute: Dispute, reason: str, lower_confidence: bool = True) -> None:
+    """Leave the span exactly as it was, and make sure a person sees it.
+
+    A decline the model actually made lowers the word to unresolved: the
+    best-placed judge looked at the readings and would not choose, which is
+    the definition of an open question. ``lower_confidence`` is False when
+    the model was never reached, since then nothing has been learned about
+    the word and its confidence should stay what the evidence gave it.
+    """
     for token in dispute.tokens:
-        token.text_confidence = Confidence.UNRESOLVED
+        if lower_confidence:
+            token.text_confidence = Confidence.UNRESOLVED
         token.flag(ReviewReason.ADJUDICATION_DECLINED)
         if dispute.is_high_risk:
             token.flag(ReviewReason.HIGH_RISK_ENTITY)

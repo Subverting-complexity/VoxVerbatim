@@ -48,12 +48,14 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from audio_transcriber.audio.enhance import OUTPUT_FORMATS, OutputFormat
 from audio_transcriber.transcription.canonical import (
+    CanonicalAudioError,
     cut_window,
     estimate_lossless_bytes,
     lossless_bytes_per_second,
@@ -73,6 +75,29 @@ _log = logging.getLogger(__name__)
 #: chunking accepts it, and it holds about half as much audio per byte as
 #: PCM, which directly halves the number of boundaries a long recording needs.
 DEFAULT_CHUNK_FORMAT: OutputFormat = OUTPUT_FORMATS[2]
+
+#: The rate and channel count chunks are written at. Every speech service
+#: folds whatever it is sent down to 16 kHz mono before it listens, so
+#: nothing above that ever reaches the model; it only makes the file bigger,
+#: and the size of the file is the one reason a recording is chunked at all.
+#: A three-hour 48 kHz stereo recording written at its own rate needs nearly
+#: ninety chunks for OpenAI; written at 16 kHz mono it needs about thirteen.
+DEFAULT_CHUNK_SAMPLE_RATE = 16000
+DEFAULT_CHUNK_CHANNELS = 1
+
+#: How far below the recording's speaking level a measured window may fall
+#: and still be taken to hold speech rather than a pause. Room tone in an
+#: ordinary recording sits twenty-five to forty decibels below the speech,
+#: and a quietly spoken tail of a sentence sits within twenty of it. On a
+#: recording so noisy that the room is within twenty decibels of the speech,
+#: every window counts as speech and the overlap simply stays at its least,
+#: which is no worse than not measuring at all.
+_VOICED_WITHIN_DB_OF_SPEECH = 20.0
+
+#: Which measured level is taken as the speaking level. The loudest single
+#: window is a shout or a knock; the loudest tenth of the recording is the
+#: voice.
+_SPEECH_LEVEL_QUANTILE = 0.9
 
 #: The fastest anyone speaks, in words a second, used only to work out how
 #: many words could possibly fall inside an overlap. Being generous here
@@ -97,6 +122,17 @@ class ChunkingOptions:
 
     output_format: OutputFormat = DEFAULT_CHUNK_FORMAT
 
+    chunk_sample_rate: int = DEFAULT_CHUNK_SAMPLE_RATE
+    """The sample rate chunks are written at, where the recording's is higher.
+
+    The recording is never upsampled, because that would add bytes without
+    adding audio. The canonical file itself is not touched by this; only the
+    pieces written for a service are.
+    """
+
+    chunk_channels: int = DEFAULT_CHUNK_CHANNELS
+    """How many channels a chunk carries, where the recording has more."""
+
     safety_fraction: float = 0.8
     """How much of a service's limit a chunk may use.
 
@@ -106,10 +142,29 @@ class ChunkingOptions:
     """
 
     overlap_seconds: float = 3.0
-    """How much of the previous chunk each chunk repeats.
+    """How much of the previous chunk each chunk repeats, at the least.
 
     Long enough to hold several words, because the words are what the join
     is made on where a service gives no times.
+    """
+
+    minimum_voiced_overlap_seconds: float = 2.0
+    """How much of the overlap has to hold speech rather than silence.
+
+    A boundary is put at a quiet moment on purpose, which means the seconds
+    just before it are often quiet too. An overlap counted back from the
+    boundary can then hold nothing but the pause, and a join made on words
+    has no words to make it on. So the overlap is widened, a measured window
+    at a time, until this much of it is above the noise floor, and no
+    further than :attr:`maximum_overlap_seconds`.
+    """
+
+    maximum_overlap_seconds: float = 24.0
+    """The most an overlap may grow to in search of speech.
+
+    This, rather than ``overlap_seconds``, is what the size arithmetic holds
+    back for each chunk, so a widened overlap can never push a chunk over a
+    service's limit.
     """
 
     minimum_chunk_seconds: float = 10.0
@@ -231,12 +286,15 @@ def plan_chunks(
             )
         ]
 
+    rate, channels = chunk_rate_and_channels(canonical, options)
     hard_seconds = _longest_acceptable_chunk(canonical, capabilities, options)
-    converted_whole = estimate_lossless_bytes(
-        duration, canonical.sample_rate, canonical.channels, options.output_format
-    )
+    converted_whole = estimate_lossless_bytes(duration, rate, channels, options.output_format)
+    # The same margin a chunk is given is given to a whole recording written
+    # out for a service: an estimate that lands within a few per cent of the
+    # limit is not a fit, it is a request that fails on a noisy recording.
     fits_once_converted = (
-        duration <= hard_seconds and converted_whole <= capabilities.maximum_file_bytes
+        duration <= hard_seconds
+        and converted_whole <= capabilities.maximum_file_bytes * options.safety_fraction
     )
     if fits_once_converted:
         # The recording is short enough; it is only in the wrong format. One
@@ -253,8 +311,25 @@ def plan_chunks(
             )
         ]
 
-    boundaries = _choose_boundaries(canonical, hard_seconds, options)
-    return _records_for(canonical, provider, boundaries, hard_seconds, options)
+    tenth = hard_seconds * 0.1
+    search = min(options.boundary_search_seconds, tenth)
+    levels = _measure_levels(Path(canonical.path), options) if search > 0.0 else []
+    boundaries = _choose_boundaries(canonical, hard_seconds, options, levels)
+    return _records_for(canonical, provider, boundaries, hard_seconds, options, levels)
+
+
+def chunk_rate_and_channels(
+    canonical: CanonicalAudio, options: ChunkingOptions
+) -> tuple[int, int]:
+    """The rate and channel count the chunks of this recording are written at.
+
+    Each is the lower of what the options ask for and what the recording
+    has. Nothing is ever upsampled or given extra channels, because a chunk
+    is only ever smaller than the audio it was cut from or the same.
+    """
+    rate = min(canonical.sample_rate, max(1, int(options.chunk_sample_rate)))
+    channels = min(canonical.channels, max(1, int(options.chunk_channels)))
+    return rate, channels
 
 
 def _longest_acceptable_chunk(
@@ -266,48 +341,75 @@ def _longest_acceptable_chunk(
 
     Both of the service's limits are turned into a length in seconds so that
     one number governs the plan. The size limit becomes a length because the
-    chunks are written losslessly, at a fixed number of bytes a second.
+    chunks are written losslessly, at a fixed number of bytes a second, and
+    the bytes a second are those of the rate and channel count the chunks
+    are actually written at rather than the recording's own.
     """
-    per_second = lossless_bytes_per_second(
-        canonical.sample_rate, canonical.channels, options.output_format
-    )
+    rate, channels = chunk_rate_and_channels(canonical, options)
+    per_second = lossless_bytes_per_second(rate, channels, options.output_format)
     seconds = capabilities.maximum_file_bytes / max(1.0, per_second)
     if capabilities.maximum_duration_seconds is not None:
         seconds = min(seconds, capabilities.maximum_duration_seconds)
     return max(1.0, seconds)
 
 
+def _overlap_bounds(hard_seconds: float, options: ChunkingOptions) -> tuple[float, float]:
+    """The least and the most a chunk may repeat of the one before it.
+
+    Both are capped at a tenth of the longest acceptable chunk, so that a
+    service with a very tight limit is not asked to spend most of every
+    request on repetition.
+    """
+    tenth = hard_seconds * 0.1
+    least = min(options.overlap_seconds, tenth)
+    most = min(max(options.maximum_overlap_seconds, least), tenth)
+    return least, most
+
+
 def _choose_boundaries(
     canonical: CanonicalAudio,
     hard_seconds: float,
     options: ChunkingOptions,
+    levels: Sequence[tuple[float, float]] = (),
 ) -> list[float]:
     """Pick the points at which one chunk hands over to the next.
 
     The arithmetic that keeps every chunk inside the limit is worth setting
     out, because it is what makes this safe rather than merely likely to
-    work. The overlap, the search margin and the minimum tail are each capped
-    at a tenth of the limit, and the target length is the safety fraction of
-    the limit with all three subtracted. A chunk is then at most the overlap
-    plus the target plus the search margin plus the tail it may absorb, which
+    work. The widest overlap allowed, the search margin and the minimum tail
+    are each capped at a tenth of the limit, and the target length is the
+    safety fraction of the limit with the overlap, the search margin twice
+    over and the tail subtracted. A chunk is then at most the overlap, plus
+    the target, plus a search margin at each end where one hand-over was
+    pulled early and the next pushed late, plus the tail it may absorb, which
     adds back up to exactly the safety fraction of the limit. No chunk can
-    exceed it, whatever the silence search decides.
+    exceed it, whatever the silence search decides and however far the
+    overlap is widened in search of speech.
     """
     duration = max(0.0, canonical.duration)
     tenth = hard_seconds * 0.1
-    overlap = min(options.overlap_seconds, tenth)
+    _, overlap = _overlap_bounds(hard_seconds, options)
     search = min(options.boundary_search_seconds, tenth)
     minimum = min(options.minimum_chunk_seconds, tenth)
-    target = hard_seconds * options.safety_fraction - overlap - search - minimum
+    target = hard_seconds * options.safety_fraction - overlap - 2.0 * search - minimum
     if target <= 0.0:
         target = hard_seconds * 0.5
 
-    levels = _measure_levels(Path(canonical.path), options) if search > 0.0 else []
+    # The hand-overs are spread evenly rather than placed one target length
+    # apart. Placing them a target apart leaves whatever does not divide as a
+    # scrap on the end, and a three-hour recording can end in a chunk twenty
+    # seconds long that costs a request and a join for almost nothing.
+    # Spreading them gives pieces of the same length, each no longer than the
+    # target, so the size arithmetic above still holds.
+    count = max(1, int(math.ceil(duration / target))) if target > 0.0 else 1
+    spacing = duration / count
 
     boundaries = [0.0]
     position = 0.0
-    while duration - position > target + minimum:
-        ideal = position + target
+    for number in range(1, count):
+        ideal = spacing * number
+        if duration - ideal <= minimum:
+            break
         boundary = _quietest_near(levels, ideal, search, options.measurement_seconds)
         # However attractive a quiet moment is, a boundary may not shorten a
         # chunk below the minimum, push it past the search margin, or leave a
@@ -327,6 +429,7 @@ def _records_for(
     boundaries: Sequence[float],
     hard_seconds: float,
     options: ChunkingOptions,
+    levels: Sequence[tuple[float, float]] = (),
 ) -> list[ChunkRecord]:
     """Turn a list of hand-over points into chunk plans with their overlaps.
 
@@ -334,12 +437,19 @@ def _records_for(
     is what :class:`ChunkRecord` means by ``overlap_before``. Chunk two
     therefore starts a few seconds before chunk one ends, and the region they
     share is the region the join is made in.
+
+    Because each hand-over was put at a quiet moment, the seconds before it
+    are the quiet ones, so the overlap is widened backwards until it holds
+    enough speech for a join to be made on, within the bound the size
+    arithmetic allows for.
     """
-    tenth = hard_seconds * 0.1
-    overlap = min(options.overlap_seconds, tenth)
+    least, most = _overlap_bounds(hard_seconds, options)
+    speech = _speech_level(levels)
+    rate, channels = chunk_rate_and_channels(canonical, options)
     records: list[ChunkRecord] = []
     for index in range(len(boundaries) - 1):
         handover = boundaries[index]
+        overlap = _overlap_holding_speech(levels, speech, handover, least, most, options)
         start = max(0.0, handover - overlap) if index > 0 else 0.0
         end = boundaries[index + 1]
         records.append(
@@ -350,12 +460,60 @@ def _records_for(
                 canonical_end=end,
                 canonical_offset=start,
                 encoded_size_bytes=estimate_lossless_bytes(
-                    end - start, canonical.sample_rate, canonical.channels, options.output_format
+                    end - start, rate, channels, options.output_format
                 ),
                 overlap_before=handover - start,
             )
         )
     return records
+
+
+def _speech_level(levels: Sequence[tuple[float, float]]) -> float:
+    """What the spoken parts of this recording measure, in decibels."""
+    if not levels:
+        return _SILENT_LEVEL_DB
+    ordered = sorted(level for _, level in levels)
+    position = min(len(ordered) - 1, int(len(ordered) * _SPEECH_LEVEL_QUANTILE))
+    return ordered[position]
+
+
+def _overlap_holding_speech(
+    levels: Sequence[tuple[float, float]],
+    speech: float,
+    handover: float,
+    least: float,
+    most: float,
+    options: ChunkingOptions,
+) -> float:
+    """How far before ``handover`` the overlap has to reach to contain speech.
+
+    It starts at the least overlap and grows backwards one measured window
+    at a time until the wanted amount of speech lies inside it, or until it
+    reaches the most the arithmetic allows. Without level measurements the
+    least overlap is used as it is, because there is nothing to widen on.
+    A window counts as speech when it is within a fixed distance of the
+    recording's speaking level, ``speech``.
+    """
+    wanted = max(0.0, options.minimum_voiced_overlap_seconds)
+    if not levels or wanted <= 0.0 or most <= least:
+        return least
+    window = max(1e-3, options.measurement_seconds)
+    threshold = speech - _VOICED_WITHIN_DB_OF_SPEECH
+    # Only the windows that could ever fall inside the widest overlap matter,
+    # and they are wanted nearest the hand-over first.
+    earliest = handover - most
+    candidates = sorted(
+        (start for start, level in levels if earliest <= start < handover and level > threshold),
+        reverse=True,
+    )
+    voiced = 0.0
+    overlap = least
+    for start in candidates:
+        if voiced >= wanted:
+            break
+        overlap = max(overlap, min(most, handover - start))
+        voiced += window
+    return min(most, overlap)
 
 
 # -- Finding the quiet places --------------------------------------------
@@ -413,12 +571,13 @@ def _measure_levels(path: Path, options: ChunkingOptions) -> list[tuple[float, f
                 drain()
             graph.push(None)
             drain()
-    except (OSError, IndexError, av.FFmpegError) as error:
+    except Exception as error:  # noqa: BLE001 - any failure here is survivable
         # Failing here costs only the preference for quiet boundaries, so it
         # is noted and the plan carries on with boundaries where the
         # arithmetic put them. Letting it escape would turn a cosmetic
-        # problem into a lost transcript.
-        _log.debug("The levels of %s could not be measured: %s", path, error)
+        # problem into a lost transcript, and that holds whatever the
+        # failure was, not only for the errors FFmpeg names.
+        _log.warning("The levels of %s could not be measured: %s", path, error)
         return []
     return levels
 
@@ -488,47 +647,107 @@ def write_chunks(
     planned. Those are almost always the same; where they are not, it is
     because the recording ended sooner than its header claimed, and a chunk
     that reported the planned span would push every word in it out of place.
+
+    The chunks are written at the rate and channel count the options ask
+    for, which is what the plan's sizes were estimated from. The canonical
+    file is left exactly as it is.
+
+    Where ``capabilities`` are given, every written chunk is checked against
+    the service's size limit. A chunk that came out over it, which the
+    pessimistic estimate makes very unlikely, is deleted and cut again as two
+    halves, with an overlap between them, until every piece fits; the
+    finished chunks are then numbered again in order. Sending the chunk on
+    regardless would only have it refused by the service, after the time
+    spent uploading it. A piece that is still too big once it is down to a
+    second of audio is reported as an error, because something other than
+    its length is wrong with it.
+
+    The folder is made only when a chunk is actually written, so a service
+    that takes the recording whole leaves no empty folder behind.
     """
-    folder.mkdir(parents=True, exist_ok=True)
+    rate, channels = chunk_rate_and_channels(canonical, options)
+    limit = None if capabilities is None else capabilities.maximum_file_bytes
+    least_overlap = min(options.overlap_seconds, options.maximum_overlap_seconds)
     written: list[ChunkRecord] = []
-    for plan in plans:
+    pending = deque(plans)
+    while pending:
+        plan = pending.popleft()
         if plan.path:
             written.append(plan)
             continue
+        index = len(written)
+        folder.mkdir(parents=True, exist_ok=True)
         destination = folder / (
-            f"{plan.provider.value}-chunk-{plan.chunk_index:03d}{options.output_format.extension}"
+            f"{plan.provider.value}-chunk-{index:03d}{options.output_format.extension}"
         )
         clip = cut_window(
             canonical,
             AudioSpan(plan.canonical_start, plan.canonical_end),
             destination,
             options.output_format,
+            sample_rate=rate,
+            channels=channels,
         )
+        if limit is not None and clip.size_bytes > limit:
+            clip.path.unlink(missing_ok=True)
+            length = plan.canonical_end - plan.canonical_start
+            if length <= 1.0:
+                raise CanonicalAudioError(
+                    f"Chunk {index} of {Path(canonical.path).name}, covering "
+                    f"{plan.canonical_start:.1f} to {plan.canonical_end:.1f} seconds, came out "
+                    f"at {clip.size_bytes} bytes, over the {limit} byte limit for "
+                    f"{plan.provider.display_name}, and it cannot be cut any smaller."
+                )
+            _log.warning(
+                "Chunk %d of %s came out at %d bytes, over the %d byte limit for %s, "
+                "so it is being cut in two.",
+                index,
+                canonical.path,
+                clip.size_bytes,
+                limit,
+                plan.provider.display_name,
+            )
+            pending.extendleft(reversed(_halved(plan, least_overlap)))
+            continue
         # A clip that starts later than planned has that much less of the
         # previous chunk in front of it, and the overlap has to shrink with
         # it or the join would be made in a region one of the chunks does not
         # contain.
         lost_at_the_front = max(0.0, clip.span.start - plan.canonical_start)
-        record = replace(
-            plan,
-            canonical_start=clip.span.start,
-            canonical_end=clip.span.end,
-            canonical_offset=clip.canonical_offset,
-            encoded_size_bytes=clip.size_bytes,
-            path=str(clip.path),
-            overlap_before=max(0.0, plan.overlap_before - lost_at_the_front),
-        )
-        if capabilities is not None and record.encoded_size_bytes > capabilities.maximum_file_bytes:
-            _log.warning(
-                "Chunk %d of %s came out at %d bytes, over the %d byte limit for %s.",
-                record.chunk_index,
-                canonical.path,
-                record.encoded_size_bytes,
-                capabilities.maximum_file_bytes,
-                plan.provider.display_name,
+        written.append(
+            replace(
+                plan,
+                chunk_index=index,
+                canonical_start=clip.span.start,
+                canonical_end=clip.span.end,
+                canonical_offset=clip.canonical_offset,
+                encoded_size_bytes=clip.size_bytes,
+                path=str(clip.path),
+                overlap_before=max(0.0, plan.overlap_before - lost_at_the_front),
             )
-        written.append(record)
+        )
     return written
+
+
+def _halved(plan: ChunkRecord, overlap: float) -> list[ChunkRecord]:
+    """Two plans covering what one did, overlapping in the middle.
+
+    The first half keeps the overlap the original had in front of it. The
+    second starts a little before the middle, so that the join between the
+    two can be made the same way as any other, and the overlap is kept to a
+    quarter of the half so that halving always makes real progress.
+    """
+    start, end = plan.canonical_start, plan.canonical_end
+    middle = (start + end) / 2.0
+    repeat = min(max(0.0, overlap), (end - start) / 4.0)
+    first = replace(plan, canonical_end=middle)
+    second = replace(
+        plan,
+        canonical_start=middle - repeat,
+        canonical_offset=middle - repeat,
+        overlap_before=repeat,
+    )
+    return [first, second]
 
 
 def plan_and_write_chunks(

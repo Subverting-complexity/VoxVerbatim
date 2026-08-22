@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QByteArray, QModelIndex, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QLabel,
     QMainWindow,
@@ -119,6 +120,9 @@ class MainWindow(QMainWindow):
             self._settings_store.path.parent / CALIBRATION_FILE_NAME
         )
         self._review_window: ReviewWindow | None = None
+        # Whether a review is part way through being opened, which can take
+        # a while and lets the event loop run in between; see open_project_review.
+        self._opening_review = False
         # The review window's player, kept here only so that it can be
         # stopped the moment the window is asked to go. It belongs to the
         # window and Qt destroys it with the window; see _close_review_window.
@@ -723,6 +727,22 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dialog.exec()
+        if dialog.is_stopping_in_background:
+            # Closed on a run that had been asked to stop and was still
+            # waiting on a service. The dialog is left alive until the run
+            # has stopped, because the runner inside it is what the run
+            # reports to and what withdraws the request keeping the machine
+            # awake; the dialog gets rid of itself once the summary arrives.
+            # The person is told plainly, because a window that closed on a
+            # running job and said nothing would leave them wondering whether
+            # the recordings already done had been kept.
+            self._set_status(
+                "Transcribe was closed while the run was still stopping. It stops by "
+                "itself when the request it is waiting on comes back. Recordings "
+                "already transcribed are saved beside their recordings.",
+                alert=True,
+            )
+            return
         summary = dialog.summary
         review = dialog.review_request
         # The dialog belongs to this window, so closing it does not get rid of
@@ -733,7 +753,7 @@ class MainWindow(QMainWindow):
             self._set_status(summarise_transcription(summary), alert=True)
         else:
             self._set_status("Transcribe was closed without transcribing anything.")
-        if review is not None and review.transcript is not None:
+        if review is not None and review.succeeded:
             # Asked for from inside the dialog, and answered out here. The
             # dialog is modal, so a review window opened from within it would
             # appear behind something the user cannot dismiss.
@@ -788,6 +808,18 @@ class MainWindow(QMainWindow):
 
         Returns the window, or ``None`` when there was nothing to open it on.
         """
+        if self._opening_review:
+            # The window gives the event loop a turn between transcripts so
+            # that it can repaint, and that turn is enough for a second
+            # Ctrl+R to arrive. Starting a second opening inside the first
+            # would read the folder twice and save the project twice, so the
+            # second is refused and says why.
+            self._set_status(
+                "The review is still being opened. Wait for it to appear.",
+                alert=True,
+                urgent=True,
+            )
+            return None
         if self._folder is None:
             self._set_status(
                 "Select a folder before reviewing. A review covers the whole folder "
@@ -824,7 +856,37 @@ class MainWindow(QMainWindow):
         # review would show none of its words. Closing first means the two
         # writes happen in the order they were caused in.
         self._close_review_window()
-        reader = _TranscriptReader(stores)
+        # Said before the first transcript is read rather than after, because
+        # reading is the slow part. A folder of long recordings is minutes of
+        # parsing on this thread, during which the window cannot repaint and
+        # a screen reader has nothing new to say, so the person is told what
+        # is happening and roughly why it is taking a while. The cursor says
+        # the same thing to anybody who can see it.
+        self._set_status(
+            f"Reading {_count(len(recording_names), 'transcript')} in this folder. "
+            "This can take a while.",
+            alert=True,
+            urgent=True,
+        )
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._opening_review = True
+        try:
+            return self._open_project_review_after_saying_so(
+                land_on, recording_names, recording_paths, stores
+            )
+        finally:
+            self._opening_review = False
+            QApplication.restoreOverrideCursor()
+
+    def _open_project_review_after_saying_so(
+        self,
+        land_on: str | None,
+        recording_names: list[str],
+        recording_paths: dict[str, Path],
+        stores: dict[str, TranscriptStore],
+    ) -> ReviewWindow | None:
+        """The part of :meth:`open_project_review` that does the reading."""
+        reader = _TranscriptReader(stores, between_recordings=_let_the_window_breathe)
         project_store = ProjectStore(self._folder)
         # Loading this folder's own project is what resumes it: the groups,
         # the decisions, the rules, the settings and the marker saying where
@@ -1708,9 +1770,16 @@ class _TranscriptReader:
         self,
         stores: dict[str, TranscriptStore],
         on_damaged=None,
+        between_recordings: Callable[[], None] | None = None,
     ) -> None:
         self._stores = stores
         self.on_damaged = on_damaged
+        # Called just before each transcript is actually parsed, and only
+        # then: a transcript answered from the one in hand costs nothing and
+        # is the inner loop of reviewing. What the opening sequence passes
+        # here lets the window repaint and a screen reader speak between one
+        # recording's tens of megabytes and the next's.
+        self.between_recordings = between_recordings
         self._name: str | None = None
         self._transcript: Transcript | None = None
         self._damaged: list[str] = []
@@ -1729,6 +1798,14 @@ class _TranscriptReader:
         """The transcript of one recording, or ``None`` if it cannot be read."""
         if recording_name == self._name:
             return self._transcript
+        # The one in hand is let go before the next is read rather than
+        # after, so that two transcripts are never held at once. A three-hour
+        # recording parses to something like 90 MB, and the peak is what
+        # decides whether a folder of them fits.
+        self._name = None
+        self._transcript = None
+        if self.between_recordings is not None:
+            self.between_recordings()
         store = self._stores.get(recording_name)
         transcript = None if store is None else store.load()
         if transcript is None and recording_name not in self._damaged:
@@ -1757,6 +1834,20 @@ class _TranscriptReader:
     def transcript_path(self, recording_name: str) -> Path | None:
         store = self._stores.get(recording_name)
         return None if store is None else store.transcript_path
+
+
+def _let_the_window_breathe() -> None:
+    """Let the window repaint and the screen reader speak, then carry on.
+
+    Reading a folder's transcripts is done on the thread that draws the
+    window, one recording at a time, and each one can take seconds. Without
+    this the window is marked "not responding" part way through and the
+    sentence announced at the start is the last thing a screen reader says
+    until the end. Called between recordings only, never inside one.
+    """
+    application = QApplication.instance()
+    if application is not None:
+        application.processEvents()
 
 
 def _flagged_after(

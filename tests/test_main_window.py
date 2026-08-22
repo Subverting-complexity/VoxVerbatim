@@ -14,7 +14,7 @@ import shutil
 
 import pytest
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QDialog, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QWidget
 
 from audio_transcriber.audio.player import AudioPlayer
 from audio_transcriber.session import SessionStore
@@ -259,7 +259,9 @@ def test_a_command_works_on_the_highlighted_file_when_nothing_is_checked(
 # -- Transcribing --------------------------------------------------------
 
 
-def fake_transcribe_dialog(monkeypatch, run_summary=None, review=None) -> list:
+def fake_transcribe_dialog(
+    monkeypatch, run_summary=None, review=None, still_stopping: bool = False
+) -> list:
     """Put a stand-in in the Transcribe dialog's place, and collect what it got."""
     opened: list = []
 
@@ -270,13 +272,15 @@ def fake_transcribe_dialog(monkeypatch, run_summary=None, review=None) -> list:
             self.vocabulary = vocabulary
             self.summary = run_summary
             self.review_request = review
+            self.is_stopping_in_background = still_stopping
+            self.deleted = False
             opened.append(self)
 
         def exec(self) -> int:
             return QDialog.DialogCode.Rejected
 
         def deleteLater(self) -> None:
-            pass
+            self.deleted = True
 
     monkeypatch.setattr(main_window_module, "TranscribeDialog", Fake)
     return opened
@@ -359,9 +363,9 @@ def test_how_the_run_went_is_reported_in_the_status_bar(
 ):
     summary = RunSummary(
         results=[
-            RecordingOutcome(
-                path=audio_folder / "alpha.m4a",
-                transcript=make_transcript("alpha.m4a", needing_review=2),
+            RecordingOutcome.of_transcript(
+                audio_folder / "alpha.m4a",
+                make_transcript("alpha.m4a", needing_review=2),
             )
         ]
     )
@@ -372,6 +376,30 @@ def test_how_the_run_went_is_reported_in_the_status_bar(
 
         assert "1 of 1 recordings transcribed" in window._status_label.text()
         assert "2 words to review" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_a_dialog_closed_on_a_stopping_run_is_kept_and_the_person_is_told(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The runner inside the dialog is what the run still reports to.
+
+    Deleting it would take the run's receiver away before the request it is
+    waiting on had come back, and nobody would withdraw the request that
+    keeps the machine awake. So the dialog is left to get rid of itself, and
+    the status bar says plainly what is happening and that the recordings
+    already done are safe.
+    """
+    opened = fake_transcribe_dialog(monkeypatch, still_stopping=True)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        window.show_transcribe()
+
+        assert opened[0].deleted is False
+        status = window._status_label.text()
+        assert "still stopping" in status
+        assert "already transcribed are saved" in status
     finally:
         close_window(window)
 
@@ -391,8 +419,8 @@ def test_asking_to_review_from_the_dialog_opens_the_project_review_there(
     try:
         save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
         save_transcript(window, audio_folder / "beta.m4a", weak_transcript("beta.m4a"))
-        outcome = RecordingOutcome(
-            path=audio_folder / "alpha.m4a", transcript=make_transcript("alpha.m4a")
+        outcome = RecordingOutcome.of_transcript(
+            audio_folder / "alpha.m4a", make_transcript("alpha.m4a")
         )
         fake_transcribe_dialog(
             monkeypatch, run_summary=RunSummary(results=[outcome]), review=outcome
@@ -426,8 +454,8 @@ def test_a_hand_off_to_a_recording_with_nothing_waiting_says_where_it_landed(
         # gamma has a transcript, but every word in it is settled, so the
         # project holds nothing at all for that recording.
         save_transcript(window, audio_folder / "gamma.m4a", strong_transcript("gamma.m4a"))
-        outcome = RecordingOutcome(
-            path=audio_folder / "gamma.m4a", transcript=make_transcript("gamma.m4a")
+        outcome = RecordingOutcome.of_transcript(
+            audio_folder / "gamma.m4a", make_transcript("gamma.m4a")
         )
         fake_transcribe_dialog(
             monkeypatch, run_summary=RunSummary(results=[outcome]), review=outcome
@@ -475,8 +503,8 @@ def test_the_hand_off_says_one_thing_once_and_says_it_where_it_can_be_heard(
     window = loaded_window(qapp, store, audio_folder)
     try:
         save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
-        outcome = RecordingOutcome(
-            path=audio_folder / "alpha.m4a", transcript=make_transcript("alpha.m4a")
+        outcome = RecordingOutcome.of_transcript(
+            audio_folder / "alpha.m4a", make_transcript("alpha.m4a")
         )
         fake_transcribe_dialog(
             monkeypatch, run_summary=RunSummary(results=[outcome]), review=outcome
@@ -1058,6 +1086,95 @@ def test_reviewing_covers_the_folder_with_no_recording_highlighted(
         assert opened[0].folder == audio_folder
         assert opened[0].recording_paths["alpha.m4a"] == audio_folder / "alpha.m4a"
         assert "Reviewing 2 recordings" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_opening_a_review_says_it_is_reading_before_it_starts_and_lets_the_window_breathe(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Reading a folder of long recordings is minutes on the window's thread.
+
+    The person is told before the first transcript is parsed, not after,
+    because after is when the window has been frozen for the whole wait. And
+    the event loop is given a turn between recordings so that the window
+    repaints and the screen reader gets to say the sentence.
+    """
+    fake_review_window(monkeypatch)
+    said = announcements(monkeypatch)
+    breaths: list[str] = []
+    monkeypatch.setattr(
+        main_window_module, "_let_the_window_breathe", lambda: breaths.append("breath")
+    )
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        save_transcript(window, audio_folder / "gamma.m4a", weak_transcript("gamma.m4a"))
+        said.clear()
+
+        window.show_review()
+
+        reading = [item for item in said if item[1].startswith("Reading ")]
+        assert len(reading) == 1
+        widget, message, urgent = reading[0]
+        assert message == "Reading 2 transcripts in this folder. This can take a while."
+        assert widget is window._status_label
+        assert urgent is True
+        # Said before the review's own opening sentence, which comes last.
+        assert said.index(reading[0]) < len(said) - 1
+        assert said[-1][1].startswith("Reviewing ")
+        # One breath per transcript actually parsed.
+        assert len(breaths) >= 2
+        # The cursor is put back whatever happened.
+        assert QApplication.overrideCursor() is None
+    finally:
+        close_window(window)
+
+
+def test_a_second_review_asked_for_while_the_first_is_opening_is_refused(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The turn the event loop gets between transcripts is enough for a second Ctrl+R."""
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    inner: list[object] = []
+
+    def press_again() -> None:
+        inner.append(window.open_project_review())
+
+    monkeypatch.setattr(main_window_module, "_let_the_window_breathe", press_again)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
+        first = window.open_project_review()
+
+        assert first is not None
+        assert inner and all(item is None for item in inner)
+        assert len(opened) == 1
+    finally:
+        close_window(window)
+
+
+def test_the_reader_holds_one_transcript_and_pauses_only_before_a_real_read(
+    qapp, store, audio_folder
+):
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        alpha = save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        gamma = save_transcript(window, audio_folder / "gamma.m4a", weak_transcript("gamma.m4a"))
+        pauses: list[int] = []
+        reader = main_window_module._TranscriptReader(
+            {"alpha.m4a": alpha, "gamma.m4a": gamma}, between_recordings=lambda: pauses.append(1)
+        )
+
+        first = reader.load("alpha.m4a")
+        assert reader.load("alpha.m4a") is first
+        assert len(pauses) == 1
+        reader.load("gamma.m4a")
+        assert len(pauses) == 2
+        # Going back is a real read again: only one is ever held.
+        assert reader.load("alpha.m4a") is not first
+        assert len(pauses) == 3
     finally:
         close_window(window)
 

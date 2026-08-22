@@ -211,6 +211,74 @@ def test_an_english_and_only_joins_a_hundred_to_what_follows_it():
     assert are_equivalent("one hundred and fifty", "150")
 
 
+@pytest.mark.parametrize(
+    ("words", "value"),
+    [
+        ("two thousand and five", 2005),
+        ("two thousand and twenty four", 2024),
+        ("one thousand and one", 1001),
+        ("zweitausendfünf", 2005),
+        ("zweitausend fünf", 2005),
+        ("tausend und eins", 1001),
+        ("tweeduisend en vyf", 2005),
+        ("honderd en een", 101),
+        ("honderd en vyf en twintig", 125),
+        ("zweihundert", 200),
+        ("zweihundert tausend", 200000),
+    ],
+)
+def test_an_and_after_a_thousand_reads_the_way_people_say_years(words, value):
+    """South African English says "two thousand and five" routinely.
+
+    Refusing that form turned a year every service agreed on into a
+    numeric disagreement that could never be settled. German and Afrikaans
+    put their own joiners in the same place, and a joined compound such as
+    "zweitausend" carries its quantity inside the word.
+    """
+    assert read_number(words) == value
+    assert are_equivalent(words, str(value))
+    assert equivalence_kind(words, str(value)) is EquivalenceKind.NUMBER_FORMAT
+
+
+def test_a_joiner_with_nothing_after_it_is_not_a_number():
+    assert read_number("two thousand and") is None
+    assert not are_equivalent("two thousand and", "2000")
+
+
+def test_an_afrikaans_en_between_two_units_does_not_add_them():
+    """"Vyf en ses" is five and six, not eleven."""
+    assert not are_equivalent("vyf en ses", "11")
+    assert read_number("vyf en ses") is None
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("1 2", "12"),
+        ("twenty 5", "205"),
+        ("1/2", "12"),
+        ("24/7", "247"),
+        ("1/2", "1 2"),
+        ("2024 25", "202425"),
+    ],
+)
+def test_two_numbers_are_never_run_together_into_one(first, second):
+    """A half and twelve are not the same evidence.
+
+    The compound stage runs words together so that "data base" meets
+    "database". Letting it run digits together made "1 2" and "12" one
+    candidate, so a service that heard two numbers and one that heard one
+    were never seen to disagree.
+    """
+    assert not are_equivalent(first, second)
+    assert equivalence_kind(first, second) is EquivalenceKind.DIFFERENT
+
+
+def test_a_digit_next_to_a_letter_still_joins():
+    assert are_equivalent("3 kg", "3kg")
+    assert are_equivalent("data base", "database")
+
+
 # -- Contractions and compounds -----------------------------------------
 
 

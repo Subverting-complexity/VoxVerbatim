@@ -291,9 +291,9 @@ def test_a_failure_with_nothing_to_say_still_says_something(qapp, monkeypatch, r
 def test_a_clean_run_is_summarised_with_its_review_count():
     summary = RunSummary(
         results=[
-            RecordingOutcome(
-                path=Path("alpha.m4a"),
-                transcript=make_transcript("alpha.m4a", words=10, needing_review=3),
+            RecordingOutcome.of_transcript(
+                Path("alpha.m4a"),
+                make_transcript("alpha.m4a", words=10, needing_review=3),
             )
         ]
     )
@@ -303,7 +303,7 @@ def test_a_clean_run_is_summarised_with_its_review_count():
 
 def test_a_run_with_nothing_to_review_says_so_rather_than_saying_nothing():
     summary = RunSummary(
-        results=[RecordingOutcome(path=Path("alpha.m4a"), transcript=make_transcript("alpha.m4a"))]
+        results=[RecordingOutcome.of_transcript(Path("alpha.m4a"), make_transcript("alpha.m4a"))]
     )
 
     assert "Nothing is waiting for review." in summarise(summary)
@@ -311,7 +311,7 @@ def test_a_run_with_nothing_to_review_says_so_rather_than_saying_nothing():
 
 def test_a_stopped_run_is_not_reported_as_finished():
     summary = RunSummary(
-        results=[RecordingOutcome(path=Path("alpha.m4a"), transcript=make_transcript("alpha.m4a"))],
+        results=[RecordingOutcome.of_transcript(Path("alpha.m4a"), make_transcript("alpha.m4a"))],
         cancelled=True,
     )
 
@@ -326,3 +326,99 @@ def test_a_failure_is_named_in_the_summary():
     text = summarise(summary)
     assert "could not be transcribed" in text
     assert "0 of 1 recordings transcribed" in text
+
+
+# -- What an outcome carries ---------------------------------------------
+
+
+def test_an_outcome_keeps_the_numbers_and_the_folder_and_lets_the_transcript_go(
+    qapp, monkeypatch, recordings
+):
+    """A run over a day of recordings must not hold every transcript in memory."""
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        return make_transcript(
+            recording.name, words=7, needing_review=2, warnings=("One service was slow.",)
+        )
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    finished: list[RecordingOutcome] = []
+    summaries: list[RunSummary] = []
+    runner.recordingFinished.connect(finished.append)
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings[:1], pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    outcome = finished[0]
+    assert outcome.succeeded is True
+    assert outcome.word_count == 7
+    assert outcome.review_count == 2
+    assert outcome.warnings == ("One service was slow.",)
+    assert outcome.transcript_folder == recordings[0].parent / "alpha.m4a.transcript"
+    assert not hasattr(outcome, "transcript")
+
+
+# -- Keeping the machine awake -------------------------------------------
+
+
+def asked_of_windows(monkeypatch) -> list[int]:
+    """Stand in for the Windows call and keep the flags it was given."""
+    from audio_transcriber.transcription import runner as runner_module
+
+    asked: list[int] = []
+    monkeypatch.setattr(runner_module, "set_thread_execution_state", asked.append)
+    monkeypatch.setattr(runner_module.sys, "platform", "win32")
+    return asked
+
+
+def test_the_machine_is_held_awake_for_the_run_and_released_when_it_ends(
+    qapp, monkeypatch, recordings
+):
+    from audio_transcriber.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
+
+    asked = asked_of_windows(monkeypatch)
+    fake_pipeline(monkeypatch, lambda recording, *args, **kwargs: make_transcript(recording.name))
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings, pipeline.PipelineOptions())
+    assert asked == [ES_CONTINUOUS | ES_SYSTEM_REQUIRED]
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    assert asked == [ES_CONTINUOUS | ES_SYSTEM_REQUIRED, ES_CONTINUOUS]
+    # The display is left alone: nobody needs to watch a run that lasts hours.
+    assert all(flags & 0x00000002 == 0 for flags in asked)
+
+
+def test_a_windows_call_that_fails_does_not_stop_the_run(qapp, monkeypatch, recordings):
+    from audio_transcriber.transcription import runner as runner_module
+
+    def refuse(flags: int) -> None:
+        raise OSError("no kernel32 here")
+
+    monkeypatch.setattr(runner_module, "set_thread_execution_state", refuse)
+    monkeypatch.setattr(runner_module.sys, "platform", "win32")
+    fake_pipeline(monkeypatch, lambda recording, *args, **kwargs: make_transcript(recording.name))
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    assert runner.start(recordings, pipeline.PipelineOptions()) is True
+    assert wait_until(qapp, lambda: bool(summaries))
+    assert summaries[0].transcribed == 2
+
+
+def test_nothing_is_asked_of_a_machine_that_is_not_windows(monkeypatch):
+    from audio_transcriber.transcription import runner as runner_module
+
+    asked: list[int] = []
+    monkeypatch.setattr(runner_module, "set_thread_execution_state", asked.append)
+    monkeypatch.setattr(runner_module.sys, "platform", "linux")
+
+    runner_module.keep_system_awake(True)
+    runner_module.keep_system_awake(False)
+
+    assert asked == []

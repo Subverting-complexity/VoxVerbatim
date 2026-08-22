@@ -48,6 +48,13 @@ _log = logging.getLogger(__name__)
 #: different currencies would simply add up to a wrong number.
 DEFAULT_CURRENCY = "USD"
 
+#: What ElevenLabs adds to a request that carries keyterms, as a fraction of
+#: the per-minute price. It applies to any request with keyterms at all,
+#: however few, so every run with a vocabulary pays it. The figure is theirs
+#: and is also recorded in :mod:`audio_transcriber.transcription.context`,
+#: where the keyterm limits live.
+ELEVENLABS_KEYTERM_SURCHARGE = 0.20
+
 
 @dataclass(frozen=True)
 class ProviderCost:
@@ -58,11 +65,23 @@ class ProviderCost:
     rate_per_minute: float | None
     """``None`` where no rate has been set for this service."""
 
+    surcharge: float = 0.0
+    """What this service adds on top of its per-minute price for this run,
+    as a fraction. Zero for nearly everything; see
+    :data:`ELEVENLABS_KEYTERM_SURCHARGE` for the one case that is not."""
+
+    surcharge_reason: str = ""
+    """Why the surcharge applies, in words a person can read."""
+
     @property
     def amount(self) -> float | None:
         if self.rate_per_minute is None:
             return None
-        return self.minutes * self.rate_per_minute
+        return self.minutes * self.rate_per_minute * (1.0 + self.surcharge)
+
+    @property
+    def is_surcharged(self) -> bool:
+        return self.surcharge > 0.0
 
     @property
     def is_priced(self) -> bool:
@@ -105,6 +124,13 @@ class CostEstimate:
         """
         return tuple(cost.provider for cost in self.per_provider if not cost.is_priced)
 
+    @property
+    def surcharged(self) -> tuple[ProviderCost, ...]:
+        """The priced services whose figure includes a surcharge for this run."""
+        return tuple(
+            cost for cost in self.per_provider if cost.is_priced and cost.is_surcharged
+        )
+
 
 def estimate_cost(
     duration_seconds: float,
@@ -113,6 +139,7 @@ def estimate_cost(
     adjudication_requests: int = 0,
     adjudication_rate_per_request: float | None = None,
     currency: str = DEFAULT_CURRENCY,
+    vocabulary_terms_sent: bool = False,
 ) -> CostEstimate:
     """Estimate what transcribing one recording with these services will cost.
 
@@ -127,13 +154,19 @@ def estimate_cost(
     named in the summary as something that will be charged and cannot be
     predicted. The price of one request is read from the same settings the
     per-minute rates came from unless it is given here.
+
+    ``vocabulary_terms_sent`` says whether the run will send the services a
+    list of terms to listen for. ElevenLabs charges a fifth more for any
+    request that carries them, and its line is raised by that much so that
+    the estimate matches the invoice. Left false, which is the default, the
+    estimate is the one for a run with no vocabulary.
     """
     minutes = max(0.0, duration_seconds) / 60.0
     table = rates_mapping(rates)
     if adjudication_rate_per_request is None:
         adjudication_rate_per_request = adjudication_rate(rates)
     costs = tuple(
-        ProviderCost(provider=provider, minutes=minutes, rate_per_minute=table.get(provider))
+        _provider_cost(provider, minutes, table.get(provider), vocabulary_terms_sent)
         for provider in providers
     )
     return CostEstimate(
@@ -143,6 +176,26 @@ def estimate_cost(
         adjudication_rate_per_request=max(0.0, adjudication_rate_per_request),
         currency=currency,
     )
+
+
+def _provider_cost(
+    provider: Provider,
+    minutes: float,
+    rate_per_minute: float | None,
+    vocabulary_terms_sent: bool,
+) -> ProviderCost:
+    """One service's line, with whatever this run makes it charge extra."""
+    if provider is Provider.ELEVENLABS and vocabulary_terms_sent:
+        return ProviderCost(
+            provider=provider,
+            minutes=minutes,
+            rate_per_minute=rate_per_minute,
+            surcharge=ELEVENLABS_KEYTERM_SURCHARGE,
+            surcharge_reason=(
+                "ElevenLabs charges that much more for a request that carries vocabulary terms"
+            ),
+        )
+    return ProviderCost(provider=provider, minutes=minutes, rate_per_minute=rate_per_minute)
 
 
 def describe_estimate(estimate: CostEstimate) -> str:
@@ -171,6 +224,12 @@ def describe_estimate(estimate: CostEstimate) -> str:
         f"{describe_money(estimate.transcription_total, estimate.currency)}."
     ]
 
+    for cost in estimate.surcharged:
+        sentences.append(
+            f"The {cost.provider.display_name} figure is {_describe_fraction(cost.surcharge)} "
+            f"higher than its per-minute rate alone, because {cost.surcharge_reason}."
+        )
+
     missing = estimate.unpriced_providers
     if missing:
         unpriced = _list_in_words([provider.display_name for provider in missing])
@@ -193,6 +252,14 @@ def describe_estimate(estimate: CostEstimate) -> str:
         "needs them depends on how much the services turn out to disagree."
     )
     return " ".join(sentences)
+
+
+def _describe_fraction(fraction: float) -> str:
+    """Say a fraction as people say it: "20 per cent"."""
+    percent = fraction * 100.0
+    if percent == int(percent):
+        return f"{int(percent)} per cent"
+    return f"{percent:.1f} per cent"
 
 
 def describe_duration(seconds: float) -> str:

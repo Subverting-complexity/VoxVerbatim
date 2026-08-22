@@ -28,8 +28,9 @@ the application from starting.
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -62,10 +63,34 @@ class ProviderError(Exception):
     retry policy has no other way to tell a rate limit from a rejected key.
     """
 
-    def __init__(self, message: str, *, retryable: bool = False, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+        result: ProviderResult | None = None,
+    ):
         super().__init__(message)
         self.retryable = retryable
         self.status_code = status_code
+        self.retry_after = retry_after
+        """How long the service asked us to wait, in seconds, where it said.
+
+        Read off a ``Retry-After`` header. The retry loop waits at least this
+        long before the next attempt, because a service that names a wait and
+        is called sooner answers with the same refusal and the attempt is
+        wasted."""
+        self.result = result
+        """The failed result the adapter had already built, where it had.
+
+        An adapter that got as far as sending a request has provenance worth
+        keeping: what was asked, of which model, and the body the service
+        sent back instead of a transcript. Carrying that result on the error
+        lets the retry loop in :meth:`TranscriptionProvider.transcribe` try
+        again where that may help and still hand back the full record when
+        it gives up, instead of a bare sentence."""
 
 
 class ProviderNotConfigured(ProviderError):
@@ -252,28 +277,185 @@ class TranscriptionProvider(ABC):
     ) -> ProviderResult:
         """Do the work. May raise :class:`ProviderError`."""
 
+    #: How many times a failed request is tried again. Zero means one attempt
+    #: and no retry. Adapters set it from their constructor so the registry
+    #: can pass the user's setting through.
+    maximum_retries: int = 2
+
+    #: The wait before the first retry, in seconds. Each later wait is twice
+    #: the one before, up to :attr:`maximum_backoff_seconds`.
+    retry_backoff_seconds: float = 2.0
+    maximum_backoff_seconds: float = 60.0
+
     def transcribe(
         self,
         request: TranscriptionRequest,
         cancelled: CancelCheck | None = None,
     ) -> ProviderResult:
-        """Transcribe one piece of audio, never raising.
+        """Transcribe one piece of audio, never raising, trying again where that may help.
 
         A service that fails comes back as a result carrying the reason. The
         pipeline reports it, notes it in the transcript's warnings, and
         carries on with the services that did answer.
+
+        The retrying happens here, once, rather than inside each adapter or
+        inside each client library. Two of the libraries were found to be
+        unsafe to lean on: one drops the form body from a retried request, so
+        every retry fails with a validation error, and another does not retry
+        a connection failure at all. Every adapter already works out whether
+        a failure is worth another attempt and says so on the error; this is
+        the one place that reads the flag. Adapters open their file handle
+        inside :meth:`_transcribe`, so every attempt re-reads the audio from
+        the start rather than sending whatever was left of a half-read file.
+
+        The wait between attempts doubles each time, and is never shorter
+        than what the service asked for in a ``Retry-After`` header. Between
+        attempts the cancel check is consulted, so a user who stops the run
+        while a service is rate-limiting us is not kept waiting through the
+        remaining backoff.
         """
+        attempts_allowed = 1 + max(0, int(self.maximum_retries))
+        name = self.provider.display_name
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return self._transcribe(request, cancelled)
+            except ProviderError as error:
+                may_retry = error.retryable and attempt < attempts_allowed
+                if may_retry and cancelled is not None and cancelled():
+                    may_retry = False
+                if not may_retry:
+                    _log.warning("%s did not answer: %s", name, error)
+                    return self._failed_result(error, attempt)
+                wait = self._wait_before_attempt(attempt, error.retry_after)
+                _log.warning(
+                    "%s did not answer (attempt %d of %d): %s. Trying again in %.0f s.",
+                    name,
+                    attempt,
+                    attempts_allowed,
+                    error,
+                    wait,
+                )
+                if not wait_unless_cancelled(wait, cancelled):
+                    return self._failed_result(error, attempt)
+            except Exception as error:  # a broken adapter must not take the run down
+                _log.exception("%s raised an unexpected error.", name)
+                return ProviderResult(
+                    provider=self.provider,
+                    error=f"{name} failed unexpectedly: {error}",
+                )
+
+    def _wait_before_attempt(self, attempts_so_far: int, retry_after: float | None) -> float:
+        """How long to wait before the next attempt, in seconds."""
+        backoff = max(0.0, float(self.retry_backoff_seconds)) * (2 ** (attempts_so_far - 1))
+        backoff = min(backoff, max(0.0, float(self.maximum_backoff_seconds)))
+        if retry_after is not None and retry_after > 0:
+            # A service that names a wait is not bargained with: calling it
+            # sooner gets the same refusal. The cap is a guard against a
+            # header that asks for an hour, which is a reason to give up
+            # rather than to sit still.
+            backoff = max(backoff, min(float(retry_after), MAXIMUM_RETRY_AFTER_SECONDS))
+        return backoff
+
+    def _failed_result(self, error: ProviderError, attempts: int) -> ProviderResult:
+        """The failed result to hand back, keeping the adapter's record where it made one.
+
+        The sentence names the number of attempts only when there was more
+        than one, so a failure that was never worth retrying reads as the
+        plain fact it is.
+        """
+        message = str(error)
+        if attempts > 1:
+            message = f"{self.provider.display_name} failed after {attempts} attempts: {message}"
+        result = error.result
+        if result is None:
+            return ProviderResult(provider=self.provider, error=message)
+        result.error = message
+        if result.request is not None:
+            result.request = replace(result.request, error=message, succeeded=False)
+        return result
+
+
+#: The longest a ``Retry-After`` header is obeyed for. Anything longer is
+#: treated as this, and the attempt after it is the last the service gets.
+MAXIMUM_RETRY_AFTER_SECONDS = 120.0
+
+
+def wait_unless_cancelled(seconds: float, cancelled: CancelCheck | None) -> bool:
+    """Sleep for the backoff, a little at a time, and return False if the run was stopped.
+
+    Slept in short pieces rather than all at once so that a cancel during a
+    long wait is noticed within a second rather than at the end of it.
+    """
+    remaining = max(0.0, seconds)
+    while remaining > 0:
+        if cancelled is not None and cancelled():
+            return False
+        piece = min(1.0, remaining)
+        _sleep(piece)
+        remaining -= piece
+    return not (cancelled is not None and cancelled())
+
+
+def _sleep(seconds: float) -> None:
+    """Kept separate so a test can take the waiting out."""
+    time.sleep(seconds)
+
+
+#: How long a service is given to process audio before we stop waiting,
+#: beyond the configured timeout. A fixed margin plus one second of waiting
+#: per second of audio is several times slower than any of these services
+#: has been seen to be, and the cap stops a wrong duration from hanging a
+#: thread all night. See :func:`timeout_for_duration`.
+TIMEOUT_MARGIN_SECONDS = 300.0
+TIMEOUT_SECONDS_PER_AUDIO_SECOND = 1.0
+MAXIMUM_TIMEOUT_SECONDS = 7200.0
+
+
+def timeout_for_duration(configured_seconds: float, duration_seconds: float | None) -> float:
+    """The time to allow a service for a piece of audio, grown to fit the audio.
+
+    The configured timeout is a single number for every request. That fits
+    a ten-minute chunk and not a three-hour file: a service that is silent
+    until the transcript is ready takes longer than the timeout on a long
+    file and is abandoned while it is still working, and then the retry
+    sends the same file again to be abandoned again. So the allowance is
+    whichever is larger, the configured timeout or a margin plus one second
+    per second of audio, capped at two hours.
+    """
+    scaled = TIMEOUT_MARGIN_SECONDS + TIMEOUT_SECONDS_PER_AUDIO_SECOND * max(
+        0.0, duration_seconds or 0.0
+    )
+    return max(float(configured_seconds), min(MAXIMUM_TIMEOUT_SECONDS, scaled))
+
+
+def retry_after_seconds(headers: Any) -> float | None:
+    """Read a ``Retry-After`` header, in seconds, from whatever holds the headers.
+
+    Only the delay-seconds form is read. The HTTP-date form is rare from
+    these services and getting the clock arithmetic wrong would wait for the
+    wrong length of time, so it is treated as absent and the ordinary
+    backoff applies.
+    """
+    if headers is None:
+        return None
+    getter = getattr(headers, "get", None)
+    if getter is None:
+        return None
+    for name in ("retry-after", "Retry-After", "retry-after-ms", "Retry-After-Ms"):
         try:
-            return self._transcribe(request, cancelled)
-        except ProviderError as error:
-            _log.warning("%s did not answer: %s", self.provider.display_name, error)
-            return ProviderResult(provider=self.provider, error=str(error))
-        except Exception as error:  # a broken adapter must not take the run down
-            _log.exception("%s raised an unexpected error.", self.provider.display_name)
-            return ProviderResult(
-                provider=self.provider,
-                error=f"{self.provider.display_name} failed unexpectedly: {error}",
-            )
+            value = getter(name)
+        except Exception:  # noqa: BLE001 - a headers object of unknown shape
+            return None
+        if value is None:
+            continue
+        try:
+            number = float(str(value).strip())
+        except ValueError:
+            return None
+        return number / 1000.0 if name.lower().endswith("-ms") else number
+    return None
 
 
 class ForcedAligner(ABC):

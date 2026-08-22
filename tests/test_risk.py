@@ -8,6 +8,8 @@ separators were read with the wrong language in mind.
 
 from __future__ import annotations
 
+import pytest
+
 from audio_transcriber.transcription.model import RiskCategory
 from audio_transcriber.transcription.risk import (
     find_risks,
@@ -110,6 +112,98 @@ def test_letters_and_digits_together_look_like_a_product_code() -> None:
 
 def test_an_ordinary_sentence_is_not_flagged() -> None:
     assert _categories("we", "should", "talk", "about", "the", "proposal") == set()
+
+
+# -- Dates and fractions that carry one separator or none -----------------
+
+
+@pytest.mark.parametrize("text", ["12/05", "05/2024", "1/12"])
+def test_a_day_and_month_with_one_slash_is_a_date(text: str) -> None:
+    """The written-date rule wanted two separators, so "12/05" slipped past."""
+    assert RiskCategory.DATE in risk_at(["on", text, "we", "meet"], 1)
+
+
+@pytest.mark.parametrize("text", ["1/2", "3/4", "24/7", "7/8"])
+def test_a_fraction_no_rule_claims_is_still_a_number(text: str) -> None:
+    """A token with a digit in it that nobody claimed is a quantity.
+
+    These cannot be read as one number, and the catch-all used to insist on
+    that, so a disputed half could be settled on plausibility alone.
+    """
+    assert RiskCategory.QUANTITY in risk_at(["about", text, "of", "them"], 1)
+
+
+def test_a_single_full_stop_between_digits_is_left_to_the_separator_rule() -> None:
+    """"12.05" is a decimal to a German reader, so it is not called a date."""
+    assert RiskCategory.DATE not in risk_at(["about", "12.05", "each"], 1)
+    assert RiskCategory.QUANTITY in risk_at(["about", "12.05", "each"], 1)
+
+
+# -- Days of the month named in words --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        ["on", "the", "fifteenth"],
+        ["by", "the", "twentieth"],
+        ["the", "twenty-first"],
+        ["am", "vierten"],
+        ["am", "fünfundzwanzigsten"],
+        ["am", "fuenfundzwanzigsten"],
+        ["am", "zwanzigsten"],
+        ["die", "vyfde"],
+        ["die", "een-en-twintigste"],
+    ],
+)
+def test_an_ordinal_from_the_fourth_up_is_a_date_on_its_own(words: list[str]) -> None:
+    assert RiskCategory.DATE in risk_at(words, len(words) - 1)
+    assert "a day of the month" in risk_details_at(words, len(words) - 1)
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        ["the", "first", "of", "March"],
+        ["on", "the", "first"],
+        ["am", "ersten"],
+        ["am", "ersten", "Mai"],
+        ["op", "die", "eerste"],
+        ["die", "derde", "Junie"],
+        ["the", "second", "week"],
+    ],
+)
+def test_a_low_ordinal_is_a_date_when_the_calendar_is_nearby(words: list[str]) -> None:
+    position = next(
+        index for index, word in enumerate(words)
+        if word in {"first", "second", "ersten", "eerste", "derde"}
+    )
+    assert RiskCategory.DATE in risk_at(words, position)
+
+
+def test_the_whole_of_first_of_march_is_protected() -> None:
+    words = ["the", "first", "of", "March", "then"]
+    for position in range(1, 4):
+        assert RiskCategory.DATE in risk_at(words, position)
+    assert RiskCategory.DATE not in risk_at(words, 4)
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        ["the", "first", "one", "is", "fine"],
+        ["the", "second", "item"],
+        ["die", "erste", "Frage"],
+        ["die", "eerste", "keer"],
+    ],
+)
+def test_a_low_ordinal_in_an_ordinary_phrase_is_not_a_date(words: list[str]) -> None:
+    assert RiskCategory.DATE not in risk_at(words, 1)
+
+
+def test_a_digit_ordinal_is_still_a_date() -> None:
+    assert RiskCategory.DATE in risk_at(["on", "the", "1st"], 2)
+    assert RiskCategory.DATE in risk_at(["on", "the", "15th"], 2)
 
 
 # -- The decimal separator, which is the dangerous one -------------------

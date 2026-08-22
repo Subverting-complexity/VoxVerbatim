@@ -40,6 +40,7 @@ only the new file would hide the very decision that has already been taken.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -91,8 +92,10 @@ from audio_transcriber.transcription.runner import (
     summarise,
 )
 from audio_transcriber.transcription.store import TranscriptStore
-from audio_transcriber.transcription.vocabulary import Vocabulary
+from audio_transcriber.transcription.vocabulary import Vocabulary, resolve_terms
 from audio_transcriber.ui.accessibility import announce, describe
+
+_log = logging.getLogger(__name__)
 
 #: Enough rows to see a normal selection without the dialog growing taller
 #: than a small screen at a large font size. Longer lists scroll.
@@ -421,6 +424,10 @@ class TranscribeDialog(QDialog):
         self._summary: RunSummary | None = None
         self._results: list[RecordingOutcome] = []
         self._review_request: RecordingOutcome | None = None
+        # Whether Cancel has been pressed on the run now going, and whether
+        # the dialog was then closed on top of it. Both are reset at start.
+        self._cancel_requested = False
+        self._detached = False
         # The last stage sentence spoken, so the same one is not read out
         # again every time the progress bar moves.
         self._announced_stage = ""
@@ -632,6 +639,9 @@ class TranscribeDialog(QDialog):
             empty.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             self._profile_list.addItem(empty)
         _fit_rows(self._profile_list, max(1, len(profiles)))
+        # Ticking a profile changes what ElevenLabs charges, so the estimate
+        # below it is redrawn.
+        self._profile_list.itemChanged.connect(lambda _item: self._show_cost())
         self._explain(self._profile_list, PROFILES)
         label.setBuddy(self._profile_list)
 
@@ -975,7 +985,17 @@ class TranscribeDialog(QDialog):
             self.known_duration_seconds(),
             self.services_that_will_run(),
             rates=self._settings.cost,
+            vocabulary_terms_sent=self.vocabulary_terms_will_be_sent(),
         )
+
+    def vocabulary_terms_will_be_sent(self) -> bool:
+        """Whether the chosen profiles hold any term at all.
+
+        ElevenLabs charges more for a request that carries terms, so the
+        estimate has to know. A profile that is switched on but empty sends
+        nothing and costs nothing extra.
+        """
+        return bool(resolve_terms(self._vocabulary, self.chosen_profile_ids()))
 
     def cost_text(self) -> str:
         """The estimate written out: a line per service, then the whole story."""
@@ -1078,7 +1098,7 @@ class TranscribeDialog(QDialog):
             self._refuse("There are no recordings to transcribe.")
             return False
 
-        problems = self._settings.missing_requirements()
+        problems = self.preflight_problems()
         if problems:
             self._refuse_with_problems(problems)
             return False
@@ -1096,6 +1116,8 @@ class TranscribeDialog(QDialog):
         self._results = []
         self._summary = None
         self._review_request = None
+        self._cancel_requested = False
+        self._detached = False
         self._report_text.clear()
         self._report_group.setVisible(False)
         self._folder_button.setEnabled(False)
@@ -1126,17 +1148,60 @@ class TranscribeDialog(QDialog):
         )
         return True
 
+    def preflight_problems(self) -> list[str]:
+        """Everything that would stop this run, found before any money is spent.
+
+        Three things are checked, and the order is the order in which they
+        are cheap. The settings are asked whether every service that is on
+        has its key and model. Then the vendor library behind each of those
+        services is actually imported, because a package that was never
+        installed is not found until the service is first called, which is
+        after the recording has been prepared and the other services have
+        been sent it. Then the first recording's transcript folder is made
+        and written to, with a tiny file that is removed again, because a
+        read-only folder or a path past the Windows limit would otherwise be
+        discovered at the moment the finished transcript was being saved,
+        an hour of paid answers too late.
+        """
+        problems = self._settings.missing_requirements()
+        problems.extend(self._settings.missing_libraries())
+        if self._recordings:
+            store = TranscriptStore(
+                self._recordings[0].path, self._settings.processing.transcript_folder_suffix
+            )
+            fault = store.probe_writable()
+            if fault is not None:
+                problems.append(fault)
+        return problems
+
     def cancel(self) -> None:
-        """Ask a running transcription to stop as soon as it can."""
+        """Ask a running transcription to stop as soon as it can.
+
+        Stopping is not instant. The flag is checked between stages, and a
+        request already with a service can take many minutes to come back,
+        during which the dialog would otherwise refuse to close at all. So
+        the first Cancel asks the run to stop, and says so; a second Cancel
+        closes the dialog and leaves the run to stop in the background, which
+        :meth:`reject` explains.
+        """
         if not self.is_running:
             return
         self._runner.cancel()
-        self._set_progress_text("Stopping...")
-        announce(
-            self._progress_bar,
-            "Stopping. Requests already sent are still charged for.",
-            urgent=True,
+        self._cancel_requested = True
+        self._describe_close_button()
+        message = (
+            "Stopping. The run stops at the end of the request it is waiting on, "
+            "which can take a few minutes. Requests already sent are still charged "
+            "for. Press Cancel again to close this window and let it stop in the "
+            "background."
         )
+        self._set_progress_text(message)
+        announce(self._progress_bar, message, urgent=True)
+
+    @property
+    def is_stopping_in_background(self) -> bool:
+        """Whether the dialog was closed on a run that had not yet stopped."""
+        return self._detached and self.is_running
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         """Switch everything except Cancel off while a run is going."""
@@ -1150,7 +1215,14 @@ class TranscribeDialog(QDialog):
 
     def _describe_close_button(self) -> None:
         """Name the button for what it does now, which changes as the run does."""
-        if self.is_running:
+        if self.is_running and self._cancel_requested:
+            text, name = "&Cancel", "Cancel"
+            description = (
+                "The run has been asked to stop and is waiting on the request it "
+                "already sent. Press this again to close the window now and let the "
+                "run stop in the background. Recordings already transcribed are kept."
+            )
+        elif self.is_running:
             text, name = "&Cancel", "Cancel"
             description = (
                 "Stops the run. Recordings already transcribed are kept, and the one "
@@ -1217,7 +1289,31 @@ class TranscribeDialog(QDialog):
             self._review_button.setFocus(Qt.FocusReason.OtherFocusReason)
         else:
             self._close_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        if self._detached:
+            # The dialog was closed on a run still stopping. Nobody is looking
+            # at it, and a message box raised from a hidden window would land
+            # on top of whatever the person is doing now, with the main
+            # window's status bar already saying what became of the run.
+            _log.info("A run closed in the background has finished: %s", message)
+            return
+        self._come_to_the_front()
         self._show_completion_message(message)
+
+    def _come_to_the_front(self) -> None:
+        """Get the person's attention, wherever they went during the run.
+
+        A run lasts long enough for anybody to go and do something else, and
+        a message box that opens behind another program's window is a message
+        box nobody sees for an hour. The taskbar entry is made to flash, and
+        the dialog is brought forward so that the box that follows takes the
+        focus and is read out. Windows does not always allow a window to take
+        the foreground from another program, which is what the flash is for.
+        """
+        application = QApplication.instance()
+        if application is not None:
+            QApplication.alert(self)
+        self.activateWindow()
+        self.raise_()
 
     def _show_completion_message(self, message: str) -> None:
         """Say plainly that the run is over, and how it went.
@@ -1281,9 +1377,13 @@ class TranscribeDialog(QDialog):
         several missing keys are several sentences, and a text box can be read
         back a line at a time where a spoken announcement cannot.
         """
+        # "First" rather than "in Settings first": a missing key is put right
+        # in Settings, but a library that will not load is put right by
+        # running the launcher again, and a folder that cannot be written to
+        # is put right in Explorer. Each sentence says which.
         headline = (
             f"The run cannot start. {_plural(len(problems), 'thing')} must be put right "
-            "in Settings first."
+            "first."
         )
         lines = [headline, ""]
         lines.extend(problems)
@@ -1322,9 +1422,11 @@ class TranscribeDialog(QDialog):
         if chosen is None:
             self._refuse("There is no transcript to open yet.")
             return
-        folder = TranscriptStore(
-            chosen.path, self._settings.processing.transcript_folder_suffix
-        ).folder
+        folder = chosen.transcript_folder
+        if folder is None:
+            folder = TranscriptStore(
+                chosen.path, self._settings.processing.transcript_folder_suffix
+            ).folder
         if QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             self._set_progress_text(f"Opened {folder}.")
             announce(self._progress_bar, f"Opened the transcript folder for {chosen.name}.")
@@ -1343,32 +1445,73 @@ class TranscribeDialog(QDialog):
     # -- Closing ----------------------------------------------------------
 
     def reject(self) -> None:
-        """Cancel a run rather than closing on top of it.
+        """Cancel a run rather than closing on top of it, once.
 
         The dialog owns the thread doing the work, so closing while it runs
-        would leave that thread reporting into a window that is being taken
-        apart. Escape and the Cancel button therefore stop the run first, and
-        closing is left to a second press once it has stopped.
+        leaves that thread reporting into a window that has gone. Escape and
+        the Cancel button therefore stop the run first, and the dialog stays
+        open to say how it went.
+
+        But stopping can take minutes. The run only looks at the flag between
+        stages, and a request already with a service cannot be recalled, so a
+        dialog that refused to close until then would hold the person in
+        front of it for as long as the slowest service took. The second press
+        closes the dialog and leaves the run to stop by itself. That is safe
+        because the runner already tolerates a receiver that has gone: each
+        result it tries to send is dropped with a line in the log rather
+        than raised, and the recordings already transcribed are on the disk
+        where they were saved. The main window says that the run is still
+        stopping, so nothing is closed in silence.
         """
-        if self.is_running:
+        if self.is_running and not self._cancel_requested:
             self.cancel()
             return
+        if self.is_running:
+            self._detach()
         super().reject()
 
     def closeEvent(self, event) -> None:
-        """Refuse to close on a running job, and never close on a live thread.
+        """Answer the close box the same way as Cancel, and never join a live run.
 
         Closing the window is the same decision as pressing Cancel, so it is
-        answered the same way. Once nothing is running, the thread is stopped
+        answered the same way: the first attempt stops the run, the second
+        closes on top of it. Once nothing is running the thread is stopped
         and waited for before the dialog goes, because it reports through
-        signals on an object that is about to be destroyed.
+        signals on an object that is about to be destroyed; a run that has
+        been asked to stop and is still waiting on a service is not waited
+        for here, because that wait is the whole reason the second press
+        exists.
         """
-        if self.is_running:
+        if self.is_running and not self._cancel_requested:
             self.cancel()
             event.ignore()
             return
-        self._runner.stop()
+        if self.is_running:
+            self._detach()
+        else:
+            self._runner.stop()
         super().closeEvent(event)
+
+    def _detach(self) -> None:
+        """Let go of a run that is still stopping, so the dialog can close.
+
+        The runner keeps going until its request comes back and then sends a
+        summary nobody is waiting for. The application's own shutdown still
+        stops it, through the runner's connection to aboutToQuit, and that
+        wait is bounded to a few seconds there too.
+        """
+        self._detached = True
+        self._runner.cancel()
+        # The dialog gets rid of itself once the summary has arrived, rather
+        # than being deleted by whoever opened it. The runner is its child,
+        # and deleting the runner while its thread is still reporting would
+        # take away the object that withdraws the request keeping the machine
+        # awake. Connected after the dialog's own slot, so that it runs last.
+        self._runner.runFinished.connect(lambda _summary: self.deleteLater())
+        _log.info(
+            "The Transcribe dialog was closed while the run was still stopping; the "
+            "run will stop in the background."
+        )
 
 
 def _recording_line(recording: AudioFile) -> str:

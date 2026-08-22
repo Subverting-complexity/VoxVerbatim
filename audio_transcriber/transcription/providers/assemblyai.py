@@ -60,9 +60,11 @@ itself when the answer is "not all of it". See :class:`_SdkClient`.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 import unicodedata
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -84,6 +86,9 @@ from audio_transcriber.transcription.providers.base import (
     ProviderUnavailable,
     TranscriptionProvider,
     TranscriptionRequest,
+    retry_after_seconds,
+    timeout_for_duration,
+    wait_unless_cancelled,
 )
 
 from audio_transcriber.transcription.context import (
@@ -137,7 +142,17 @@ _CREDENTIAL_NAMES = ("api_key", "apikey", "key", "token", "secret", "password", 
 
 #: Errors worth trying again even though they carry no HTTP status, because
 #: they happened before the far end answered at all.
-_RETRYABLE_ERROR_NAMES = ("timeout", "connection")
+#: Matched against the exception's class name. ``httpx.ConnectError`` is
+#: spelt without the "ion", which is why "connect" and not "connection".
+_RETRYABLE_ERROR_NAMES = ("timeout", "connect", "protocol")
+
+#: The service counts word times from the start of the file it was given.
+#: When it is asked about a window of an uploaded file, that is still the
+#: start of the whole file, and the escalation path relies on it. A guard in
+#: :meth:`AssemblyAiProvider.transcribe_window` checks the answer against
+#: that assumption and allows this much slack, in seconds, when deciding
+#: whether the times came back counted from the window instead.
+WINDOW_RELATIVE_SLACK_SECONDS = 1.0
 
 
 class AssemblyAiProvider(TranscriptionProvider):
@@ -171,9 +186,14 @@ class AssemblyAiProvider(TranscriptionProvider):
         language_confidence_threshold: float | None = None,
         maximum_keyterms: int = DEFAULT_MAXIMUM_KEYTERMS,
         timeout_seconds: float = 900.0,
+        maximum_retries: int = 2,
         client: Any | None = None,
     ) -> None:
         """Set up the adapter.
+
+        ``maximum_retries`` is how many times a failed request or upload is
+        tried again. The transcription retry is the base class's; the upload
+        has a loop of its own here, because it sits outside ``transcribe``.
 
         ``model`` and ``afrikaans_model`` stay two separate settings because
         that is how a person thinks about them, and they are joined into one
@@ -196,6 +216,7 @@ class AssemblyAiProvider(TranscriptionProvider):
         self._language_confidence_threshold = language_confidence_threshold
         self._maximum_keyterms = max(0, maximum_keyterms)
         self._timeout_seconds = timeout_seconds
+        self.maximum_retries = max(0, maximum_retries)
         self._client = client
 
     # -- What this service is ------------------------------------------
@@ -242,13 +263,19 @@ class AssemblyAiProvider(TranscriptionProvider):
     ) -> ProviderResult:
         return self.transcribe_window(request, cancelled=cancelled)
 
-    def upload(self, audio_path: Path) -> str:
+    def upload(self, audio_path: Path, cancelled: CancelCheck | None = None) -> str:
         """Upload a recording once and return the URL to ask about it again.
 
         This is half of the escalation path. The canonical recording goes up a
         single time, and every later question about a disputed moment names
         this URL and a window inside it, which costs nothing to prepare and
         leaves no temporary clips behind.
+
+        A dropped connection is tried again, up to the configured number of
+        retries, with the same backoff the transcription retry uses. The
+        upload is a two-gigabyte file on a home connection, which is exactly
+        where a connection drops, and losing the whole escalation pass to one
+        drop would be out of proportion.
         """
         problem = self.describe_configuration_problem()
         if problem is not None:
@@ -271,11 +298,41 @@ class AssemblyAiProvider(TranscriptionProvider):
                 "The installed assemblyai package cannot upload a file on its own, so "
                 "audio cannot be reused across windowed requests."
             )
-        try:
-            return str(uploader(str(audio_path)))
-        except Exception as error:  # noqa: BLE001 - converted at this boundary
-            message, retryable, status = _describe_failure(error)
-            raise ProviderError(message, retryable=retryable, status_code=status) from error
+        attempts_allowed = 1 + max(0, int(self.maximum_retries))
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return str(uploader(str(audio_path)))
+            except Exception as error:  # noqa: BLE001 - converted at this boundary
+                message, retryable, status = _describe_failure(error)
+                failure = ProviderError(
+                    message,
+                    retryable=retryable,
+                    status_code=status,
+                    retry_after=_retry_after_of(error),
+                )
+                if not failure.retryable or attempt >= attempts_allowed:
+                    if attempt > 1:
+                        failure = ProviderError(
+                            f"AssemblyAI upload failed after {attempt} attempts: {message}",
+                            retryable=False,
+                            status_code=status,
+                        )
+                    raise failure from error
+                wait = self._wait_before_attempt(attempt, failure.retry_after)
+                _log.warning(
+                    "AssemblyAI upload did not finish (attempt %d of %d): %s. "
+                    "Trying again in %.0f s.",
+                    attempt,
+                    attempts_allowed,
+                    message,
+                    wait,
+                )
+                if not wait_unless_cancelled(wait, cancelled):
+                    raise ProviderError(
+                        "The AssemblyAI upload was not tried again, because the run was stopped."
+                    ) from error
 
     def transcribe_window(
         self,
@@ -331,12 +388,38 @@ class AssemblyAiProvider(TranscriptionProvider):
         keyterms = self._keyterms_for(request.vocabulary_terms)
         parameters = self._parameters_for(request, keyterms=keyterms, window=span)
 
+        # How long the job is waited for once submitted. The service polls
+        # rather than answers, so the configured HTTP timeout does not bound
+        # the wait by itself; this does, and it grows with the audio.
+        waited_for = span.end - span.start if span is not None else request.duration
+        wait_seconds = timeout_for_duration(self._timeout_seconds, waited_for)
+
         started_at = datetime.now()
         try:
-            transcript = client.transcribe(audio, parameters)
+            transcript = _call_transcribe(
+                client, audio, parameters, cancelled=cancelled, wait_seconds=wait_seconds
+            )
+        except ProviderError as error:
+            # The client says in its own words why it stopped waiting: the
+            # run was cancelled, or the job outlasted its allowance. Neither
+            # is a failure of the wire, so neither goes through the wire's
+            # description.
+            raise self._failed(
+                request,
+                parameters=parameters,
+                keyterms=keyterms,
+                window=span,
+                size_bytes=size_bytes,
+                started_at=started_at,
+                transcript_id=None,
+                message=str(error),
+                retryable=error.retryable,
+                status=error.status_code,
+                raw_response=None,
+            ) from error
         except Exception as error:  # noqa: BLE001 - every failure becomes a result
             message, retryable, status = _describe_failure(error)
-            return self._failed(
+            raise self._failed(
                 request,
                 parameters=parameters,
                 keyterms=keyterms,
@@ -347,10 +430,11 @@ class AssemblyAiProvider(TranscriptionProvider):
                 message=message,
                 retryable=retryable,
                 status=status,
+                retry_after=_retry_after_of(error),
                 # The library raised rather than returning, so there is no
                 # body to keep.
                 raw_response=None,
-            )
+            ) from error
 
         status_text = str(_field(transcript, "status") or "").lower()
         if status_text.endswith("error") or _field(transcript, "error"):
@@ -361,7 +445,7 @@ class AssemblyAiProvider(TranscriptionProvider):
                 f"AssemblyAI could not transcribe the audio: "
                 f"{_field(transcript, 'error') or 'no reason was given'}"
             )
-            return self._failed(
+            raise self._failed(
                 request,
                 parameters=parameters,
                 keyterms=keyterms,
@@ -378,6 +462,11 @@ class AssemblyAiProvider(TranscriptionProvider):
             )
 
         tokens = self._tokens_from(transcript, request)
+        if span is not None and audio_url is not None and request.canonical_offset == 0.0:
+            # The escalation case: an uploaded recording, a window inside it,
+            # and no offset because the service is trusted to count from the
+            # start of the file. The guard checks that trust.
+            tokens = self._placed_against_the_window(tokens, span)
         record = self._request_record(
             request,
             parameters=parameters,
@@ -423,17 +512,19 @@ class AssemblyAiProvider(TranscriptionProvider):
         tokens: list[ProviderToken] = []
         for index, word in enumerate(_field(transcript, "words") or []):
             text = _field(word, "text") or ""
+            start = _canonical_seconds(_as_float(_field(word, "start")), request.canonical_offset)
+            end = _canonical_seconds(_as_float(_field(word, "end")), request.canonical_offset)
+            if start is not None and end is not None and end < start:
+                # A word cannot end before it starts, and a negative length
+                # breaks anything downstream that divides by it.
+                end = start
             tokens.append(
                 ProviderToken(
                     provider=self.provider,
                     index=index,
                     text=text,
-                    start=_canonical_seconds(
-                        _as_float(_field(word, "start")), request.canonical_offset
-                    ),
-                    end=_canonical_seconds(
-                        _as_float(_field(word, "end")), request.canonical_offset
-                    ),
+                    start=start,
+                    end=end,
                     speaker=_as_text(_field(word, "speaker")),
                     confidence=_as_float(_field(word, "confidence")),
                     # Left unknown on purpose. The service reports one language
@@ -445,6 +536,64 @@ class AssemblyAiProvider(TranscriptionProvider):
                 )
             )
         return tokens
+
+    def _placed_against_the_window(
+        self,
+        tokens: list[ProviderToken],
+        window: AudioSpan,
+    ) -> list[ProviderToken]:
+        """Make sure a windowed answer's times are counted from the start of the file.
+
+        The escalation path asks about a window of an uploaded recording and
+        leaves the canonical offset at zero, because the service documents
+        its word times as counted from the start of the whole file. If that
+        ever stopped being true, every escalated word would land near the
+        start of the recording instead of inside the window it came from,
+        and nothing would fail: the words would simply be attached to the
+        wrong sound.
+
+        So the answer is checked against the assumption. If every word ends
+        before the window starts, and the last word ends within the length
+        of the window plus a little slack, the times can only have been
+        counted from the window, and the window's start is added. Anything
+        else is left as it came. Which case applied is logged, because a
+        change of convention on the far end is worth knowing about.
+        """
+        ends = [token.end for token in tokens if token.end is not None]
+        if not ends:
+            return tokens
+        window_length = max(0.0, window.end - window.start)
+        last_end = max(ends)
+        counted_from_window = (
+            window.start > 0.0
+            and last_end < window.start
+            and last_end <= window_length + WINDOW_RELATIVE_SLACK_SECONDS
+        )
+        if not counted_from_window:
+            _log.info(
+                "AssemblyAI's times for the window %.1f-%.1f s were counted from the "
+                "start of the recording, as expected; they were left as they came.",
+                window.start,
+                window.end,
+            )
+            return tokens
+        _log.info(
+            "AssemblyAI's times for the window %.1f-%.1f s were counted from the "
+            "start of the window (the last word ended at %.1f s), so %.1f s was "
+            "added to each of them.",
+            window.start,
+            window.end,
+            last_end,
+            window.start,
+        )
+        return [
+            replace(
+                token,
+                start=None if token.start is None else token.start + window.start,
+                end=None if token.end is None else token.end + window.start,
+            )
+            for token in tokens
+        ]
 
     # -- Building the request -------------------------------------------
 
@@ -580,15 +729,21 @@ class AssemblyAiProvider(TranscriptionProvider):
         message: str,
         retryable: bool,
         status: int | None,
+        retry_after: float | None = None,
         raw_response: Any = None,
-    ) -> ProviderResult:
-        """Report a failure as an ordinary result rather than an exception.
+    ) -> ProviderError:
+        """Build the error for a failure, with the failed result already on it.
+
+        The failure is still an ordinary result in the end: the base class
+        catches the error, tries again where the verdict says that may help,
+        and hands the result back when it gives up. Building the result here
+        keeps the provenance, and carrying it on the error is what lets the
+        retry loop read the verdict without losing it.
 
         Whatever the service said while refusing is carried out with the
         failure, because an explanation is worth keeping and this is the only
         route by which it can reach the folder beside the recording.
         """
-        _log.warning("AssemblyAI did not answer: %s", message)
         _log.debug("AssemblyAI failure: retryable=%s status=%s", retryable, status)
         record = self._request_record(
             request,
@@ -603,11 +758,17 @@ class AssemblyAiProvider(TranscriptionProvider):
             succeeded=False,
             error=message,
         )
-        return ProviderResult(
-            provider=self.provider,
-            request=record,
-            error=message,
-            raw_response=raw_response,
+        return ProviderError(
+            message,
+            retryable=retryable,
+            status_code=status,
+            retry_after=retry_after,
+            result=ProviderResult(
+                provider=self.provider,
+                request=record,
+                error=message,
+                raw_response=raw_response,
+            ),
         )
 
     def _request_record(
@@ -727,7 +888,24 @@ class _SdkClient:
         self._timeout_seconds = timeout_seconds
         self._http_client: Any = None
 
-    def transcribe(self, audio: Any, parameters: dict[str, Any]) -> Any:
+    def transcribe(
+        self,
+        audio: Any,
+        parameters: dict[str, Any],
+        *,
+        cancelled: CancelCheck | None = None,
+        wait_seconds: float | None = None,
+    ) -> Any:
+        """Submit the job and wait for it, however the request has to travel.
+
+        The waiting is always done here and never left to the library. The
+        library's ``transcribe`` polls until the job reaches a final state
+        and cannot be interrupted, so a user who stopped the run would have
+        sat through the rest of a three-hour job, and a job the service
+        never finished would have been waited for forever. Submitting and
+        then polling ourselves costs one extra line and gives the wait a
+        cancel check and a ceiling.
+        """
         unsendable = self._parameters_the_library_would_drop(parameters)
         if unsendable:
             _log.info(
@@ -736,12 +914,20 @@ class _SdkClient:
                 PACKAGE,
                 ", ".join(unsendable),
             )
-            return self._transcribe_directly(audio, parameters)
+            return self._transcribe_directly(
+                audio, parameters, cancelled=cancelled, wait_seconds=wait_seconds
+            )
 
         configuration = self._assemblyai.TranscriptionConfig()
         for key, value in parameters.items():
             setattr(configuration.raw, key, value)
-        return self._assemblyai.Transcriber(config=configuration).transcribe(audio)
+        submitted = self._assemblyai.Transcriber(config=configuration).submit(audio)
+        transcript_id = _as_text(_field(submitted, "id"))
+        if not transcript_id:
+            # No id means no job to wait for. A rejected job carries its
+            # reason on the object, and the adapter reads it from there.
+            return submitted
+        return self._wait_for(transcript_id, cancelled=cancelled, wait_seconds=wait_seconds)
 
     def upload_file(self, audio_path: str) -> str:
         return str(self._assemblyai.Transcriber().upload_file(audio_path))
@@ -764,7 +950,14 @@ class _SdkClient:
             return []
         return [name for name in parameters if name not in declared]
 
-    def _transcribe_directly(self, audio: Any, parameters: dict[str, Any]) -> dict[str, Any]:
+    def _transcribe_directly(
+        self,
+        audio: Any,
+        parameters: dict[str, Any],
+        *,
+        cancelled: CancelCheck | None = None,
+        wait_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Submit the job over the library's HTTP client and wait for it.
 
         The audio has to be named by URL here, so a local path is uploaded
@@ -791,10 +984,39 @@ class _SdkClient:
                 "transcript id and no error"
             )
 
+        return self._wait_for(transcript_id, cancelled=cancelled, wait_seconds=wait_seconds)
+
+    def _wait_for(
+        self,
+        transcript_id: str,
+        *,
+        cancelled: CancelCheck | None,
+        wait_seconds: float | None,
+    ) -> dict[str, Any]:
+        """Poll one job until it finishes, the run is stopped, or the wait runs out.
+
+        The answer is the plain JSON of the last poll, whichever road the
+        request took to the service, so the adapter reads one shape. A stop
+        or a timeout is raised as a :class:`ProviderError` in its own words:
+        neither is worth retrying, because the job is still running on the
+        far end and submitting it again would only start a second one.
+        """
+        client = self._resolve_http_client()
+        deadline = None if wait_seconds is None else time.monotonic() + max(0.0, wait_seconds)
         while True:
+            if cancelled is not None and cancelled():
+                raise ProviderError(
+                    f"AssemblyAI job {transcript_id} was not waited for, because the "
+                    "run was stopped."
+                )
             answer = _json_of(client.get(f"/v2/transcript/{transcript_id}"))
             if str(answer.get("status") or "").lower() in ("completed", "error"):
                 return answer
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ProviderError(
+                    f"AssemblyAI job {transcript_id} was still {answer.get('status') or 'queued'} "
+                    f"after {wait_seconds:.0f} seconds, which is as long as it was given."
+                )
             time.sleep(self._poll_seconds())
 
     def _poll_seconds(self) -> float:
@@ -994,6 +1216,50 @@ def _without_credentials(parameters: dict[str, Any]) -> dict[str, Any]:
             continue
         cleaned[key] = _without_credentials(value) if isinstance(value, dict) else value
     return cleaned
+
+
+def _call_transcribe(
+    client: Any,
+    audio: Any,
+    parameters: dict[str, Any],
+    *,
+    cancelled: CancelCheck | None,
+    wait_seconds: float | None,
+) -> Any:
+    """Call the client's ``transcribe``, passing the wait controls only where it takes them.
+
+    The real client polls with a cancel check and a ceiling. A client handed
+    in by a caller may be older or simpler and take only the audio and the
+    parameters; it is called that way and cannot be interrupted while it
+    waits, which is the behaviour it had before. The signature is inspected
+    rather than the call being tried and caught, because a ``TypeError``
+    raised inside the client would otherwise be mistaken for a client that
+    does not take the arguments.
+    """
+    try:
+        accepted = inspect.signature(client.transcribe).parameters
+    except (TypeError, ValueError):
+        accepted = {}
+    takes_everything = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in accepted.values()
+    )
+    if takes_everything or ("cancelled" in accepted and "wait_seconds" in accepted):
+        return client.transcribe(audio, parameters, cancelled=cancelled, wait_seconds=wait_seconds)
+    _log.debug("The AssemblyAI client in use cannot be stopped while it waits for a job.")
+    return client.transcribe(audio, parameters)
+
+
+def _retry_after_of(error: Exception) -> float | None:
+    """How long the service asked us to wait, where it said.
+
+    The library's synchronous error carries the number already read; the
+    other errors carry the response and its headers.
+    """
+    direct = _as_float(getattr(error, "retry_after", None))
+    if direct is not None:
+        return direct
+    response = getattr(error, "response", None)
+    return retry_after_seconds(getattr(response, "headers", None))
 
 
 def _describe_failure(error: Exception) -> tuple[str, bool, int | None]:

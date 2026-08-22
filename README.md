@@ -338,6 +338,19 @@ lossless copy of the recording, where the original was in a format the
 services will not take, and an `escalation` folder holding the few seconds
 of audio around each passage that was sent out for a second opinion.
 
+The `chunks` folder is only used for a service that cannot take the whole
+recording in one request. OpenAI accepts 25 megabytes, which is nowhere near
+a three-hour recording, so for OpenAI the recording is cut into pieces at
+quiet moments, each piece repeating the last few seconds of the one before
+it so the two can be stitched back together. The pieces are written as
+16 kHz mono FLAC whatever the recording itself is, because that is all a
+speech service listens to: it folds anything richer down to 16 kHz mono
+before it starts, so a piece written at 48 kHz stereo would be six times the
+size and make six times as many seams for nothing. Three hours at 48 kHz
+stereo becomes about fourteen pieces of thirteen minutes for OpenAI and two
+for Microsoft. The recording itself, and the lossless copy where there is
+one, are never resampled; only the pieces are.
+
 The two exports answer two different questions. `transcript.txt` answers
 "what was said": the words, grouped into turns, labelled with who was
 speaking, wrapped so they can be read anywhere. `review-report.md` answers

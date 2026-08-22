@@ -87,7 +87,8 @@ from audio_transcriber.transcription.model import (
 )
 from audio_transcriber.transcription.normalise import (
     EquivalenceKind,
-    are_equivalent,
+    _compound_form,
+    _has_german_letter,
     equivalence_kind,
     is_punctuation_only,
     normalise,
@@ -593,6 +594,38 @@ def _provider_of(
 # -- The word streams ----------------------------------------------------
 
 
+#: Everything :func:`~audio_transcriber.transcription.normalise.are_equivalent`
+#: looks at when it compares two texts, worked out once per text so that
+#: the matrix can compare two words, or a word and a phrase, by comparing
+#: two tuples. In order: the text itself, its comparison form, whether it
+#: has a German letter in it, and its comparison form with the umlauts
+#: dropped. See :func:`_keys_agree`.
+_Key = tuple[str, str, bool, str]
+
+
+def _key_of(text: str) -> _Key:
+    return (text, normalise(text), _has_german_letter(text), _compound_form(text, True))
+
+
+def _keys_agree(first: _Key, second: _Key) -> bool:
+    """Whether two texts are equivalent, decided from their keys alone.
+
+    This is :func:`~audio_transcriber.transcription.normalise.are_equivalent`
+    step for step: the same text, or the same comparison form, or -- only
+    when one of the two has a German letter in it -- the same form with the
+    umlauts dropped. Identical texts have identical comparison forms, so
+    the first step needs no test of its own. The matrix asks this question
+    several times for every cell, and asking it of two tuples that are
+    already worked out is what keeps a long, anchor-poor recording from
+    spending its whole time joining strings and normalising them again.
+    """
+    if first[1] == second[1]:
+        return True
+    if not (first[2] or second[2]):
+        return False
+    return first[3] == second[3]
+
+
 @dataclass(frozen=True)
 class _Stream:
     """One service's words, with everything alignment needs about them.
@@ -606,6 +639,9 @@ class _Stream:
     words: tuple[ProviderToken, ...] = ()
     punctuation: tuple[tuple[ProviderToken, ...], ...] = ()
     forms: tuple[str, ...] = ()
+    keys: tuple[_Key, ...] = ()
+    """The :class:`_Key` of each word, worked out once for the whole stream."""
+
     boundary_after: tuple[bool, ...] = ()
     """Whether a sentence, a speaker or a silence ends at this word."""
 
@@ -633,14 +669,15 @@ def _build_stream(tokens: Sequence[ProviderToken], options: AlignmentOptions) ->
     if punctuation:
         punctuation[-1].extend(pending)
 
-    forms = tuple(normalise(token.text) for token in words)
+    keys = tuple(_key_of(token.text) for token in words)
     boundaries = tuple(
         _ends_region(words, punctuation, index, options) for index in range(len(words))
     )
     return _Stream(
         words=tuple(words),
         punctuation=tuple(tuple(group) for group in punctuation),
-        forms=forms,
+        forms=tuple(key[1] for key in keys),
+        keys=keys,
         boundary_after=boundaries,
     )
 
@@ -839,7 +876,19 @@ def _align_window(
     provider: Provider,
     options: AlignmentOptions,
 ) -> list[AlignmentColumn]:
-    """Find the cheapest correspondence across one region."""
+    """Find the cheapest correspondence across one region.
+
+    The matrix has a row for every backbone word and a column for every
+    word of the other service, and each cell asks four questions of the
+    words around it: do these two words correspond, and do two or three
+    words on either side say the same as one word on the other. The
+    questions are the same ones whatever the cell, so everything they need
+    is worked out once per row and once per column before the matrix is
+    filled, and the cell itself only compares tuples and looks up lists.
+    Working it out inside the cell instead meant joining and normalising
+    the same phrase once for every column it was tried against, which is
+    where an anchor-poor recording spent nearly all of its time.
+    """
     backbone_words = backbone.words[window.backbone_start : window.backbone_end]
     other_words = other.words[window.aligned_start : window.aligned_end]
     backbone_forms = backbone.forms[window.backbone_start : window.backbone_end]
@@ -854,49 +903,74 @@ def _align_window(
         moves = [(index, index + 1, index, index + 1) for index in range(rows)]
         return _columns_from_moves(backbone, other, window, moves, provider)
 
+    backbone_keys = backbone.keys[window.backbone_start : window.backbone_end]
+    other_keys = other.keys[window.aligned_start : window.aligned_end]
+    spans = range(2, options.maximum_merge_span + 1)
+    # backbone_merges[span][row] lists the columns whose single word says
+    # the same as the ``span`` backbone words ending at ``row``; the other
+    # direction likewise. Both are in matrix coordinates, where a row or
+    # column of nought is the empty prefix, so a phrase ending at ``row``
+    # is the words ``row - span`` up to ``row``.
+    backbone_singles = _SingleWords(backbone_keys)
+    other_singles = _SingleWords(other_keys)
+    backbone_merges = {
+        span: _merge_partners(backbone_words, other_singles, span) for span in spans
+    }
+    other_merges = {
+        span: _merge_partners(other_words, backbone_singles, span) for span in spans
+    }
+    pair_costs = [
+        [
+            _pair_cost(backbone_keys[row], other_keys[column], options)
+            for column in range(columns_count)
+        ]
+        for row in range(rows)
+    ]
+
     infinity = float("inf")
+    deletion_cost = options.deletion_cost
+    insertion_cost = options.insertion_cost
+    merge_cost = options.merge_cost
     cost = [[infinity] * (columns_count + 1) for _ in range(rows + 1)]
     step: list[list[tuple[int, int] | None]] = [
         [None] * (columns_count + 1) for _ in range(rows + 1)
     ]
     cost[0][0] = 0.0
     for row in range(rows + 1):
+        cost_row = cost[row]
+        step_row = step[row]
+        above = cost[row - 1] if row else None
+        pair_row = pair_costs[row - 1] if row else None
         for column in range(columns_count + 1):
             if row == 0 and column == 0:
                 continue
             best = infinity
             taken: tuple[int, int] | None = None
             if row and column:
-                candidate = cost[row - 1][column - 1] + _pair_cost(
-                    backbone_words[row - 1].text,
-                    other_words[column - 1].text,
-                    backbone_forms[row - 1],
-                    other_forms[column - 1],
-                    options,
-                )
+                candidate = above[column - 1] + pair_row[column - 1]
                 if candidate < best:
                     best, taken = candidate, (1, 1)
             if row:
-                candidate = cost[row - 1][column] + options.deletion_cost
+                candidate = above[column] + deletion_cost
                 if candidate < best:
                     best, taken = candidate, (1, 0)
             if column:
-                candidate = cost[row][column - 1] + options.insertion_cost
+                candidate = cost_row[column - 1] + insertion_cost
                 if candidate < best:
                     best, taken = candidate, (0, 1)
-            for span in range(2, options.maximum_merge_span + 1):
+            for span in spans:
                 if row >= span and column:
-                    if _phrases_agree(backbone_words[row - span : row], other_words[column - 1]):
-                        candidate = cost[row - span][column - 1] + options.merge_cost
+                    if column in backbone_merges[span][row]:
+                        candidate = cost[row - span][column - 1] + merge_cost
                         if candidate < best:
                             best, taken = candidate, (span, 1)
                 if column >= span and row:
-                    if _phrases_agree(other_words[column - span : column], backbone_words[row - 1]):
-                        candidate = cost[row - 1][column - span] + options.merge_cost
+                    if row in other_merges[span][column]:
+                        candidate = above[column - span] + merge_cost
                         if candidate < best:
                             best, taken = candidate, (1, span)
-            cost[row][column] = best
-            step[row][column] = taken
+            cost_row[column] = best
+            step_row[column] = taken
 
     moves: list[tuple[int, int, int, int]] = []
     row, column = rows, columns_count
@@ -911,37 +985,75 @@ def _align_window(
     return _columns_from_moves(backbone, other, window, moves, provider)
 
 
-def _pair_cost(
-    backbone_text: str,
-    other_text: str,
-    backbone_form: str,
-    other_form: str,
-    options: AlignmentOptions,
-) -> float:
+class _SingleWords:
+    """One side of a window, indexed by the keys a phrase could match.
+
+    Answers "which words here say the same as this phrase" with three
+    dictionary lookups instead of a comparison against every word, and
+    gives exactly the answer :func:`_keys_agree` would give word by word:
+    the words whose comparison form is the phrase's, plus, through the
+    dropped-umlaut form, every word when the phrase has a German letter
+    and only the words that have one when it does not.
+    """
+
+    def __init__(self, keys: Sequence[_Key]) -> None:
+        self._by_form: dict[str, set[int]] = {}
+        self._by_dropped: dict[str, set[int]] = {}
+        self._by_dropped_german: dict[str, set[int]] = {}
+        for position, (_text, form, german, dropped) in enumerate(keys):
+            # One-based, as the matrix counts rows and columns.
+            self._by_form.setdefault(form, set()).add(position + 1)
+            self._by_dropped.setdefault(dropped, set()).add(position + 1)
+            if german:
+                self._by_dropped_german.setdefault(dropped, set()).add(position + 1)
+
+    def agreeing_with(self, phrase: _Key) -> frozenset[int]:
+        _text, form, german, dropped = phrase
+        found = set(self._by_form.get(form, ()))
+        if german:
+            found.update(self._by_dropped.get(dropped, ()))
+        else:
+            found.update(self._by_dropped_german.get(dropped, ()))
+        return frozenset(found)
+
+
+def _merge_partners(
+    several: Sequence[ProviderToken],
+    singles: _SingleWords,
+    span: int,
+) -> list[frozenset[int]]:
+    """For each end position on one side, the single words it may fold into.
+
+    Entry ``end`` holds the positions, one-based as the matrix counts them,
+    of every word on the other side that says the same as the ``span``
+    words ending just before ``end``. The first ``span`` entries are empty
+    because no phrase of that length ends there yet.
+
+    Every phrase is joined and keyed exactly once here, however many
+    columns it is then tried against.
+    """
+    partners: list[frozenset[int]] = [frozenset()] * min(span, len(several) + 1)
+    for end in range(span, len(several) + 1):
+        phrase = _key_of(" ".join(token.text for token in several[end - span : end]))
+        partners.append(singles.agreeing_with(phrase))
+    return partners
+
+
+def _pair_cost(backbone: _Key, other: _Key, options: AlignmentOptions) -> float:
     """What it costs to say that these two words are each other.
 
     The comparison forms are compared first because that answers the
     question for nearly every pair without any further work, and this
     function is called once for every cell of every matrix.
     """
-    if backbone_text == other_text:
+    if backbone[0] == other[0]:
         return options.exact_cost
-    if backbone_form == other_form or are_equivalent(backbone_text, other_text):
+    if _keys_agree(backbone, other):
         return options.equivalent_cost
-    likeness = _similarity(backbone_form, other_form)
+    likeness = _similarity(backbone[1], other[1])
     spread = options.maximum_substitution_cost - options.minimum_substitution_cost
     return options.maximum_substitution_cost - spread * likeness
 
-
-def _phrases_agree(several: Sequence[ProviderToken], single: ProviderToken) -> bool:
-    """Whether several words on one side say the same as one on the other.
-
-    This is what makes "data base" against "database" a single
-    correspondence. It is only ever true when the words really do say the
-    same thing, so a merge is never chosen merely because it happened to be
-    cheap.
-    """
-    return are_equivalent(" ".join(token.text for token in several), single.text)
 
 
 def _columns_from_moves(

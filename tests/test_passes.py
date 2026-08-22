@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -590,3 +591,144 @@ def test_afrikaans_reaches_the_services_only_when_the_user_enabled_it(canonical,
     for service in services.values():
         assert Language.AFRIKAANS in service.requests_received[0].languages
     assert "af" in services[Provider.OPENAI].requests_received[0].extra_parameters["languages"]
+
+
+# -- A pass that breaks in the middle ---------------------------------------
+
+
+def test_a_thread_that_dies_costs_only_its_own_service(canonical, store, monkeypatch):
+    """Even the plumbing around an adapter must not take the run down."""
+    original = passes._run_one_provider
+
+    def run_one(provider, *arguments, **keywords):
+        if provider is Provider.MICROSOFT:
+            raise RuntimeError("the thread itself broke")
+        return original(provider, *arguments, **keywords)
+
+    monkeypatch.setattr(passes, "_run_one_provider", run_one)
+
+    outcome = run(canonical, store, three_services())
+
+    assert outcome.failed_providers == (Provider.MICROSOFT,)
+    assert "the thread itself broke" in outcome.results[Provider.MICROSOFT].error
+    assert any("the thread itself broke" in warning for warning in outcome.warnings)
+    assert set(outcome.succeeded_providers) == {Provider.ELEVENLABS, Provider.OPENAI}
+
+
+def test_a_context_that_cannot_be_adapted_is_a_failed_result(canonical, store, monkeypatch):
+    def broken(*arguments, **keywords):
+        raise ValueError("no context for you")
+
+    monkeypatch.setattr(passes, "adapt_for", broken)
+
+    outcome = run(canonical, store, three_services())
+
+    assert outcome.succeeded_providers == ()
+    assert all("no context for you" in result.error for result in outcome.results.values())
+
+
+class FailingOnOnePiece(FakeService):
+    """Answers every piece of the recording except the one named."""
+
+    def __init__(self, *arguments, failing_chunk: int, **keywords) -> None:
+        super().__init__(*arguments, **keywords)
+        self.failing_chunk = failing_chunk
+
+    def _transcribe(self, request, cancelled=None) -> ProviderResult:
+        if request.chunk_index == self.failing_chunk:
+            self.requests_received.append(request)
+            return ProviderResult(provider=self.provider, error="the service hiccupped")
+        return super()._transcribe(request, cancelled)
+
+
+def chunked_service(failing_chunk: int) -> FailingOnOnePiece:
+    return FailingOnOnePiece(
+        Provider.OPENAI,
+        spoken_words(Provider.OPENAI, SENTENCE),
+        capabilities=replace(TEXT_ONLY_CAPABILITIES, maximum_file_bytes=40_000),
+        failing_chunk=failing_chunk,
+    )
+
+
+def test_one_failed_piece_does_not_cut_words_off_the_piece_after_it(canonical, store):
+    """Only the pieces that answered are merged.
+
+    The merge joins each piece to the one before it on their shared overlap.
+    A failed piece in that list has no words to match, so the join would have
+    fallen back to cutting a nominal number of words off the start of the
+    next piece, losing real words at the very place words are already missing.
+    """
+    service = chunked_service(failing_chunk=1)
+
+    outcome = run(canonical, store, {Provider.OPENAI: service})
+
+    pieces = len(service.requests_received)
+    assert pieces >= 3, "the recording must have been cut into at least three pieces"
+    result = outcome.results[Provider.OPENAI]
+    assert result.succeeded
+    words_per_piece = len(SENTENCE.split())
+    # Every answered piece's words are there: the piece after the failed one
+    # was not trimmed against a neighbour that never answered.
+    answered = [token for token in result.tokens if token.chunk_index != 1]
+    assert len(answered) == len(result.tokens)
+    assert [token.text for token in result.tokens[:words_per_piece]] == SENTENCE.split()
+    assert [token.text for token in result.tokens if token.chunk_index == 2][:2] == ["the", "invoice"]
+
+
+def test_the_warning_for_a_failed_piece_names_the_time_it_covered(canonical, store):
+    service = chunked_service(failing_chunk=1)
+
+    outcome = run(canonical, store, {Provider.OPENAI: service})
+
+    failed = [request for request in service.requests_received if request.chunk_index == 1][0]
+    warning = next(warning for warning in outcome.warnings if "hiccupped" in warning)
+    assert "part 2 of" in warning
+    assert passes._clock(failed.canonical_offset) in warning
+    assert "–" in warning
+
+
+def test_clock_times_read_as_minutes_and_seconds():
+    assert passes._clock(0) == "00:00"
+    assert passes._clock(65.4) == "01:05"
+    assert passes._clock(3725) == "1:02:05"
+
+
+# -- Chunk files are temporary -------------------------------------------------
+
+
+def test_chunk_files_are_deleted_once_the_pass_is_merged(canonical, store):
+    chunk_folder = store.folder / "chunks"
+    chunked = FakeService(
+        Provider.OPENAI,
+        spoken_words(Provider.OPENAI, SENTENCE),
+        capabilities=replace(TEXT_ONLY_CAPABILITIES, maximum_file_bytes=40_000),
+    )
+    seen: list[bool] = []
+    chunked._before_answering = lambda: seen.append(any(chunk_folder.glob("*")))
+
+    outcome = run(canonical, store, {Provider.OPENAI: chunked})
+
+    assert outcome.results[Provider.OPENAI].succeeded
+    assert seen and all(seen), "the chunks existed while the service was being called"
+    assert not chunk_folder.exists(), "nothing should be left once the pass is over"
+    assert Path(canonical.path).exists(), "the canonical recording is never touched"
+
+
+def test_chunk_files_are_deleted_even_when_the_pass_fails(canonical, store):
+    chunk_folder = store.folder / "chunks"
+    chunked = FakeService(
+        Provider.OPENAI,
+        capabilities=replace(TEXT_ONLY_CAPABILITIES, maximum_file_bytes=40_000),
+        error="refused",
+    )
+
+    run(canonical, store, {Provider.OPENAI: chunked})
+
+    assert not chunk_folder.exists()
+
+
+def test_a_service_that_took_the_recording_whole_leaves_it_where_it_was(canonical, store):
+    outcome = run(canonical, store, three_services())
+
+    assert outcome.any_succeeded
+    assert Path(canonical.path).exists()

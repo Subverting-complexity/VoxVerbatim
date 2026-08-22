@@ -121,7 +121,7 @@ from audio_transcriber.transcription.normalise import (
     equivalence_kind,
     normalise,
 )
-from audio_transcriber.transcription.risk import numbers_disagree, risk_at
+from audio_transcriber.transcription.risk import RISK_WINDOW, numbers_disagree, risk_at
 from audio_transcriber.transcription.vocabulary import TermCategory, VocabularyIndex
 
 #: How far each service is believed before anything about the word is known.
@@ -274,6 +274,21 @@ class ReconciliationOptions:
 
     maximum_merge_span: int = 3
     """How many backbone words one decision may cover, matching alignment."""
+
+    absence_reach: int = 20
+    """How far, in backbone words, a service may be silent before it is
+    treated as absent rather than as disagreeing.
+
+    A service that returned only part of the recording, because a chunk
+    failed or a request timed out after partial output, is not in the
+    table's list of missing services: it did say something. But it said
+    nothing at all about the rest of the recording, and counting every word
+    after the point where it stopped as a word it failed to hear would let
+    two such services, with a little doubt from the backbone, delete real
+    speech. So a service with no word within this many positions either
+    side is treated exactly like one that never answered: its silence here
+    is not evidence about this word.
+    """
 
     alignment_floor: float = 0.60
     """What a service is still worth when the alignment lined it up poorly.
@@ -541,6 +556,7 @@ def reconcile(
         languages = read_languages(table, results, configuration)
 
     coverage = _coverage(table)
+    extents = _extents(coverage)
     backbone_texts = [token.text for token in table.backbone_tokens]
     boundaries = _speaker_boundaries(table, coverage)
     overlaps = _overlapping_positions(table)
@@ -573,6 +589,7 @@ def reconcile(
             scope=scope,
             table=table,
             coverage=coverage,
+            extents=extents,
             backbone_texts=backbone_texts,
             languages=languages,
             vocabulary=vocabulary,
@@ -639,6 +656,25 @@ def _coverage(table: AlignedTable) -> dict[Provider, dict[int, AlignmentColumn]]
     return found
 
 
+def _extents(
+    coverage: Mapping[Provider, Mapping[int, AlignmentColumn]],
+) -> dict[Provider, tuple[int, int]]:
+    """The first and last backbone word each service put anything against.
+
+    A service that stopped half way through the recording has an extent
+    that ends there, and every word after it lies outside. Services that
+    put nothing anywhere are left out of the result.
+    """
+    found: dict[Provider, tuple[int, int]] = {}
+    for provider, per_position in coverage.items():
+        covered = [
+            position for position, column in per_position.items() if column.aligned_tokens
+        ]
+        if covered:
+            found[provider] = (min(covered), max(covered))
+    return found
+
+
 def _scope(
     position: int,
     coverage: Mapping[Provider, Mapping[int, AlignmentColumn]],
@@ -675,6 +711,7 @@ def _decide_scope(
     scope: tuple[int, ...],
     table: AlignedTable,
     coverage: Mapping[Provider, Mapping[int, AlignmentColumn]],
+    extents: Mapping[Provider, tuple[int, int]],
     backbone_texts: Sequence[str],
     languages: LanguageReading,
     vocabulary: VocabularyIndex | None,
@@ -692,7 +729,7 @@ def _decide_scope(
     backbone_tokens = tuple(table.backbone_tokens[index] for index in scope)
     evidence = languages.for_position(position)
     readings = _gather(scope, table, coverage, backbone_tokens)
-    deletions = _deletions(scope, coverage, table)
+    deletions = _deletions(scope, coverage, table, extents, options)
 
     speaker = backbone_tokens[0].speaker if backbone_tokens else None
     groups = _group(readings)
@@ -878,6 +915,8 @@ def _deletions(
     scope: tuple[int, ...],
     coverage: Mapping[Provider, Mapping[int, AlignmentColumn]],
     table: AlignedTable,
+    extents: Mapping[Provider, tuple[int, int]] | None = None,
+    options: ReconciliationOptions = DEFAULT_OPTIONS,
 ) -> tuple[Provider, ...]:
     """The services that heard nothing where the backbone heard a word.
 
@@ -885,15 +924,56 @@ def _deletions(
     disagreeing about this word; it never spoke about any word, and letting
     a failed request argue against every word of the recording would turn
     one outage into a transcript full of doubt.
+
+    Neither is a service that returned nothing anywhere near here. A service
+    whose output stops half way through the recording is in the same
+    position, for every word after the stop, as one that never answered,
+    and is treated the same way: outside the first and last word it put
+    anything against, or with no word of its own within reach of this
+    place, its silence is not evidence. See
+    :attr:`ReconciliationOptions.absence_reach`.
     """
+    if extents is None:
+        extents = _extents(coverage)
     found: list[Provider] = []
+    count = len(table.backbone_tokens)
     for provider, per_position in coverage.items():
         if provider in table.missing_providers:
             continue
         columns = [per_position.get(position) for position in scope]
-        if all(column is not None and not column.aligned_tokens for column in columns):
-            found.append(provider)
+        if not all(column is not None and not column.aligned_tokens for column in columns):
+            continue
+        if _is_absent_near(per_position, scope, count, extents.get(provider), options.absence_reach):
+            continue
+        found.append(provider)
     return tuple(found)
+
+
+def _is_absent_near(
+    per_position: Mapping[int, AlignmentColumn],
+    scope: tuple[int, ...],
+    count: int,
+    extent: tuple[int, int] | None,
+    reach: int,
+) -> bool:
+    """Whether a service put no word at all near this place.
+
+    True outside the stretch of the recording the service covered at all,
+    and true inside it where the nearest word the service put down is more
+    than ``reach`` backbone positions away.
+    """
+    if extent is None:
+        return True
+    first, last = extent
+    if scope[-1] < first or scope[0] > last:
+        return True
+    start = max(0, scope[0] - reach)
+    end = min(count, scope[-1] + reach + 1)
+    for position in range(start, end):
+        column = per_position.get(position)
+        if column is not None and column.aligned_tokens:
+            return False
+    return True
 
 
 def _group(readings: Sequence[_Reading]) -> list[_Group]:
@@ -1183,11 +1263,18 @@ def _risk_for(
     """
     position = scope[0]
     found: list[RiskCategory] = []
+    # Only the words within the risk window either side can bear on the
+    # answer, so only those are copied. Copying the whole recording once per
+    # candidate per word made this quadratic in the length of the recording,
+    # for no difference in the result.
+    start = max(0, position - RISK_WINDOW)
+    end = min(len(backbone_texts), position + len(scope) + RISK_WINDOW)
+    local = position - start
     for group in groups or ():
-        words = list(backbone_texts)
-        if 0 <= position < len(words):
-            words[position : position + len(scope)] = [group.display]
-        for category in risk_at(words, position):
+        words = list(backbone_texts[start:end])
+        if 0 <= position < len(backbone_texts):
+            words[local : local + len(scope)] = [group.display]
+        for category in risk_at(words, local):
             if category not in found:
                 found.append(category)
     return tuple(found)
@@ -1356,6 +1443,7 @@ def _emit(
         words = [winner.display]
     shared = len(words) != len(scope) and len(words) > 1
     candidates = _candidates(groups)
+    backbone_text = " ".join(token.text for token in backbone_tokens)
 
     tokens: list[FinalToken] = []
     for index, word in enumerate(words):
@@ -1364,7 +1452,13 @@ def _emit(
             equivalence = equivalence_kind(covered[0].text, word)
         else:
             covered = backbone_tokens
-            equivalence = equivalence_kind(winner.readings[0].text, winner.display)
+            # The span being inherited is the backbone's, so the question
+            # is how the winner relates to what the backbone wrote there.
+            # Comparing the winner with its own first reading answered a
+            # different question, and called a substitution over a merged
+            # span an exact provider time whenever the backbone's reading
+            # was not in the winning group.
+            equivalence = equivalence_kind(backbone_text, winner.display)
         timing = decide_timing(
             backbone_tokens=covered,
             equivalence=equivalence,

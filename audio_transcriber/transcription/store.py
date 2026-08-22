@@ -46,10 +46,17 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
-from audio_transcriber.json_store import read_json_object, write_json_object
+from audio_transcriber.json_store import (
+    keep_unsaved_copy,
+    read_json_object,
+    replace_with_retries,
+    unsaved_copy_path,
+    write_json_object,
+)
 from audio_transcriber.transcription.model import (
     TRANSCRIPT_FORMAT_VERSION,
     AlignmentStatus,
@@ -97,6 +104,11 @@ EXPORTS_FOLDER = "exports"
 REDACTED_TEXT = "[redacted]"
 
 _SEQUENCE_PATTERN = re.compile(r"^(\d{4,})-")
+
+#: The longest path Windows accepts unless long paths have been switched on
+#: for the machine, which they usually have not. A recording that sits deep
+#: in a folder tree with a long name can put its transcript folder past it.
+WINDOWS_PATH_LIMIT = 260
 
 
 # -- Keeping secrets off the disk ----------------------------------------
@@ -897,8 +909,62 @@ class TranscriptStore:
         return self._folder / EXPORTS_FOLDER
 
     @property
+    def unsaved_transcript_path(self) -> Path:
+        """Where a transcript that could not be moved into place is left.
+
+        A save fails on Windows when something else holds the old file open,
+        and the finished transcript is then kept here rather than deleted,
+        because it took an hour of paid services to make. Whoever reports the
+        failure should name this path, so the person knows the words are not
+        gone and where to find them.
+        """
+        return unsaved_copy_path(self.transcript_path)
+
+    @property
     def has_transcript(self) -> bool:
         return self.transcript_path.is_file()
+
+    def probe_writable(self) -> str | None:
+        """Check that the transcript folder can be made and written to.
+
+        Returns a sentence saying what is wrong, or ``None`` when a tiny file
+        could be created in the folder and removed again. This is asked
+        before a run starts, because the folder is where an hour of paid
+        answers ends up, and the useful moment to learn that it is on a
+        read-only drive, or that its path is longer than Windows allows, is
+        before the money has been spent rather than after.
+
+        Nothing here may raise. The folder is created if it does not exist,
+        which the run would do anyway, and the probe file is removed whether
+        or not the write worked.
+        """
+        folder = self._folder
+        probe = folder / ".write-probe.tmp"
+        too_long = len(str(probe)) > WINDOWS_PATH_LIMIT
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            with open(probe, "wb") as handle:
+                handle.write(b"probe")
+        except OSError as error:
+            reason = str(error).strip() or type(error).__name__
+            if too_long:
+                return (
+                    f"The transcript folder for {self._recording_path.name} cannot be "
+                    f"written to, and its path is {len(str(probe))} characters long, "
+                    f"which is more than the {WINDOWS_PATH_LIMIT} Windows allows. Move "
+                    f"the recording to a shorter path, or shorten its name. ({reason})"
+                )
+            return (
+                f"The transcript folder for {self._recording_path.name} cannot be "
+                f"written to: {reason}. Check that the folder {folder.parent} is not "
+                "read-only and that the drive is connected."
+            )
+        finally:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+        return None
 
     # -- The transcript itself
 
@@ -1108,13 +1174,29 @@ def _write_bytes(path: Path, body: bytes) -> bool:
         try:
             with handle:
                 handle.write(body)
-            os.replace(temp_name, path)
         except BaseException:
             try:
                 os.unlink(temp_name)
             except OSError:
                 pass
             raise
+        # The move is retried and, failing that, the data is kept beside the
+        # target rather than deleted, for the same reason as the transcript
+        # itself: an export somebody has open in an editor is the commonest
+        # thing here to be held, and the answer from a service is evidence.
+        try:
+            moved = replace_with_retries(temp_name, path, time.sleep)
+        except BaseException:
+            # Not a held file but something wrong with the place itself, so
+            # there is nothing to keep the data for.
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+        if not moved:
+            keep_unsaved_copy(temp_name, path)
+            return False
     except OSError:
         _log.warning("Could not write %s", path, exc_info=True)
         return False

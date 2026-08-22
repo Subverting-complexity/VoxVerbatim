@@ -462,7 +462,12 @@ def _compound_form(text: str, dropped: bool) -> str:
     position = 0
     while position < len(expanded):
         run = _digit_run(expanded, position)
-        if run and _is_one_number_in_blocks(run):
+        # A run that does not fit as a whole may still begin with a number
+        # that does, "1 000 000" followed by "5", so it is shortened from the
+        # end until what is left is one number, or too short to be one.
+        while len(run) >= 2 and not _is_one_number_in_blocks(run):
+            run = run[:-1]
+        if len(run) >= 2:
             if joined and joined[-1][-1:].isdigit():
                 joined.append(" ")
             joined.append("".join(run))
@@ -498,13 +503,20 @@ def _is_one_number_in_blocks(run: list[str]) -> bool:
     """Whether these digit words are one number written in blocks.
 
     Grouped thousands have one to three digits first and exactly three in
-    every later block. A telephone number is three or more blocks of three
-    or more digits. "1 2", "20 5" and "2024 05" fit neither and stay apart.
+    every later block. A telephone number begins with a zero and is three or
+    more blocks of three or four digits. "1 2", "20 5" and "2024 05" fit
+    neither and stay apart, and so do three years or three amounts read in
+    a row, which a looser telephone rule would run together.
     """
     leading = len(run[0]) - len(run[0].rstrip("0123456789"))
     if 1 <= leading <= 3 and all(len(block) == 3 for block in run[1:]):
         return True
-    return len(run) >= 3 and run[0].isdigit() and all(len(block) >= 3 for block in run)
+    return (
+        len(run) >= 3
+        and run[0].isdigit()
+        and run[0].startswith("0")
+        and all(3 <= len(block) <= 4 for block in run)
+    )
 
 
 @lru_cache(maxsize=100_000)

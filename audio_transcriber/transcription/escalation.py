@@ -1440,25 +1440,43 @@ def _words_for(
     inside the dispute's span, and as many words are taken as the dispute
     has tokens, nearest the middle first.
 
+    The test has some give in it. Two engines can disagree about where a
+    short word begins by more than half its length, so a word whose middle
+    falls just outside the span, within a twentieth of a second or half
+    the span's length, is still the answer; so is a word that contains the
+    span's own middle, which is what a service hearing one long word where
+    the backbone heard a short one looks like. Every word inside the span
+    itself is taken, so a service that heard "fif teen" for "fifteen" still
+    answers the question; the caller falls back to the nearest word alone
+    when the joined words match nothing.
+
     A word is used once. A single service word that straddles two disputed
     words is one word where the transcript has two, which is a disagreement
     about the word count rather than a confirmation of both.
     """
     span = dispute.span
-    wanted = max(1, len(dispute.token_ids))
-    inside = [
-        word
-        for word in candidates
-        if id(word) not in used and span.start <= _midpoint(word) <= span.end
-    ]
-    if not inside:
-        return []
     centre = (span.start + span.end) / 2.0
-    inside.sort(key=lambda word: abs(_midpoint(word) - centre))
-    chosen = inside[:wanted]
-    chosen.sort(key=_midpoint)
-    used.update(id(word) for word in chosen)
-    return chosen
+    give = max(_MATCH_TOLERANCE_SECONDS, 0.5 * span.duration)
+    fresh = [word for word in candidates if id(word) not in used]
+    inside = [word for word in fresh if span.start <= _midpoint(word) <= span.end]
+    if not inside:
+        near = [
+            word
+            for word in fresh
+            if span.start - give <= _midpoint(word) <= span.end + give
+            or _span_of(word).start <= centre <= _span_of(word).end
+        ]
+        if not near:
+            return []
+        inside = [min(near, key=lambda word: abs(_midpoint(word) - centre))]
+    inside.sort(key=_midpoint)
+    used.update(id(word) for word in inside)
+    return inside
+
+
+#: How far outside a disputed word's span a service word's middle may fall
+#: and still be the answer to it.
+_MATCH_TOLERANCE_SECONDS = 0.05
 
 
 def _midpoint(word: ProviderToken) -> float:
@@ -1489,7 +1507,16 @@ def _apply_one(
     provider = heard[0].provider
     heard_text = " ".join(word.text for word in heard if word.text).strip()
     references = tuple(TokenReference(provider, word.index) for word in heard)
-    matched = _attach_evidence(token, heard_text, provider, references)
+    matched = _attach_evidence(token, heard_text, provider, references, record_miss=len(heard) == 1)
+    if matched is None and len(heard) > 1:
+        # Several words fell inside the span and together they are nobody's
+        # reading. The one nearest the middle is what was asked about; the
+        # others are the neighbours' words leaning in.
+        centre = (token.start + token.end) / 2.0 if token.span else _midpoint(heard[0])
+        nearest = min(heard, key=lambda word: abs(_midpoint(word) - centre))
+        heard_text = nearest.text.strip()
+        references = (TokenReference(provider, nearest.index),)
+        matched = _attach_evidence(token, heard_text, provider, references)
 
     if matched is None or not result.settles_disputes or token.risk_categories:
         token.flag(ReviewReason.ESCALATION_UNRESOLVED)
@@ -1519,6 +1546,7 @@ def _attach_evidence(
     heard_text: str,
     provider: Provider,
     references: tuple[TokenReference, ...],
+    record_miss: bool = True,
 ) -> Candidate | None:
     """Record what the second opinion heard among the word's candidates.
 
@@ -1540,9 +1568,10 @@ def _attach_evidence(
             )
             token.candidates[position] = updated
             return updated
-    token.candidates.append(
-        Candidate(text=heard_text, providers=(provider,), source_tokens=references)
-    )
+    if record_miss:
+        token.candidates.append(
+            Candidate(text=heard_text, providers=(provider,), source_tokens=references)
+        )
     return None
 
 

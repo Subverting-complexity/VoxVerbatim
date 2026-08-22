@@ -1108,3 +1108,62 @@ def test_the_time_window_question_is_retried_like_any_other_request():
 
     assert provider.calls == 2
     assert outcome.results[0].succeeded
+
+
+def test_a_short_word_heard_a_little_later_by_the_service_is_still_the_answer():
+    """Two engines can disagree about where a 100 ms word starts by more than
+    half its length. The word whose middle is just outside the span is it."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = word(
+        "fifteen", 1.0, 1.1,
+        candidates=(("fifteen", (Provider.ELEVENLABS,)), ("fifty", (Provider.OPENAI,))),
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT,),
+    )
+    token.text_confidence = Confidence.REVIEW_REQUIRED
+    outcome = EscalationOutcome(
+        results=(
+            _answered(token, (("and", 0.8, 0.96), ("fifty", 1.06, 1.16), ("dollars", 1.16, 1.5))),
+        )
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.settled == 1
+    assert token.text == "fifty"
+
+
+def test_a_word_the_service_split_in_two_still_confirms_it():
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = word(
+        "database", 10.0, 10.5,
+        candidates=(("database", (Provider.ELEVENLABS,)), ("data bus", (Provider.OPENAI,))),
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT,),
+    )
+    token.text_confidence = Confidence.REVIEW_REQUIRED
+    outcome = EscalationOutcome(
+        results=(_answered(token, (("data", 10.0, 10.2), ("base", 10.2, 10.5))),)
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.confirmed == 1
+    assert token.needs_review is False
+
+
+def test_when_neighbours_lean_into_a_long_span_the_word_in_the_middle_answers():
+    """Two words can have their middles inside a long word's span. Joined they
+    are nobody's reading; the one nearest the middle is what was asked."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()  # 10.0 to 10.5
+    outcome = EscalationOutcome(
+        results=(_answered(token, (("fifty", 9.98, 10.30), ("dollars", 10.30, 10.7))),)
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.settled == 1
+    assert token.text == "fifty"
+    assert "fifty dollars" not in [candidate.text for candidate in token.candidates]

@@ -1132,8 +1132,20 @@ def _poll_fault_is_passing(error: Exception) -> bool:
     status = _as_int(getattr(error, "status_code", None))
     if status is not None:
         return status == 408 or status == 429 or status >= 500
+    if isinstance(error, OSError):
+        # Sockets, TLS and name lookup all report through OSError.
+        return True
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx arrives with the SDK
+        httpx = None
+    if httpx is not None and isinstance(error, httpx.TransportError):
+        return True
     name = type(error).__name__.lower()
-    return any(hint in name for hint in ("timeout", "connect", "protocol", "readerror"))
+    return any(
+        hint in name
+        for hint in ("timeout", "connect", "protocol", "readerror", "writeerror", "network")
+    )
 
 
 class _DirectRequestError(Exception):

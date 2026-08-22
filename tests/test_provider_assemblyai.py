@@ -541,7 +541,7 @@ class FakeHttpClient:
         self.posts.append({"url": url, "json": dict(json)})
         return self.answers.pop(0) if self.answers else FakeResponse({"id": "job-1"})
 
-    def get(self, url: str) -> FakeResponse:
+    def get(self, url: str, **_options: object) -> FakeResponse:
         self.gets.append(url)
         return self.answers.pop(0) if self.answers else FakeResponse(TRANSCRIPT)
 
@@ -834,7 +834,7 @@ def test_a_stopped_run_stops_the_polling(monkeypatch) -> None:
 
     original_get = http.get
 
-    def counting_get(url: str) -> FakeResponse:
+    def counting_get(url: str, **_options: object) -> FakeResponse:
         nonlocal polls
         polls += 1
         return original_get(url)
@@ -1065,3 +1065,56 @@ def test_a_word_that_ends_before_it_starts_is_given_no_length(tmp_path: Path) ->
 
     token = result.tokens[0]
     assert token.end == token.start == pytest.approx(120.5 + 0.9)
+
+
+def test_a_poll_that_fails_is_polled_again_rather_than_the_job_being_submitted_again(
+    monkeypatch,
+) -> None:
+    """A job is paid for when it is submitted. A dropped connection or a 503
+    on one of the thousands of polls over a long job says nothing about the
+    job, which is still running, so the same job is asked about again. Letting
+    the fault out would have the retry loop submit a second, paid job and
+    never read the first."""
+    import httpx
+
+    package = FakePackage()
+    http = FakeHttpClient(
+        [
+            FakeResponse({"id": "job-1", "status": "processing"}),
+            FakeResponse({"error": "gateway"}, status_code=502),
+            FakeResponse(TRANSCRIPT),
+        ]
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+    original_get = http.get
+    faults = iter([None, httpx.ReadTimeout("slow"), None, None])
+
+    def faulty_get(url: str, **_options: object) -> FakeResponse:
+        fault = next(faults)
+        if fault is not None:
+            raise fault
+        return original_get(url)
+
+    http.get = faulty_get
+
+    answer = client.transcribe("https://cdn.assemblyai.com/a.wav", {"new_option": 1})
+
+    assert answer["status"] == "completed"
+    assert len(http.posts) == 1, "the job was submitted more than once"
+
+
+def test_a_poll_refused_for_a_reason_that_will_not_change_is_not_repeated(monkeypatch) -> None:
+    package = FakePackage()
+    http = FakeHttpClient(
+        [FakeResponse({"id": "job-1"})]
+        + [FakeResponse({"error": "not found"}, status_code=404)] * 3
+    )
+    client = sdk_client_with(monkeypatch, http, package)
+    monkeypatch.setattr(assemblyai.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(Exception) as raised:
+        client.transcribe("https://cdn.assemblyai.com/a.wav", {"new_option": 1})
+
+    assert getattr(raised.value, "status_code", None) == 404
+    assert len(http.gets) == 1

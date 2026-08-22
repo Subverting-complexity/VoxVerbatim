@@ -379,3 +379,23 @@ def test_several_words_are_compared_as_a_phrase_not_as_joined_forms():
     assert "".join(forms) == "205"
     assert normalise_phrase(["twenty", "five"]) == "25"
     assert normalise_phrase(["data", "base"]) == normalise("database")
+
+
+@pytest.mark.parametrize(
+    ("spaced", "plain"),
+    [
+        ("10 000", "10,000"),
+        ("R10 000", "R10000"),
+        ("100 000 000", "100000000"),
+        ("082 123 4567", "0821234567"),
+    ],
+)
+def test_a_number_written_in_blocks_is_still_one_number(spaced: str, plain: str) -> None:
+    """Thousands grouped by a space, and a telephone number read in blocks,
+    are one number however a service chose to write it."""
+    assert are_equivalent(spaced, plain)
+
+
+@pytest.mark.parametrize("pair", [("1 2", "12"), ("20 5", "205"), ("2024 05", "202405")])
+def test_two_numbers_beside_each_other_stay_two(pair: tuple[str, str]) -> None:
+    assert not are_equivalent(*pair)

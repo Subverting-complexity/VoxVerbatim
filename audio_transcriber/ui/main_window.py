@@ -46,6 +46,7 @@ from audio_transcriber.transcription.project import (
     ProjectState,
     ProjectStore,
 )
+from audio_transcriber.transcription.runner import RunSummary
 from audio_transcriber.transcription.runner import summarise as summarise_transcription
 from audio_transcriber.transcription.store import TranscriptStore
 from audio_transcriber.transcription.vocabulary import (
@@ -123,6 +124,16 @@ class MainWindow(QMainWindow):
         # Whether a review is part way through being opened, which can take
         # a while and lets the event loop run in between; see open_project_review.
         self._opening_review = False
+        # Whether this window has been asked to close. Opening a review lets
+        # the event loop run between transcripts, and a close handled in that
+        # time must stop the opening rather than let a window appear after
+        # the application has gone; see _let_the_window_breathe_unless_closing.
+        self._closing = False
+        # A Transcribe dialog that was closed on a run still stopping. It is
+        # kept so that a second run cannot be started on top of the first,
+        # and so that the summary can be said out loud when the run finally
+        # stops; it is let go when that summary arrives.
+        self._stopping_dialog: TranscribeDialog | None = None
         # The review window's player, kept here only so that it can be
         # stopped the moment the window is asked to go. It belongs to the
         # window and Qt destroys it with the window; see _close_review_window.
@@ -264,7 +275,7 @@ class MainWindow(QMainWindow):
             file_menu,
             "Select &Folder...",
             QKeySequence.StandardKey.Open,
-            self._folder_panel.browse,
+            self._browse_for_folder,
         )
         self._refresh_action = self._add_action(
             file_menu, "&Refresh File List", QKeySequence(Qt.Key.Key_F5), self.refresh
@@ -420,11 +431,40 @@ class MainWindow(QMainWindow):
             selected=self._session.selected_file,
         )
 
+    def _browse_for_folder(self) -> None:
+        """Ask for a folder, unless a review is part way through opening."""
+        if self._refuse_folder_change_while_opening_review():
+            return
+        self._folder_panel.browse()
+
     def _on_folder_chosen(self, folder_text: str) -> None:
+        if self._refuse_folder_change_while_opening_review():
+            return
         folder = Path(folder_text)
         self._folder_panel.set_folder(folder)
         self._load_folder(folder)
         self._table.setFocus()
+
+    def _refuse_folder_change_while_opening_review(self) -> bool:
+        """Say no to a change of folder while a review is being opened.
+
+        Opening a review reads the folder's transcripts on this thread and
+        lets the event loop run between them, which is long enough for a
+        folder change to arrive. Letting it through would change the folder
+        under the opening: the review would be built from the old folder's
+        transcripts and then shown under the new folder's name, with every
+        decision in it saved to the wrong project. Returns whether the change
+        was refused.
+        """
+        if not self._opening_review:
+            return False
+        self._set_status(
+            "The review is still being opened, so the folder cannot be changed yet. "
+            "Wait for the review to appear.",
+            alert=True,
+            urgent=True,
+        )
+        return True
 
     def refresh(self) -> None:
         """Read the current folder again, keeping the checked and selected files."""
@@ -451,6 +491,8 @@ class MainWindow(QMainWindow):
         # the review window writes each decision away as it is made. Reading
         # the same folder again is not a change of folder and leaves it alone,
         # so refreshing the file list does not take a review away.
+        if self._refuse_folder_change_while_opening_review():
+            return
         if self._folder is not None and folder != self._folder:
             self._close_review_window()
         self._folder = folder
@@ -720,6 +762,17 @@ class MainWindow(QMainWindow):
                 urgent=True,
             )
             return
+        if self._previous_run_is_still_stopping():
+            # Two runs at once would both be writing transcripts beside the
+            # same recordings, and the first to finish would withdraw the
+            # request keeping the machine awake from under the second.
+            self._set_status(
+                "The previous run is still stopping. Wait for it to finish before "
+                "starting another.",
+                alert=True,
+                urgent=True,
+            )
+            return
         dialog = TranscribeDialog(
             files,
             self._settings.transcription,
@@ -733,9 +786,13 @@ class MainWindow(QMainWindow):
             # has stopped, because the runner inside it is what the run
             # reports to and what withdraws the request keeping the machine
             # awake; the dialog gets rid of itself once the summary arrives.
+            # This window keeps hold of it until then, so that it can refuse
+            # a second run and can say how the first went when it stops.
             # The person is told plainly, because a window that closed on a
             # running job and said nothing would leave them wondering whether
             # the recordings already done had been kept.
+            self._stopping_dialog = dialog
+            dialog.detachedRunFinished.connect(self._on_detached_run_finished)
             self._set_status(
                 "Transcribe was closed while the run was still stopping. It stops by "
                 "itself when the request it is waiting on comes back. Recordings "
@@ -765,6 +822,33 @@ class MainWindow(QMainWindow):
             # file, and opening on the new file alone would hide exactly the
             # decision that has already been taken.
             self.open_project_review(land_on=review.path.name)
+
+    def _previous_run_is_still_stopping(self) -> bool:
+        """Whether a run closed in the background has not yet stopped."""
+        dialog = self._stopping_dialog
+        if dialog is None:
+            return False
+        if dialog.is_stopping_in_background:
+            return True
+        # It stopped without this window hearing, which should not happen
+        # but is not a reason to refuse every run from now on.
+        self._stopping_dialog = None
+        return False
+
+    def _on_detached_run_finished(self, summary: RunSummary) -> None:
+        """Say how a run closed in the background went, now that it has stopped.
+
+        The dialog that would have shown the summary is hidden and about to
+        delete itself, so this is the only place the person can hear it. It
+        arrives minutes after they closed the dialog, so it is announced
+        rather than merely written, and it says that it is about the earlier
+        run rather than about whatever they are doing now.
+        """
+        self._stopping_dialog = None
+        self._set_status(
+            f"The run that was stopping has finished. {summarise_transcription(summary)}",
+            alert=True,
+        )
 
     # -- Reviewing --------------------------------------------------------
     #
@@ -841,6 +925,12 @@ class MainWindow(QMainWindow):
             )
             return None
 
+        # The folder is taken once, here, and used for the whole opening.
+        # Reading lets the event loop run between transcripts, and a change
+        # of folder is refused in that time, but this is the belt to that
+        # brace: whatever self._folder comes to say, the window is built on
+        # the folder whose transcripts were read.
+        folder = self._folder
         recording_names, recording_paths, stores = self._folder_recordings()
         if not recording_names:
             self._refuse_empty_review([])
@@ -872,22 +962,32 @@ class MainWindow(QMainWindow):
         self._opening_review = True
         try:
             return self._open_project_review_after_saying_so(
-                land_on, recording_names, recording_paths, stores
+                folder, land_on, recording_names, recording_paths, stores
             )
+        except _WindowClosing:
+            # The window was closed while the transcripts were being read.
+            # Nothing has been saved yet, so there is nothing to undo, and a
+            # review window appearing after the application has gone is the
+            # one thing this must not do.
+            _log.info("The review was not opened because the window is closing.")
+            return None
         finally:
             self._opening_review = False
             QApplication.restoreOverrideCursor()
 
     def _open_project_review_after_saying_so(
         self,
+        folder: Path,
         land_on: str | None,
         recording_names: list[str],
         recording_paths: dict[str, Path],
         stores: dict[str, TranscriptStore],
     ) -> ReviewWindow | None:
         """The part of :meth:`open_project_review` that does the reading."""
-        reader = _TranscriptReader(stores, between_recordings=_let_the_window_breathe)
-        project_store = ProjectStore(self._folder)
+        reader = _TranscriptReader(
+            stores, between_recordings=self._let_the_window_breathe_unless_closing
+        )
+        project_store = ProjectStore(folder)
         # Loading this folder's own project is what resumes it: the groups,
         # the decisions, the rules, the settings and the marker saying where
         # the person had got to all come from the file in this folder and from
@@ -968,9 +1068,18 @@ class MainWindow(QMainWindow):
         # roughly half the time. It also keeps reviewing out of the player
         # panel, whose position, duration and transport buttons would
         # otherwise follow words the person is not looking at.
+        if self._closing:
+            raise _WindowClosing()
+        # The reader stops giving the event loop a turn from here on. It gave
+        # one between transcripts so that the window could repaint during the
+        # opening, but in the review window's hands that turn would let a
+        # key press ask for a second recording part way through reading the
+        # first, and the window would then file one recording's transcript
+        # under the other's name.
+        reader.between_recordings = None
         player = AudioPlayer()
         window = ReviewWindow(
-            self._folder,
+            folder,
             readable,
             reader.load,
             recording_paths,
@@ -998,7 +1107,7 @@ class MainWindow(QMainWindow):
             land_on, announce_arrival=False
         )
         message = self._review_opening_message(
-            len(readable), corrected, reader.damaged, land_on, landed, problems
+            folder, len(readable), corrected, reader.damaged, land_on, landed, problems
         )
         # On the screen only. The main window is behind the review window by
         # now, and an announcement raised from a window that is not in front is
@@ -1381,6 +1490,7 @@ class MainWindow(QMainWindow):
 
     def _review_opening_message(
         self,
+        folder: Path,
         recordings: int,
         corrected: int,
         damaged: list[str],
@@ -1402,7 +1512,7 @@ class MainWindow(QMainWindow):
         review that opened somewhere without saying so would leave somebody
         working out where they are from the first row they hear.
         """
-        parts = [f"Reviewing {_count(recordings, 'recording')} in {self._folder}."]
+        parts = [f"Reviewing {_count(recordings, 'recording')} in {folder}."]
         if corrected:
             was = "was" if corrected == 1 else "were"
             parts.append(
@@ -1721,7 +1831,20 @@ class MainWindow(QMainWindow):
         if not self._session_store.save(state):
             _log.warning("The session could not be saved.")
 
+    def _let_the_window_breathe_unless_closing(self) -> None:
+        """Give the event loop a turn between transcripts, and stop if it closed us.
+
+        The turn is what lets a close arrive at all: the window's close event
+        runs inside it. Once it has, reading on would be minutes of work
+        towards a window that must not appear, so the opening is abandoned
+        at the next transcript boundary.
+        """
+        _let_the_window_breathe()
+        if self._closing:
+            raise _WindowClosing()
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._closing = True
         self._save_timer.stop()
         self._media_load_timer.stop()
         self._scanner.stop()
@@ -1733,6 +1856,10 @@ class MainWindow(QMainWindow):
         self._close_review_window()
         self._save_session()
         super().closeEvent(event)
+
+
+class _WindowClosing(Exception):
+    """Raised inside an opening review when the main window closes under it."""
 
 
 class _TranscriptReader:

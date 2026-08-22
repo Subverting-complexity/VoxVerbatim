@@ -1067,10 +1067,15 @@ def _ask_by_time_window(
         model=model,
         index=index,
     )
+    ask = lambda: provider.transcribe_window(  # noqa: E731 - a thunk for the retry loop
+        request, audio_url=audio_url, window=window.span, cancelled=cancelled
+    )
     try:
-        result = provider.transcribe_window(
-            request, audio_url=audio_url, window=window.span, cancelled=cancelled
-        )
+        # Through the adapter's own retry loop where it has one, so that a
+        # rate limit on the fortieth of two hundred short questions costs a
+        # pause rather than that passage's second opinion.
+        retrying = getattr(provider, "call_with_retries", None)
+        result = retrying(ask, cancelled) if callable(retrying) else ask()
     except ProviderError as error:
         result = ProviderResult(provider=_provider_of(provider), error=str(error))
     except Exception as error:  # noqa: BLE001 - a second opinion never fails a transcript
@@ -1398,8 +1403,9 @@ def apply_answers(
             continue
         target = result.window.target
         in_target = [word for word in heard_everywhere if _span_of(word).overlaps(target)]
+        used: set[int] = set()
         for dispute in result.window.disputes:
-            heard = [word for word in in_target if _span_of(word).overlaps(dispute.span)]
+            heard = _words_for(dispute, in_target, used)
             for token_id in dispute.token_ids:
                 token = by_id.get(token_id)
                 if token is None or token.human_corrected:
@@ -1415,6 +1421,49 @@ def apply_answers(
     return EscalationApplication(
         settled=settled, confirmed=confirmed, unsettled=unsettled, evidence=evidence
     )
+
+
+def _words_for(
+    dispute: Dispute,
+    candidates: Sequence[ProviderToken],
+    used: set[int],
+) -> list[ProviderToken]:
+    """The service's words that answer this dispute, and only this one.
+
+    A dispute is one word's span as the backbone measured it, and the
+    service measures its own boundaries. Adjacent words from a service abut,
+    so the neighbour of the disputed word overlaps the dispute's span
+    whenever the two services' boundaries differ by a few milliseconds,
+    which they always do. Matching on any overlap would therefore hand back
+    "fifty dollars" for a question about "fifty", which matches nothing and
+    settles nothing. So a word answers a dispute when its middle falls
+    inside the dispute's span, and as many words are taken as the dispute
+    has tokens, nearest the middle first.
+
+    A word is used once. A single service word that straddles two disputed
+    words is one word where the transcript has two, which is a disagreement
+    about the word count rather than a confirmation of both.
+    """
+    span = dispute.span
+    wanted = max(1, len(dispute.token_ids))
+    inside = [
+        word
+        for word in candidates
+        if id(word) not in used and span.start <= _midpoint(word) <= span.end
+    ]
+    if not inside:
+        return []
+    centre = (span.start + span.end) / 2.0
+    inside.sort(key=lambda word: abs(_midpoint(word) - centre))
+    chosen = inside[:wanted]
+    chosen.sort(key=_midpoint)
+    used.update(id(word) for word in chosen)
+    return chosen
+
+
+def _midpoint(word: ProviderToken) -> float:
+    span = _span_of(word)
+    return (span.start + span.end) / 2.0
 
 
 def _span_of(word: ProviderToken) -> AudioSpan:

@@ -1000,3 +1000,111 @@ def test_everything_the_second_service_heard_is_kept_as_one_numbered_result():
     # The reference on the word points into that numbering.
     fifty = next(candidate for candidate in first.candidates if candidate.text == "fifty")
     assert TokenReference(Provider.ASSEMBLYAI, 1) in fifty.source_tokens
+
+
+def test_a_neighbour_that_overlaps_by_a_few_milliseconds_is_not_part_of_the_answer():
+    """Services measure their own boundaries, and adjacent words abut, so the
+    word after the disputed one always overlaps it slightly. The answer to a
+    question about one word is one word."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()  # 10.0 to 10.5
+    outcome = EscalationOutcome(
+        results=(
+            _answered(
+                token,
+                (("we", 9.5, 9.98), ("fifty", 9.98, 10.48), ("dollars", 10.48, 10.9)),
+            ),
+        )
+    )
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.settled == 1
+    assert token.text == "fifty"
+    assert "fifty dollars" not in [candidate.text for candidate in token.candidates]
+
+
+def test_one_service_word_across_two_disputed_words_settles_neither():
+    """One word where the transcript has two is a disagreement about the word
+    count, not a confirmation of both."""
+    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+
+    first = word("the", 10.0, 10.2, candidates=(("the", (Provider.ELEVENLABS,)), ("a", (Provider.OPENAI,))))
+    second = word("the", 10.2, 10.4, candidates=(("the", (Provider.ELEVENLABS,)), ("uh", (Provider.OPENAI,))))
+    for token in (first, second):
+        token.text_confidence = Confidence.REVIEW_REQUIRED
+        token.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+    disputes = tuple(
+        Dispute(span=token.span, reasons=(EscalationReason.ALL_PROVIDERS_DISAGREE,), token_ids=(token.id,))
+        for token in (first, second)
+    )
+    window = EscalationWindow(span=AudioSpan(8.0, 12.0), target=AudioSpan(10.0, 10.4), disputes=disputes)
+    result = EscalationResult(
+        window=window,
+        model="universal-3-5-pro",
+        strength=EvidenceStrength.DECIDING,
+        audio_span=window.span,
+        canonical_offset=0.0,
+        used_time_window=True,
+        tokens=(ProviderToken(Provider.ASSEMBLYAI, 0, "the", start=10.0, end=10.4),),
+    )
+
+    applied = apply_answers([first, second], EscalationOutcome(results=(result,)))
+
+    # The word's middle is at 10.2, on the boundary, so it answers one of
+    # the two and the other is left for a person.
+    assert applied.confirmed == 1
+    assert applied.unsettled == 1
+    assert sum(1 for token in (first, second) if token.needs_review) == 1
+
+
+def test_the_time_window_question_is_retried_like_any_other_request():
+    """A rate limit on one of two hundred short questions should cost a
+    pause, not that passage's second opinion."""
+    from audio_transcriber.transcription.providers.base import ProviderError, TranscriptionProvider
+
+    class FlakyProvider(TranscriptionProvider):
+        provider = Provider.ASSEMBLYAI
+        capabilities = ASSEMBLYAI_CAPABILITIES
+        maximum_retries = 2
+        retry_backoff_seconds = 0.0
+
+        def __init__(self):
+            self.calls = 0
+
+        @property
+        def model_identifier(self):
+            return "fake"
+
+        def is_configured(self):
+            return True
+
+        def describe_configuration_problem(self):
+            return None
+
+        def _transcribe(self, request, cancelled=None):
+            raise AssertionError("not used")
+
+        def upload(self, audio_path):
+            return "https://uploads.example/one"
+
+        def transcribe_window(self, request, *, audio_url=None, window=None, cancelled=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise ProviderError("Too many requests", retryable=True, status_code=429)
+            return ProviderResult(
+                provider=self.provider,
+                tokens=[ProviderToken(self.provider, 0, "fifty", start=window.start, end=window.start + 0.3)],
+            )
+
+    provider = FlakyProvider()
+    outcome = escalate(
+        windows_for(1),
+        provider,
+        CanonicalAudio("a.wav", "a.wav", 100.0, 16000, 1, 100, "wav"),
+        TIGHT,
+    )
+
+    assert provider.calls == 2
+    assert outcome.results[0].succeeded

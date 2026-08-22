@@ -657,6 +657,94 @@ def test_a_second_cancel_closes_the_dialog_and_leaves_the_run_to_stop(
             pass
 
 
+def test_a_closed_dialog_says_nothing_more_and_hands_its_summary_to_whoever_opened_it(
+    qapp, monkeypatch, recordings
+):
+    """Once the dialog has been closed on a stopping run, nobody is looking at it.
+
+    An announcement raised from a hidden window would land on top of whatever
+    the person is doing now, so the run's progress is no longer spoken. The
+    summary still matters, and the only place left to say it is the window
+    that opened the dialog, which is handed it through a signal.
+    """
+    release = threading.Event()
+    started = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        started.set()
+        release.wait(10.0)
+        if progress is not None:
+            progress(50, "Asking a second service")
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    silence_message_boxes(monkeypatch)
+    said: list[str] = []
+    monkeypatch.setattr(
+        transcribe_dialog_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    handed_over: list[object] = []
+
+    dialog = open_dialog(recordings)
+    try:
+        dialog.show()
+        dialog.detachedRunFinished.connect(handed_over.append)
+        dialog.start()
+        assert wait_until(qapp, lambda: started.is_set())
+        dialog.reject()
+        dialog.reject()
+        assert dialog.is_stopping_in_background is True
+        said.clear()
+
+        release.set()
+        assert wait_until(qapp, lambda: dialog.summary is not None)
+
+        assert said == []
+        assert len(handed_over) == 1
+        assert handed_over[0] is dialog.summary
+    finally:
+        try:
+            dialog.close()
+        except RuntimeError:
+            pass
+
+
+def test_closing_the_window_on_a_stopping_run_lets_go_of_it_once(
+    qapp, monkeypatch, recordings
+):
+    """The close box reaches _detach twice, from the close event and from reject
+    underneath it. Letting go twice would arrange for the dialog to be deleted
+    twice once the summary arrived.
+    """
+    release = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        release.wait(10.0)
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    silence_message_boxes(monkeypatch)
+    deletions: list[str] = []
+    monkeypatch.setattr(TranscribeDialog, "deleteLater", lambda self: deletions.append("gone"))
+
+    dialog = open_dialog(recordings)
+    try:
+        dialog.show()
+        dialog.start()
+        assert wait_until(qapp, lambda: dialog.is_running)
+        assert dialog.close() is False
+        assert dialog.close() is True
+        assert dialog.is_stopping_in_background is True
+
+        release.set()
+        assert wait_until(qapp, lambda: dialog.summary is not None)
+        assert deletions == ["gone"]
+    finally:
+        dialog.close()
+
+
 def test_closing_a_dialog_on_a_run_that_was_never_cancelled_stops_it_first(
     qapp, monkeypatch, recordings
 ):

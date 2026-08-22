@@ -266,3 +266,10 @@ def test_asking_outside_the_sequence_is_answered_rather_than_raising() -> None:
 def test_a_keyword_out_of_reach_does_not_claim_a_number() -> None:
     words = ["rand", "and", "then", "we", "spoke", "for", "a", "while", "about", "twelve"]
     assert RiskCategory.MONEY not in risk_at(words, 9)
+
+
+def test_the_german_verb_achten_is_not_an_eighth() -> None:
+    """"achten" is to pay attention to, far more often than it is a date."""
+    assert risk_at(["wir", "müssen", "darauf", "achten"], 3) == ()
+    assert risk_at(["ich", "achte", "darauf"], 1) == ()
+    assert RiskCategory.DATE in risk_at(["am", "achten", "Mai"], 1)

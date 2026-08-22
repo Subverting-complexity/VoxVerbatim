@@ -1003,21 +1003,49 @@ class _SdkClient:
         """
         client = self._resolve_http_client()
         deadline = None if wait_seconds is None else time.monotonic() + max(0.0, wait_seconds)
+        last_status = "queued"
         while True:
             if cancelled is not None and cancelled():
                 raise ProviderError(
                     f"AssemblyAI job {transcript_id} was not waited for, because the "
                     "run was stopped."
                 )
-            answer = _json_of(client.get(f"/v2/transcript/{transcript_id}"))
-            if str(answer.get("status") or "").lower() in ("completed", "error"):
-                return answer
+            try:
+                answer = _json_of(
+                    client.get(f"/v2/transcript/{transcript_id}", timeout=self.POLL_TIMEOUT_SECONDS)
+                )
+            except Exception as error:  # noqa: BLE001 - judged below, by kind
+                # A poll is a tiny request made thousands of times over a
+                # long job, and one of them failing says nothing about the
+                # job, which is still running on the far end. Letting the
+                # failure out of here would have the retry loop submit the
+                # job again, and the finished first job would be paid for
+                # and never read. So a passing fault is waited out and the
+                # same job is asked about again. Only an answer that says
+                # the job itself is unknown is allowed to escape.
+                if not _poll_fault_is_passing(error):
+                    raise
+                _log.warning(
+                    "Polling AssemblyAI job %s failed and will be tried again: %s",
+                    transcript_id,
+                    error,
+                )
+                answer = None
+            if answer is not None:
+                last_status = str(answer.get("status") or "queued")
+                if last_status.lower() in ("completed", "error"):
+                    return answer
             if deadline is not None and time.monotonic() >= deadline:
                 raise ProviderError(
-                    f"AssemblyAI job {transcript_id} was still {answer.get('status') or 'queued'} "
+                    f"AssemblyAI job {transcript_id} was still {last_status} "
                     f"after {wait_seconds:.0f} seconds, which is as long as it was given."
                 )
             time.sleep(self._poll_seconds())
+
+    #: The HTTP timeout for one poll. A poll is a small request, and a
+    #: connection that hangs on one should be noticed in seconds rather
+    #: than after the whole provider timeout, which is sized for uploads.
+    POLL_TIMEOUT_SECONDS = 30.0
 
     def _poll_seconds(self) -> float:
         interval = _as_float(getattr(self._assemblyai.settings, "polling_interval", None))
@@ -1092,6 +1120,20 @@ def _json_of(response: Any) -> dict[str, Any]:
             status,
         )
     return body
+
+
+def _poll_fault_is_passing(error: Exception) -> bool:
+    """Whether a failed poll is the sort that the next poll may not repeat.
+
+    A transport fault, a rate limit, or a server error is. A refusal that
+    names the job as unknown or the key as bad is not, and is raised so the
+    adapter can report it.
+    """
+    status = _as_int(getattr(error, "status_code", None))
+    if status is not None:
+        return status == 408 or status == 429 or status >= 500
+    name = type(error).__name__.lower()
+    return any(hint in name for hint in ("timeout", "connect", "protocol", "readerror"))
 
 
 class _DirectRequestError(Exception):

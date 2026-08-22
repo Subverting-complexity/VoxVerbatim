@@ -220,19 +220,32 @@ def transcribe_recording(
         )
     backbone = outcome.results[backbone_provider]
     others = [result for result in succeeded if result.provider is not backbone_provider]
-    table = build_aligned_table(backbone, others)
-    reporter.stage("aligning", 1.0, "The services have been compared.")
+    try:
+        table = build_aligned_table(backbone, others)
+        reporter.stage("aligning", 1.0, "The services have been compared.")
 
-    # -- Decide what was said
-    reporter.stage("reconciling", 0.0, "Working out what was said.")
-    languages = language_rules.read_languages(table, succeeded, configuration)
-    tokens = reconcile_rules.reconcile(
-        table,
-        configuration=configuration,
-        vocabulary=index,
-        languages=languages,
-        results=succeeded,
-    )
+        # -- Decide what was said
+        reporter.stage("reconciling", 0.0, "Working out what was said.")
+        languages = language_rules.read_languages(table, succeeded, configuration)
+        tokens = reconcile_rules.reconcile(
+            table,
+            configuration=configuration,
+            vocabulary=index,
+            languages=languages,
+            results=succeeded,
+        )
+    except Exception as error:  # noqa: BLE001 - the paid answers must still be kept
+        # The services have answered and been paid by now. A fault here used
+        # to end the recording as "failed", with nothing to show for the
+        # money. What every service said is still on the transcript, and is
+        # saved, so the run can be explained and the words recovered.
+        _log.exception("Comparing the services' answers failed for %s.", recording.name)
+        transcript.warnings.append(
+            "The services answered, but their answers could not be compared and "
+            f"reconciled: {error}. Each service's words are kept in the transcript "
+            "file and in the raw-responses folder."
+        )
+        return _finish(transcript, store, started, stopped=False)
     reporter.stage("reconciling", 1.0, _reconciled_sentence(tokens))
 
     # From here on the transcript has words. They go onto it now rather
@@ -267,7 +280,9 @@ def transcribe_recording(
     _guarded(
         transcript,
         "the timing correction",
-        lambda: _correct_timing(tokens, transcript, canonical, settings, store, reporter),
+        lambda: _correct_timing(
+            tokens, transcript, canonical, settings, store, reporter, cancelled
+        ),
     )
 
     transcript.speakers = _speakers_in(tokens, configuration)
@@ -343,8 +358,9 @@ def _escalate(
             f"{len(windows)} places needed a second opinion, but no escalation "
             f"service is set up, so they are waiting for you instead.{detail}"
         )
+        asked_about = {token_id for window in windows for token_id in window.token_ids}
         for token in tokens:
-            if token.needs_review:
+            if token.id in asked_about:
                 token.flag(ReviewReason.ESCALATION_UNRESOLVED)
         return tokens
 
@@ -633,6 +649,7 @@ def _correct_timing(
     settings: TranscriptionSettings,
     store: TranscriptStore,
     reporter: "_Reporter",
+    cancelled: CancelCheck | None = None,
 ) -> list[FinalToken]:
     """Measure the words again where reconciliation moved them.
 
@@ -678,6 +695,8 @@ def _correct_timing(
     reporter.stage("timing", 0.0, f"Measuring {wanted} corrected words again.")
     measured = 0
     for number, phrase in enumerate(phrases, start=1):
+        if _stopped(cancelled):
+            break
         span = _phrase_audio_span(phrase)
         if span is None:
             continue
@@ -767,10 +786,25 @@ def _phrases_to_realign(tokens: Sequence[FinalToken]) -> list[list[FinalToken]]:
 
 
 def _phrase_audio_span(phrase: Sequence[FinalToken]) -> AudioSpan | None:
-    spans = [token.audible_span for token in phrase if token.audible_span is not None]
-    if not spans:
+    """Where the phrase is in the recording, or None if that is not known.
+
+    Only a word's own span counts. A word with no span of its own has the
+    gap between its neighbours as the region it might be in, and a phrase
+    made only of such words, an insertion one service heard and the
+    backbone did not, has a region that is often nothing at all. Cutting a
+    clip of the neighbours and making an aligner place the inserted words
+    in it would give words nobody measured a measured-looking time; that is
+    the whole-recording mistake again, at a smaller scale. So a phrase is
+    placed by the words in it that were timed, and an inserted word is only
+    measured when it sits inside a phrase that has some.
+    """
+    starts = [token.start for token in phrase if token.start is not None]
+    ends = [token.end for token in phrase if token.end is not None]
+    if not starts:
         return None
-    return AudioSpan(min(span.start for span in spans), max(span.end for span in spans))
+    start = min(starts)
+    end = max(ends) if ends else start
+    return AudioSpan(start, max(start, end))
 
 
 # -- Small helpers -------------------------------------------------------

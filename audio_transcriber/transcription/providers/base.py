@@ -314,13 +314,27 @@ class TranscriptionProvider(ABC):
         while a service is rate-limiting us is not kept waiting through the
         remaining backoff.
         """
+        return self.call_with_retries(lambda: self._transcribe(request, cancelled), cancelled)
+
+    def call_with_retries(
+        self,
+        call: Callable[[], ProviderResult],
+        cancelled: CancelCheck | None = None,
+    ) -> ProviderResult:
+        """Run one request to the service, trying again where that may help.
+
+        This is the loop :meth:`transcribe` runs, made available on its own
+        so that a request which does not go through :meth:`transcribe`, such
+        as the time-window questions escalation asks, is retried by the same
+        rules rather than by none.
+        """
         attempts_allowed = 1 + max(0, int(self.maximum_retries))
         name = self.provider.display_name
         attempt = 0
         while True:
             attempt += 1
             try:
-                return self._transcribe(request, cancelled)
+                return call()
             except ProviderError as error:
                 may_retry = error.retryable and attempt < attempts_allowed
                 if may_retry and cancelled is not None and cancelled():

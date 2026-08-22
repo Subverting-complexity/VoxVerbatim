@@ -13,6 +13,7 @@ import os
 import shutil
 
 import pytest
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication, QDialog, QWidget
 
@@ -265,8 +266,11 @@ def fake_transcribe_dialog(
     """Put a stand-in in the Transcribe dialog's place, and collect what it got."""
     opened: list = []
 
-    class Fake:
+    class Fake(QObject):
+        detachedRunFinished = Signal(object)
+
         def __init__(self, recordings, settings, vocabulary=None, parent=None):
+            super().__init__()
             self.recordings = list(recordings)
             self.settings = settings
             self.vocabulary = vocabulary
@@ -400,6 +404,44 @@ def test_a_dialog_closed_on_a_stopping_run_is_kept_and_the_person_is_told(
         status = window._status_label.text()
         assert "still stopping" in status
         assert "already transcribed are saved" in status
+    finally:
+        close_window(window)
+
+
+def test_a_second_run_is_refused_while_the_first_is_still_stopping(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Two runs at once would write the same transcript folders, and the first
+    to finish would withdraw the request keeping the machine awake from under
+    the second. So Transcribe says no, out loud, until the first has stopped.
+    """
+    opened = fake_transcribe_dialog(monkeypatch, still_stopping=True)
+    said = announcements(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        window.show_transcribe()
+        assert len(opened) == 1
+
+        window.show_transcribe()
+        assert len(opened) == 1
+        assert "previous run is still stopping" in window._status_label.text()
+        assert any("previous run is still stopping" in words for _w, words, _u in said)
+
+        # The first run stops. The person is told how it went, because the
+        # dialog that would have shown them is hidden, and a run may start.
+        outcome = RecordingOutcome.of_transcript(
+            audio_folder / "alpha.m4a", make_transcript("alpha.m4a", needing_review=0)
+        )
+        opened[0].is_stopping_in_background = False
+        opened[0].detachedRunFinished.emit(RunSummary(results=[outcome], cancelled=True))
+        status = window._status_label.text()
+        assert "run that was stopping has finished" in status
+        assert "1 of 1 recordings transcribed" in status
+        assert said[-1][1] == status
+        assert window._stopping_dialog is None
+
+        window.show_transcribe()
+        assert len(opened) == 2
     finally:
         close_window(window)
 
@@ -1151,6 +1193,87 @@ def test_a_second_review_asked_for_while_the_first_is_opening_is_refused(
         assert first is not None
         assert inner and all(item is None for item in inner)
         assert len(opened) == 1
+    finally:
+        close_window(window)
+
+
+def test_a_folder_change_while_the_review_is_opening_is_refused(
+    qapp, monkeypatch, store, audio_folder, tmp_path
+):
+    """A new folder arriving between two transcripts would change the folder
+    under the opening, and the review would be built from one folder's
+    transcripts and shown under the other's name. So the change is refused,
+    said out loud, and the window opens on the folder whose transcripts it read.
+    """
+    opened = fake_review_window(monkeypatch)
+    said = announcements(monkeypatch)
+    other = tmp_path / "other"
+    other.mkdir()
+    write_fake_audio(other / "delta.m4a")
+    window = loaded_window(qapp, store, audio_folder)
+    refused: list[str] = []
+
+    def change_folder() -> None:
+        window._folder_panel.folderChosen.emit(str(other))
+        refused.append(window._status_label.text())
+
+    monkeypatch.setattr(main_window_module, "_let_the_window_breathe", change_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
+        review = window.open_project_review()
+
+        assert review is not None
+        assert refused and all("cannot be changed yet" in text for text in refused)
+        assert any("cannot be changed yet" in words for _w, words, _u in said)
+        assert window._folder == audio_folder
+        assert opened[0].folder == audio_folder
+        # Once the review is open the folder may change again.
+        window._folder_panel.folderChosen.emit(str(other))
+        assert window._folder == other
+    finally:
+        close_window(window)
+
+
+def test_closing_the_window_while_a_review_is_opening_abandons_the_opening(
+    qapp, monkeypatch, store, audio_folder
+):
+    """A review window must not appear after the main window has gone."""
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    monkeypatch.setattr(main_window_module, "_let_the_window_breathe", window.close)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
+        review = window.open_project_review()
+
+        assert review is None
+        assert opened == []
+        assert window._review_window is None
+        assert window._opening_review is False
+        assert QApplication.overrideCursor() is None
+    finally:
+        close_window(window)
+
+
+def test_the_review_window_is_handed_a_reader_that_does_not_run_the_event_loop(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The turn the reader gives the event loop while the review is opening
+    would, in the review window's hands, let a key press ask for a second
+    recording part way through reading the first. So it is taken away before
+    the window gets the reader.
+    """
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+
+        window.show_review()
+
+        reader = opened[0].load_transcript.__self__
+        assert isinstance(reader, main_window_module._TranscriptReader)
+        assert reader.between_recordings is None
     finally:
         close_window(window)
 

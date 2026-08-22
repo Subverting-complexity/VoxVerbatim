@@ -370,6 +370,9 @@ def asked_of_windows(monkeypatch) -> list[int]:
     asked: list[int] = []
     monkeypatch.setattr(runner_module, "set_thread_execution_state", asked.append)
     monkeypatch.setattr(runner_module.sys, "platform", "win32")
+    # Requests are counted across runners. A run from an earlier test that
+    # was never waited for may still hold one, so the count starts afresh.
+    monkeypatch.setattr(runner_module, "_awake_requests", 0)
     return asked
 
 
@@ -422,3 +425,65 @@ def test_nothing_is_asked_of_a_machine_that_is_not_windows(monkeypatch):
     runner_module.keep_system_awake(False)
 
     assert asked == []
+
+
+def test_the_machine_is_let_go_only_when_the_last_run_has_withdrawn(monkeypatch):
+    """Windows keeps one state per thread, not a count.
+
+    A second run started while the first is still stopping would otherwise
+    have its request cleared the moment the first run withdrew, and the
+    machine could sleep under a run that had hours to go.
+    """
+    from audio_transcriber.transcription import runner as runner_module
+    from audio_transcriber.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
+
+    asked = asked_of_windows(monkeypatch)
+    awake = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+
+    runner_module.keep_system_awake(True)
+    runner_module.keep_system_awake(True)
+    assert asked == [awake]
+    runner_module.keep_system_awake(False)
+    assert asked == [awake]
+    runner_module.keep_system_awake(False)
+    assert asked == [awake, ES_CONTINUOUS]
+    # A withdrawal with nothing outstanding clears nobody's request.
+    runner_module.keep_system_awake(False)
+    assert asked == [awake, ES_CONTINUOUS]
+
+
+def test_a_stopped_run_withdraws_its_request_once(qapp, monkeypatch, recordings):
+    """A stopped run reaches the withdrawal twice, from stop and from its summary.
+
+    Withdrawing twice would take another run's request with it now that the
+    requests are counted, so the runner only withdraws what it holds.
+    """
+    from audio_transcriber.transcription import runner as runner_module
+    from audio_transcriber.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
+
+    asked = asked_of_windows(monkeypatch)
+    release = threading.Event()
+
+    def transcribe(recording, options, progress=None, cancelled=None):
+        release.wait(10.0)
+        return make_transcript(recording.name)
+
+    fake_pipeline(monkeypatch, transcribe)
+    first = TranscriptionRunner()
+    second = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    first.runFinished.connect(summaries.append)
+    second.runFinished.connect(summaries.append)
+
+    first.start(recordings, pipeline.PipelineOptions())
+    second.start(recordings, pipeline.PipelineOptions())
+    first.stop(timeout_seconds=0.01)
+    # The first run has withdrawn, but the second is still going.
+    assert asked == [ES_CONTINUOUS | ES_SYSTEM_REQUIRED]
+
+    release.set()
+    assert wait_until(qapp, lambda: len(summaries) == 2)
+    # The first run's summary did not withdraw a second time; the second
+    # run's did, and that is when the machine was let go.
+    assert asked == [ES_CONTINUOUS | ES_SYSTEM_REQUIRED, ES_CONTINUOUS]
+    assert runner_module._awake_requests == 0

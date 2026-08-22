@@ -44,7 +44,7 @@ import logging
 from dataclasses import dataclass
 from typing import Sequence
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -407,6 +407,14 @@ class TranscriptionGuideDialog(QDialog):
 
 class TranscribeDialog(QDialog):
     """Asks how to transcribe the chosen recordings, says what it will cost, then does it."""
+
+    detachedRunFinished = Signal(object)
+    """A run the dialog was closed on has stopped, carrying its :class:`RunSummary`.
+
+    Sent only for a run that was left to stop in the background. The dialog
+    is hidden by then and nobody can read what it would show, so whoever
+    opened it is handed the summary to say out loud where the person now is.
+    """
 
     def __init__(
         self,
@@ -1243,6 +1251,11 @@ class TranscribeDialog(QDialog):
     # -- What the run reports ---------------------------------------------
 
     def _on_recording_started(self, name: str, number: int, total: int) -> None:
+        if self._detached:
+            # Nobody is looking at a closed dialog, and an announcement
+            # raised from a hidden window lands on top of whatever the person
+            # is doing now, about a run they have already walked away from.
+            return
         message = f"Transcribing {name}. Recording {number} of {total}."
         self._set_progress_text(message)
         # Each recording is announced as it starts. The progress bar has a
@@ -1251,6 +1264,8 @@ class TranscribeDialog(QDialog):
         announce(self._progress_bar, message)
 
     def _on_progress_changed(self, percentage: int, stage: str) -> None:
+        if self._detached:
+            return
         self._progress_bar.setValue(percentage)
         # The bar moves far more often than the stage changes, and a screen
         # reader repeating the same sentence every second or two would drown
@@ -1295,6 +1310,7 @@ class TranscribeDialog(QDialog):
             # on top of whatever the person is doing now, with the main
             # window's status bar already saying what became of the run.
             _log.info("A run closed in the background has finished: %s", message)
+            self.detachedRunFinished.emit(summary)
             return
         self._come_to_the_front()
         self._show_completion_message(message)
@@ -1499,7 +1515,13 @@ class TranscribeDialog(QDialog):
         summary nobody is waiting for. The application's own shutdown still
         stops it, through the runner's connection to aboutToQuit, and that
         wait is bounded to a few seconds there too.
+
+        Closing the window reaches here twice, once from the close event and
+        once more from :meth:`reject` underneath it, so a second call does
+        nothing: connecting the clean-up twice would delete the dialog twice.
         """
+        if self._detached:
+            return
         self._detached = True
         self._runner.cancel()
         # The dialog gets rid of itself once the summary has arrived, rather

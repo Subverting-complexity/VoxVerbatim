@@ -169,6 +169,11 @@ class TranscriptionRunner(QObject):
         super().__init__(parent)
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+        # Whether this runner currently holds a request for the machine to
+        # stay awake. A run's request is withdrawn from two places -- the end
+        # of the run and an explicit stop -- and both can happen for the same
+        # run, so the flag makes sure one run's request is withdrawn once.
+        self._holding_awake = False
         # A run still going when the application quits would be emitting
         # signals at an object that is being taken apart, so it is stopped
         # first.
@@ -202,6 +207,7 @@ class TranscriptionRunner(QObject):
             daemon=True,
         )
         self._thread.start()
+        self._holding_awake = True
         keep_system_awake(True)
         return True
 
@@ -222,9 +228,18 @@ class TranscriptionRunner(QObject):
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout_seconds)
-        keep_system_awake(False)
+        self._let_the_system_sleep()
 
-    def _let_the_system_sleep(self, _summary: object) -> None:
+    def _let_the_system_sleep(self, _summary: object = None) -> None:
+        """Withdraw this run's request to stay awake, once.
+
+        A stopped run reaches here twice: from :meth:`stop` and again when the
+        thread's summary arrives. Withdrawing twice would take another run's
+        request with it, because the requests are counted across runners.
+        """
+        if not self._holding_awake:
+            return
+        self._holding_awake = False
         keep_system_awake(False)
 
     # -- The background thread -------------------------------------------
@@ -350,9 +365,21 @@ def _windows_thread_execution_state(flags: int) -> None:
 #: a test can stand in for it and see what was asked.
 set_thread_execution_state: Callable[[int], None] = _windows_thread_execution_state
 
+#: How many runs currently want the machine kept awake. Windows keeps one
+#: state per thread, not a count, so a second run that starts while the
+#: first is still stopping would have its request cleared the moment the
+#: first withdrew. Counting here means only the last withdrawal lets the
+#: machine sleep.
+_awake_requests = 0
+
 
 def keep_system_awake(awake: bool) -> None:
     """Stop Windows sleeping while a run is going, and let it sleep again after.
+
+    Requests are counted: each ``True`` is one request and each ``False``
+    withdraws one, and the machine is only let go when no request remains.
+    A withdrawal with nothing outstanding is ignored rather than clearing a
+    request someone else holds.
 
     A transcription run is hours of waiting on services with nobody touching
     the keyboard, which is exactly what a laptop's power settings read as a
@@ -364,6 +391,17 @@ def keep_system_awake(awake: bool) -> None:
     or a Windows where the call fails -- transcribes exactly as before, and
     the worst that happens is the sleep this was meant to prevent.
     """
+    global _awake_requests
+    if awake:
+        _awake_requests += 1
+        if _awake_requests > 1:
+            return
+    else:
+        if _awake_requests == 0:
+            return
+        _awake_requests -= 1
+        if _awake_requests > 0:
+            return
     if sys.platform != "win32":
         return
     flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED if awake else ES_CONTINUOUS

@@ -447,17 +447,64 @@ def _compound_form(text: str, dropped: bool) -> str:
     them together would make a half and twelve, or "twenty 5" and "205",
     the same evidence. A digit next to a letter still joins, so "3kg" and
     "3 kg" meet as before.
+
+    Two shapes of digit run are one number written with spaces rather than
+    two numbers, and keep joining. Thousands grouped by a space, "10 000"
+    or "100 000 000", which is how South African, German and ISO writing
+    groups them and which a service writes as "10,000" or "10000" as often
+    as not; and a telephone number read out in blocks, "082 123 4567".
     """
     words = _number_form(text, dropped).split()
     expanded: list[str] = []
     for word in words:
         expanded.extend(_CONTRACTIONS.get(word, word).split())
     joined: list[str] = []
-    for word in expanded:
+    position = 0
+    while position < len(expanded):
+        run = _digit_run(expanded, position)
+        if run and _is_one_number_in_blocks(run):
+            if joined and joined[-1][-1:].isdigit():
+                joined.append(" ")
+            joined.append("".join(run))
+            position += len(run)
+            continue
+        word = expanded[position]
         if joined and joined[-1][-1:].isdigit() and word[:1].isdigit():
             joined.append(" ")
         joined.append(word)
+        position += 1
     return "".join(joined)
+
+
+def _digit_run(words: list[str], start: int) -> list[str]:
+    """The digit blocks beginning at ``start``, if there are two or more.
+
+    The first block may carry a currency sign or other letters in front of
+    its digits, "R10" or "$5", because an amount is written that way; every
+    later block is digits only.
+    """
+    first = words[start]
+    if not first[-1:].isdigit():
+        return []
+    run = [first]
+    for word in words[start + 1 :]:
+        if not word.isdigit():
+            break
+        run.append(word)
+    return run if len(run) >= 2 else []
+
+
+def _is_one_number_in_blocks(run: list[str]) -> bool:
+    """Whether these digit words are one number written in blocks.
+
+    Grouped thousands have one to three digits first and exactly three in
+    every later block. A telephone number is three or more blocks of three
+    or more digits. "1 2", "20 5" and "2024 05" fit neither and stay apart.
+    """
+    leading = len(run[0]) - len(run[0].rstrip("0123456789"))
+    if 1 <= leading <= 3 and all(len(block) == 3 for block in run[1:]):
+        return True
+    return len(run) >= 3 and run[0].isdigit() and all(len(block) >= 3 for block in run)
 
 
 @lru_cache(maxsize=100_000)

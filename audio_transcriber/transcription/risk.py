@@ -313,9 +313,14 @@ _HIGH_ORDINAL_WORDS = frozenset(
 
 #: German ordinals decline, so "erste", "ersten", "erster" and "erstes" are
 #: all the same word. The stem is matched and the ending allowed to vary.
-_GERMAN_LOW_ORDINAL = re.compile(r"^(erst|zweit|dritt)(e|en|er|es|em)$")
+#: "acht" is with the low ordinals rather than the high ones, although
+#: eighth is not a low number, because "achte", "achten" and "achter" are
+#: also forms of the everyday verb "achten", to pay attention to. On its own
+#: the word is far more often the verb; next to a month or a lead-in such as
+#: "am" it is the date.
+_GERMAN_LOW_ORDINAL = re.compile(r"^(erst|zweit|dritt|acht)(e|en|er|es|em)$")
 _GERMAN_HIGH_ORDINAL = re.compile(
-    r"^(viert|f(ü|ue)nft|sechst|siebt|acht|neunt|zehnt|elft|zw(ö|oe)lft"
+    r"^(viert|f(ü|ue)nft|sechst|siebt|neunt|zehnt|elft|zw(ö|oe)lft"
     r"|(drei|vier|f(ü|ue)nf|sech|sieb|acht|neun)zehnt"
     r"|\w+und(zwanzig|drei(ß|ss)ig)st|(zwanzig|drei(ß|ss)ig)st)(e|en|er|es|em)$"
 )

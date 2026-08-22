@@ -976,7 +976,13 @@ def apply_decisions(
         # Silence about a span is a declination. It is recorded as one so
         # that the word reaches a person rather than sitting in the
         # transcript looking settled.
-        _decline(by_span[span_id], "The adjudicating model did not answer about this span.")
+        # Silence is not a judgement. Nothing was learned about the word, so
+        # it keeps the confidence the evidence gave it and is flagged.
+        _decline(
+            by_span[span_id],
+            "The adjudicating model did not answer about this span.",
+            lower_confidence=False,
+        )
 
     return AdjudicationOutcome(
         applied=tuple(applied),

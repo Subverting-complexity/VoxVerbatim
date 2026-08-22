@@ -592,9 +592,18 @@ class SecondOpinion:
     provider = Provider.ASSEMBLYAI
     capabilities = ASSEMBLYAI_CAPABILITIES
 
-    def __init__(self, hears: str, problem: str | None = None) -> None:
+    def __init__(
+        self,
+        hears: str,
+        problem: str | None = None,
+        at: tuple[float, float] = (0.6, 0.76),
+    ) -> None:
         self.hears = hears
         self.problem = problem
+        # Where in the recording the word is heard. The fake words are 0.2 s
+        # apart, so the default is the fourth word of PLAIN_SENTENCE, with
+        # boundaries a little off the backbone's, as a real service's are.
+        self.at = at
         self.windows: list = []
         self.requests: list = []
 
@@ -616,8 +625,8 @@ class SecondOpinion:
                     provider=self.provider,
                     index=0,
                     text=self.hears,
-                    start=window.start + 0.01,
-                    end=window.end - 0.01,
+                    start=self.at[0] - 0.02,
+                    end=self.at[1] + 0.02,
                     confidence=0.95,
                 )
             ],
@@ -927,7 +936,7 @@ def test_forced_alignment_is_given_a_clip_of_the_phrase_not_the_whole_recording(
     run = transcribe(
         disagreeing_services("carton", "garden", "garden", target="garden"),
         settings=settings,
-        escalation_provider=SecondOpinion(hears="garden"),
+        escalation_provider=SecondOpinion(hears="garden", at=(1.2, 1.36)),
         aligner=aligner,
     )
 
@@ -940,3 +949,34 @@ def test_forced_alignment_is_given_a_clip_of_the_phrase_not_the_whole_recording(
         assert "alignment" in path
     # The clips are working files and do not stay behind.
     assert not (run.store.folder / "alignment").exists()
+
+
+def test_a_phrase_of_inserted_words_alone_is_not_sent_for_alignment():
+    """An inserted word has no span of its own, only the gap between its
+    neighbours. A phrase made of nothing else would have an aligner place
+    words nobody measured onto the neighbours' audio."""
+    from audio_transcriber.transcription.model import AudioSpan as Span, TimingStatus
+
+    inserted = FinalToken(
+        text="um", timing_status=TimingStatus.UNALIGNED, source_audio_span=Span(1.0, 1.0)
+    )
+    timed = FinalToken(
+        text="go", start=1.0, end=1.3, timing_status=TimingStatus.MAPPED_SUBSTITUTION
+    )
+
+    assert pipeline._phrases_to_realign([inserted]) == []
+    # Inside a phrase that has a timed word, the inserted word goes along.
+    phrases = pipeline._phrases_to_realign([timed, inserted])
+    assert [[token.text for token in phrase] for phrase in phrases] == [["go", "um"]]
+    assert pipeline._phrase_audio_span(phrases[0]) == Span(1.0, 1.3)
+
+
+def test_a_word_with_only_a_start_still_places_its_phrase():
+    from audio_transcriber.transcription.model import AudioSpan as Span, TimingStatus
+
+    start_only = FinalToken(text="x", start=1.0, timing_status=TimingStatus.MAPPED_SUBSTITUTION)
+    whole = FinalToken(text="y", start=1.4, end=1.8, timing_status=TimingStatus.MAPPED_SUBSTITUTION)
+
+    phrases = pipeline._phrases_to_realign([start_only, whole])
+
+    assert pipeline._phrase_audio_span(phrases[0]) == Span(1.0, 1.8)

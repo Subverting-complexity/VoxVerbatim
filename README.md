@@ -1,9 +1,17 @@
 # Audio Transcriber
 
-An accessible Windows desktop application for working through audio
-recordings. It plays them, it makes louder copies of the quiet ones, and it
-transcribes them by sending each recording to several speech services at
-once and working out one answer from what they all said.
+**Audio Transcriber** turns folders of audio recordings into accurate,
+readable transcripts. It is a Windows desktop application built with
+accessibility first, so it works well with screen readers and screen
+magnifiers such as JAWS, NVDA and ZoomText.
+
+Point it at a folder of recordings and you can listen to them, make louder
+copies of any that are too quiet to hear or transcribe cleanly, and
+transcribe them to text. For each recording it asks several speech-to-text
+services at the same time and combines their answers into a single result,
+which is more accurate than trusting any one service on its own.
+
+This project is released under the [MIT License](LICENSE).
 
 ## Running it
 

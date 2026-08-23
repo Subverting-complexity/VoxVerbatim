@@ -705,3 +705,12 @@ python -m venv .venv
 
 The tests run without a visible desktop by asking Qt for its offscreen
 platform, so they can run anywhere.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report issues, suggest
+features, and submit changes.
+
+## Licence
+
+This project is released under the [MIT License](LICENSE).

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from audio_transcriber.formatting import compact_interval
-from audio_transcriber.settings import EnhanceSettings, Settings, SettingsStore
+from vox_verbatim.formatting import compact_interval
+from vox_verbatim.settings import EnhanceSettings, Settings, SettingsStore
 
 
 def test_saved_settings_come_back_unchanged(tmp_path):

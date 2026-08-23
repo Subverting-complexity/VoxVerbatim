@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from audio_transcriber.transcription.model import RiskCategory
-from audio_transcriber.transcription.risk import (
+from vox_verbatim.transcription.model import RiskCategory
+from vox_verbatim.transcription.risk import (
     find_risks,
     has_ambiguous_separator,
     is_numeric,

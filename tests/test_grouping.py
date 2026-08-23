@@ -19,7 +19,7 @@ import gc
 import weakref
 from dataclasses import replace
 
-from audio_transcriber.transcription.grouping import (
+from vox_verbatim.transcription.grouping import (
     OCCURRENCE_TIME_TOLERANCE,
     SIMILARITY_THRESHOLD,
     affected_summary,
@@ -30,12 +30,12 @@ from audio_transcriber.transcription.grouping import (
     rematch,
     reprocess,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     FinalToken,
     Language,
     Transcript,
 )
-from audio_transcriber.transcription.project import (
+from vox_verbatim.transcription.project import (
     FlaggedItem,
     Occurrence,
     ProjectSettings,
@@ -402,8 +402,8 @@ def test_the_equivalence_index_agrees_with_the_function_it_stands_in_for():
     """
     from itertools import permutations
 
-    from audio_transcriber.transcription.grouping import _equivalence_partners
-    from audio_transcriber.transcription.normalise import are_equivalent
+    from vox_verbatim.transcription.grouping import _equivalence_partners
+    from vox_verbatim.transcription.normalise import are_equivalent
 
     forms = [
         "Bosch", "bosch,", "BOSCH", "Bosh", "Jürgen", "Jurgen", "Juergen",
@@ -426,7 +426,7 @@ def test_the_similarity_index_agrees_with_the_measure_it_stands_in_for():
     import random
     from itertools import permutations
 
-    from audio_transcriber.transcription.grouping import _similar, _similarity_partners
+    from vox_verbatim.transcription.grouping import _similar, _similarity_partners
 
     rng = random.Random(7)
     forms: set[str] = set()
@@ -459,11 +459,11 @@ def _group_occurrences_the_slow_way(
     """
     from difflib import SequenceMatcher
 
-    from audio_transcriber.transcription.grouping import (
+    from vox_verbatim.transcription.grouping import (
         SIMILARITY_MINIMUM_LENGTH,
         _languages_agree,
     )
-    from audio_transcriber.transcription.normalise import are_equivalent
+    from vox_verbatim.transcription.normalise import are_equivalent
 
     def similar(first: str, second: str) -> bool:
         if not first or not second:

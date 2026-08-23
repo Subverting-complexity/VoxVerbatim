@@ -20,14 +20,14 @@ from pathlib import Path
 
 import pytest
 
-from audio_transcriber.audio.enhance import OUTPUT_FORMATS
-from audio_transcriber.transcription.canonical import (
+from vox_verbatim.audio.enhance import OUTPUT_FORMATS
+from vox_verbatim.transcription.canonical import (
     CanonicalAudioError,
     cut_window,
     prepare_canonical_audio,
     probe_audio,
 )
-from audio_transcriber.transcription.chunking import (
+from vox_verbatim.transcription.chunking import (
     ChunkingOptions,
     chunk_rate_and_channels,
     merge_overlapping_tokens,
@@ -35,14 +35,14 @@ from audio_transcriber.transcription.chunking import (
     plan_chunks,
     write_chunks,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AudioSpan,
     CanonicalAudio,
     ChunkRecord,
     Provider,
     ProviderToken,
 )
-from audio_transcriber.transcription.providers.base import ProviderCapabilities
+from vox_verbatim.transcription.providers.base import ProviderCapabilities
 
 from tests.conftest import write_real_audio
 from tests.test_canonical import MARKER_TONES, dominant_tone, write_marker_audio

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AlignmentStatus,
     AudioSpan,
     Confidence,
@@ -32,8 +32,8 @@ from audio_transcriber.transcription.model import (
     TimingStatus,
     TokenReference,
 )
-from audio_transcriber.transcription.providers.base import ForcedAligner, ProviderError
-from audio_transcriber.transcription.timing import (
+from vox_verbatim.transcription.providers.base import ForcedAligner, ProviderError
+from vox_verbatim.transcription.timing import (
     AlignedWord,
     TimingOptions,
     TimingOutcome,
@@ -444,7 +444,7 @@ def test_a_word_with_nothing_behind_it_stays_unaligned_when_alignment_cannot_run
 
 
 def test_the_options_are_read_off_the_settings_without_importing_them():
-    from audio_transcriber.settings import ProcessingSettings
+    from vox_verbatim.settings import ProcessingSettings
 
     settings = ProcessingSettings()
     settings.forced_alignment_enabled = False

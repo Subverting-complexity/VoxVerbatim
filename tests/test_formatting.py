@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from audio_transcriber.formatting import (
+from vox_verbatim.formatting import (
     UNKNOWN_TEXT,
     format_duration,
     format_position,

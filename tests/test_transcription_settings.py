@@ -13,7 +13,7 @@ import json
 import math
 from typing import Any
 
-from audio_transcriber.settings import (
+from vox_verbatim.settings import (
     DEFAULT_ASSEMBLYAI_AFRIKAANS_MODEL,
     DEFAULT_ASSEMBLYAI_PRIMARY_MODEL,
     DEFAULT_CHUNK_OVERLAP_SECONDS,
@@ -64,8 +64,8 @@ from audio_transcriber.settings import (
 # The redaction rule itself, reached for directly by one test below. That
 # test has to redact a structure holding fields nobody has written yet, so it
 # cannot go through real settings to get at the rule.
-from audio_transcriber.settings import _without_secrets
-from audio_transcriber.transcription.model import Provider
+from vox_verbatim.settings import _without_secrets
+from vox_verbatim.transcription.model import Provider
 
 # -- Defaults ------------------------------------------------------------
 
@@ -313,7 +313,7 @@ def test_a_library_that_cannot_be_loaded_is_named_with_its_reason():
     assert "Microsoft MAI" in problems[0] and "httpx" in problems[0]
     assert "AssemblyAI" in problems[1] and "assemblyai" in problems[1]
     assert all("No module named it." in problem for problem in problems)
-    assert all("Audio Transcriber.cmd" in problem for problem in problems)
+    assert all("VoxVerbatim.cmd" in problem for problem in problems)
 
 
 def test_adjudication_needs_the_openai_library_even_with_transcription_off():
@@ -332,7 +332,7 @@ def test_adjudication_needs_the_openai_library_even_with_transcription_off():
 
 def test_the_real_probe_reports_any_failure_rather_than_only_a_missing_module():
     """A half-installed package can raise almost anything while importing."""
-    from audio_transcriber.settings import _probe_library
+    from vox_verbatim.settings import _probe_library
 
     assert _probe_library("json", None) is None
     assert _probe_library("json", "NoSuchName") is not None

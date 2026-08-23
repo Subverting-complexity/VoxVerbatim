@@ -13,13 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from audio_transcriber.transcription import pipeline
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription import pipeline
+from vox_verbatim.transcription.model import (
     FinalToken,
     ReviewStatus,
     Transcript,
 )
-from audio_transcriber.transcription.runner import (
+from vox_verbatim.transcription.runner import (
     RecordingOutcome,
     RunSummary,
     TranscriptionRunner,
@@ -365,7 +365,7 @@ def test_an_outcome_keeps_the_numbers_and_the_folder_and_lets_the_transcript_go(
 
 def asked_of_windows(monkeypatch) -> list[int]:
     """Stand in for the Windows call and keep the flags it was given."""
-    from audio_transcriber.transcription import runner as runner_module
+    from vox_verbatim.transcription import runner as runner_module
 
     asked: list[int] = []
     monkeypatch.setattr(runner_module, "set_thread_execution_state", asked.append)
@@ -379,7 +379,7 @@ def asked_of_windows(monkeypatch) -> list[int]:
 def test_the_machine_is_held_awake_for_the_run_and_released_when_it_ends(
     qapp, monkeypatch, recordings
 ):
-    from audio_transcriber.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
+    from vox_verbatim.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
 
     asked = asked_of_windows(monkeypatch)
     fake_pipeline(monkeypatch, lambda recording, *args, **kwargs: make_transcript(recording.name))
@@ -397,7 +397,7 @@ def test_the_machine_is_held_awake_for_the_run_and_released_when_it_ends(
 
 
 def test_a_windows_call_that_fails_does_not_stop_the_run(qapp, monkeypatch, recordings):
-    from audio_transcriber.transcription import runner as runner_module
+    from vox_verbatim.transcription import runner as runner_module
 
     def refuse(flags: int) -> None:
         raise OSError("no kernel32 here")
@@ -415,7 +415,7 @@ def test_a_windows_call_that_fails_does_not_stop_the_run(qapp, monkeypatch, reco
 
 
 def test_nothing_is_asked_of_a_machine_that_is_not_windows(monkeypatch):
-    from audio_transcriber.transcription import runner as runner_module
+    from vox_verbatim.transcription import runner as runner_module
 
     asked: list[int] = []
     monkeypatch.setattr(runner_module, "set_thread_execution_state", asked.append)
@@ -434,8 +434,8 @@ def test_the_machine_is_let_go_only_when_the_last_run_has_withdrawn(monkeypatch)
     have its request cleared the moment the first run withdrew, and the
     machine could sleep under a run that had hours to go.
     """
-    from audio_transcriber.transcription import runner as runner_module
-    from audio_transcriber.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
+    from vox_verbatim.transcription import runner as runner_module
+    from vox_verbatim.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
 
     asked = asked_of_windows(monkeypatch)
     awake = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
@@ -458,8 +458,8 @@ def test_a_stopped_run_withdraws_its_request_once(qapp, monkeypatch, recordings)
     Withdrawing twice would take another run's request with it now that the
     requests are counted, so the runner only withdraws what it holds.
     """
-    from audio_transcriber.transcription import runner as runner_module
-    from audio_transcriber.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
+    from vox_verbatim.transcription import runner as runner_module
+    from vox_verbatim.transcription.runner import ES_CONTINUOUS, ES_SYSTEM_REQUIRED
 
     asked = asked_of_windows(monkeypatch)
     release = threading.Event()

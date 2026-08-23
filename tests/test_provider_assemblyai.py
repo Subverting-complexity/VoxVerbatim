@@ -23,10 +23,10 @@ from typing import Any, ClassVar
 
 import pytest
 
-from audio_transcriber.transcription.model import AudioSpan, Language, Provider
-from audio_transcriber.transcription.providers import assemblyai
-from audio_transcriber.transcription.providers.assemblyai import AssemblyAiProvider
-from audio_transcriber.transcription.providers.base import (
+from vox_verbatim.transcription.model import AudioSpan, Language, Provider
+from vox_verbatim.transcription.providers import assemblyai
+from vox_verbatim.transcription.providers.assemblyai import AssemblyAiProvider
+from vox_verbatim.transcription.providers.base import (
     ProviderError,
     ProviderNotConfigured,
     ProviderUnavailable,
@@ -794,7 +794,7 @@ def test_a_bad_answer_to_the_submission_never_looks_transcribed(tmp_path: Path) 
 
 @pytest.fixture(autouse=True)
 def no_waiting(monkeypatch):
-    from audio_transcriber.transcription.providers import base
+    from vox_verbatim.transcription.providers import base
 
     monkeypatch.setattr(base, "_sleep", lambda seconds: None)
 

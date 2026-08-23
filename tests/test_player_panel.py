@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from audio_transcriber.audio.player import AudioPlayer
-from audio_transcriber.ui.player_panel import PlayerPanel
+from vox_verbatim.audio.player import AudioPlayer
+from vox_verbatim.ui.player_panel import PlayerPanel
 
 
 def test_the_seek_bar_asks_to_move_when_the_user_moves_it(qapp):

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from audio_transcriber.transcription.normalise import (
+from vox_verbatim.transcription.normalise import (
     EquivalenceKind,
     are_equivalent,
     equivalence_kind,

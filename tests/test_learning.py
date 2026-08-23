@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.calibration import Dimension, ProviderStatistics
-from audio_transcriber.transcription.learning import (
+from vox_verbatim.transcription.calibration import Dimension, ProviderStatistics
+from vox_verbatim.transcription.learning import (
     LEARNED_PROFILE_ID,
     MistakeCategory,
     extract_corrections,
@@ -13,7 +13,7 @@ from audio_transcriber.transcription.learning import (
     term_for,
     update_statistics,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     Confidence,
     FinalToken,
     Language,
@@ -23,7 +23,7 @@ from audio_transcriber.transcription.model import (
     TokenReference,
     Transcript,
 )
-from audio_transcriber.transcription.vocabulary import (
+from vox_verbatim.transcription.vocabulary import (
     TermCategory,
     Vocabulary,
     VocabularyLevel,

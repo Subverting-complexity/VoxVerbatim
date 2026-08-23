@@ -14,12 +14,12 @@ Afrikaans is disabled.
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.alignment import build_aligned_table
-from audio_transcriber.transcription.confidence import (
+from vox_verbatim.transcription.alignment import build_aligned_table
+from vox_verbatim.transcription.confidence import (
     HIGH_CONFIDENCE_THRESHOLD,
     category_for,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AlignmentStatus,
     AudioSpan,
     Confidence,
@@ -32,7 +32,7 @@ from audio_transcriber.transcription.model import (
     RiskCategory,
     TimingStatus,
 )
-from audio_transcriber.transcription.reconcile import (
+from vox_verbatim.transcription.reconcile import (
     DEFAULT_OPTIONS,
     DEFAULT_PROVIDER_RELIABILITY,
     ReconciliationOptions,
@@ -41,12 +41,12 @@ from audio_transcriber.transcription.reconcile import (
     decide_timing,
     reconcile,
 )
-from audio_transcriber.transcription.vocabulary import (
+from vox_verbatim.transcription.vocabulary import (
     TermCategory,
     VocabularyIndex,
     VocabularyTerm,
 )
-from audio_transcriber.transcription.normalise import EquivalenceKind
+from vox_verbatim.transcription.normalise import EquivalenceKind
 
 SENTENCE = ["we", "should", "sign", "the", "contract", "tomorrow"]
 
@@ -814,8 +814,8 @@ def test_a_service_absent_from_the_whole_neighbourhood_is_not_a_deletion() -> No
 
 def test_risk_is_judged_from_the_words_within_reach_and_no_further() -> None:
     """The windowed copy must answer exactly as the whole recording did."""
-    from audio_transcriber.transcription.reconcile import _risk_for
-    from audio_transcriber.transcription.risk import RISK_WINDOW, risk_at
+    from vox_verbatim.transcription.reconcile import _risk_for
+    from vox_verbatim.transcription.risk import RISK_WINDOW, risk_at
 
     words = ["pay", "fifteen", "thousand", "rand", *(["word"] * 40), "on", "the", "fifteenth"]
 

@@ -19,26 +19,26 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
-from audio_transcriber.session import SessionStore
-from audio_transcriber.settings import (
+from vox_verbatim.session import SessionStore
+from vox_verbatim.settings import (
     SETTINGS_FILE_NAME,
     ElevenLabsSettings,
     Settings,
     SettingsStore,
     TranscriptionSettings,
 )
-from audio_transcriber.transcription.vocabulary import (
+from vox_verbatim.transcription.vocabulary import (
     Vocabulary,
     VocabularyLevel,
     VocabularyProfile,
     VocabularyTerm,
 )
-from audio_transcriber.ui import settings_dialog as settings_dialog_module
-from audio_transcriber.ui import settings_notes as notes
-from audio_transcriber.ui import settings_pages as settings_pages_module
-from audio_transcriber.ui.help_dialogs import keyboard_shortcuts_text
-from audio_transcriber.ui.main_window import MainWindow
-from audio_transcriber.ui.settings_dialog import SettingsDialog
+from vox_verbatim.ui import settings_dialog as settings_dialog_module
+from vox_verbatim.ui import settings_notes as notes
+from vox_verbatim.ui import settings_pages as settings_pages_module
+from vox_verbatim.ui.help_dialogs import keyboard_shortcuts_text
+from vox_verbatim.ui.main_window import MainWindow
+from vox_verbatim.ui.settings_dialog import SettingsDialog
 from tests.conftest import wait_until, write_fake_audio
 from tests.test_settings_pages import every_setting_changed, inputs_of
 

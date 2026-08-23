@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from audio_transcriber.session import SessionState, SessionStore
+from vox_verbatim.session import SessionState, SessionStore
 
 
 def test_a_saved_session_comes_back_unchanged(tmp_path):

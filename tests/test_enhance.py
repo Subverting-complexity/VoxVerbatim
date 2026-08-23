@@ -13,7 +13,7 @@ import math
 
 import pytest
 
-from audio_transcriber.audio.enhance import (
+from vox_verbatim.audio.enhance import (
     OUTPUT_FORMATS,
     EnhanceOptions,
     GainLimit,

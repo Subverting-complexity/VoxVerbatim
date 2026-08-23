@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from audio_transcriber.transcription.model import Language, Provider
-from audio_transcriber.transcription.normalise import EquivalenceKind, normalise
-from audio_transcriber.transcription.vocabulary import (
+from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription.normalise import EquivalenceKind, normalise
+from vox_verbatim.transcription.vocabulary import (
     LearnedCorrection,
     LearnedCorrections,
     TermCategory,
@@ -584,7 +584,7 @@ def _match_by_walking(terms: list[VocabularyTerm], text: str) -> VocabularyTerm 
     worth. The keys have to give this answer, first term included, and
     this is what holds them to it.
     """
-    from audio_transcriber.transcription.normalise import are_equivalent
+    from vox_verbatim.transcription.normalise import are_equivalent
 
     by_plain: dict[str, VocabularyTerm] = {}
     by_form: dict[str, VocabularyTerm] = {}

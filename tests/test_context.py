@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.context import (
+from vox_verbatim.transcription.context import (
     ASSEMBLYAI_MAXIMUM_KEYTERM_WORDS,
     ASSEMBLYAI_MAXIMUM_KEYTERMS_UNIVERSAL_2,
     ASSEMBLYAI_MAXIMUM_KEYTERMS_UNIVERSAL_3_5_PRO,
@@ -25,9 +25,9 @@ from audio_transcriber.transcription.context import (
     adapt_for,
     build_context_package,
 )
-from audio_transcriber.transcription.model import Language, Provider, RecordingConfiguration
-from audio_transcriber.transcription.providers.base import ProviderCapabilities
-from audio_transcriber.transcription.vocabulary import VocabularyTerm
+from vox_verbatim.transcription.model import Language, Provider, RecordingConfiguration
+from vox_verbatim.transcription.providers.base import ProviderCapabilities
+from vox_verbatim.transcription.vocabulary import VocabularyTerm
 
 
 def terms(*texts: str) -> list[VocabularyTerm]:

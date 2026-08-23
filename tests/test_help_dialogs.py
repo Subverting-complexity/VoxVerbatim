@@ -17,8 +17,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from audio_transcriber.ui import review_window
-from audio_transcriber.ui.help_dialogs import keyboard_shortcuts_text
+from vox_verbatim.ui import review_window
+from vox_verbatim.ui.help_dialogs import keyboard_shortcuts_text
 
 
 def review_section() -> str:

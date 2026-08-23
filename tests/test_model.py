@@ -18,7 +18,7 @@ looks like nothing happened.
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     Confidence,
     FinalToken,
     Provider,
@@ -26,7 +26,7 @@ from audio_transcriber.transcription.model import (
     ProviderToken,
     Transcript,
 )
-from audio_transcriber.transcription.normalise import normalise
+from vox_verbatim.transcription.normalise import normalise
 
 
 def _transcript(text: str = "Bosh") -> tuple[Transcript, FinalToken]:

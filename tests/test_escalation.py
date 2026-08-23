@@ -22,8 +22,8 @@ from typing import Any
 
 import pytest
 
-from audio_transcriber.transcription.canonical import probe_audio
-from audio_transcriber.transcription.escalation import (
+from vox_verbatim.transcription.canonical import probe_audio
+from vox_verbatim.transcription.escalation import (
     Dispute,
     EscalationOptions,
     EscalationReason,
@@ -39,7 +39,7 @@ from audio_transcriber.transcription.escalation import (
     reasons_for,
     strength_of,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AudioSpan,
     Candidate,
     CanonicalAudio,
@@ -55,7 +55,7 @@ from audio_transcriber.transcription.model import (
     TokenReference,
     Transcript,
 )
-from audio_transcriber.transcription.providers.assemblyai import (
+from vox_verbatim.transcription.providers.assemblyai import (
     ASSEMBLYAI_CAPABILITIES,
     AssemblyAiProvider,
 )
@@ -717,8 +717,8 @@ def test_what_a_second_opinion_did_not_reach_is_flagged_for_a_person():
 
 def test_the_options_are_read_off_the_settings_without_importing_them():
     """A partly configured application can still ask a question."""
-    from audio_transcriber.settings import AssemblyAiSettings, ProcessingSettings
-    from audio_transcriber.transcription.model import RecordingConfiguration
+    from vox_verbatim.settings import AssemblyAiSettings, ProcessingSettings
+    from vox_verbatim.transcription.model import RecordingConfiguration
 
     processing = ProcessingSettings()
     processing.escalation_context_seconds_before = 4.0
@@ -783,7 +783,7 @@ def _window_with(reasons, candidates=("fifty", "fifteen"), start=10.0) -> Escala
 def test_real_disagreements_are_sent_before_agreed_upon_numbers():
     """The ceiling takes the list from the front, so the front must hold
     the windows a second opinion can actually change."""
-    from audio_transcriber.transcription.escalation import prioritise
+    from vox_verbatim.transcription.escalation import prioritise
 
     agreed_amount = _window_with((EscalationReason.NUMBER_DIFFERS,), ("50",), start=5.0)
     three_ways = _window_with((EscalationReason.ALL_PROVIDERS_DISAGREE,), start=100.0)
@@ -859,7 +859,7 @@ def _disputed_word() -> FinalToken:
 
 
 def test_a_deciding_answer_that_sides_with_the_other_reading_corrects_the_word():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     outcome = EscalationOutcome(results=(_answered(token, (("fifty", 10.0, 10.5),)),))
@@ -881,7 +881,7 @@ def test_a_deciding_answer_that_sides_with_the_other_reading_corrects_the_word()
 
 
 def test_an_answer_that_agrees_with_the_word_confirms_it_and_clears_the_queue():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     outcome = EscalationOutcome(results=(_answered(token, (("fifteen", 10.0, 10.5),)),))
@@ -895,7 +895,7 @@ def test_an_answer_that_agrees_with_the_word_confirms_it_and_clears_the_queue():
 
 
 def test_an_answer_nobody_else_offered_is_kept_as_evidence_and_never_written_in():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     outcome = EscalationOutcome(results=(_answered(token, (("sixty", 10.0, 10.5),)),))
@@ -910,7 +910,7 @@ def test_an_answer_nobody_else_offered_is_kept_as_evidence_and_never_written_in(
 
 
 def test_an_informing_answer_adds_evidence_but_settles_nothing():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     outcome = EscalationOutcome(
@@ -929,7 +929,7 @@ def test_an_informing_answer_adds_evidence_but_settles_nothing():
 
 
 def test_a_value_that_must_not_be_guessed_is_never_settled_by_a_second_opinion():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     token.risk_categories = [RiskCategory.MONEY]
@@ -943,7 +943,7 @@ def test_a_value_that_must_not_be_guessed_is_never_settled_by_a_second_opinion()
 
 
 def test_a_second_opinion_clears_only_the_reasons_that_are_about_the_text():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     token.flag(ReviewReason.SPEAKER_UNCERTAIN)
@@ -957,7 +957,7 @@ def test_a_second_opinion_clears_only_the_reasons_that_are_about_the_text():
 
 
 def test_silence_where_the_word_was_leaves_it_for_a_person():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     outcome = EscalationOutcome(results=(_answered(token, (("hello", 8.0, 8.4),)),))
@@ -970,7 +970,7 @@ def test_silence_where_the_word_was_leaves_it_for_a_person():
 
 
 def test_a_person_who_already_corrected_the_word_is_not_overruled():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()
     token.human_corrected = True
@@ -982,7 +982,7 @@ def test_a_person_who_already_corrected_the_word_is_not_overruled():
 
 
 def test_everything_the_second_service_heard_is_kept_as_one_numbered_result():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     first = _disputed_word()
     second = word("Bosh", 50.0, 50.4, candidates=(("Bosh", (Provider.ELEVENLABS,)),))
@@ -1006,7 +1006,7 @@ def test_a_neighbour_that_overlaps_by_a_few_milliseconds_is_not_part_of_the_answ
     """Services measure their own boundaries, and adjacent words abut, so the
     word after the disputed one always overlaps it slightly. The answer to a
     question about one word is one word."""
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()  # 10.0 to 10.5
     outcome = EscalationOutcome(
@@ -1028,7 +1028,7 @@ def test_a_neighbour_that_overlaps_by_a_few_milliseconds_is_not_part_of_the_answ
 def test_one_service_word_across_two_disputed_words_settles_neither():
     """One word where the transcript has two is a disagreement about the word
     count, not a confirmation of both."""
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     first = word("the", 10.0, 10.2, candidates=(("the", (Provider.ELEVENLABS,)), ("a", (Provider.OPENAI,))))
     second = word("the", 10.2, 10.4, candidates=(("the", (Provider.ELEVENLABS,)), ("uh", (Provider.OPENAI,))))
@@ -1062,7 +1062,7 @@ def test_one_service_word_across_two_disputed_words_settles_neither():
 def test_the_time_window_question_is_retried_like_any_other_request():
     """A rate limit on one of two hundred short questions should cost a
     pause, not that passage's second opinion."""
-    from audio_transcriber.transcription.providers.base import ProviderError, TranscriptionProvider
+    from vox_verbatim.transcription.providers.base import ProviderError, TranscriptionProvider
 
     class FlakyProvider(TranscriptionProvider):
         provider = Provider.ASSEMBLYAI
@@ -1113,7 +1113,7 @@ def test_the_time_window_question_is_retried_like_any_other_request():
 def test_a_short_word_heard_a_little_later_by_the_service_is_still_the_answer():
     """Two engines can disagree about where a 100 ms word starts by more than
     half its length. The word whose middle is just outside the span is it."""
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = word(
         "fifteen", 1.0, 1.1,
@@ -1134,7 +1134,7 @@ def test_a_short_word_heard_a_little_later_by_the_service_is_still_the_answer():
 
 
 def test_a_word_the_service_split_in_two_still_confirms_it():
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = word(
         "database", 10.0, 10.5,
@@ -1155,7 +1155,7 @@ def test_a_word_the_service_split_in_two_still_confirms_it():
 def test_when_neighbours_lean_into_a_long_span_the_word_in_the_middle_answers():
     """Two words can have their middles inside a long word's span. Joined they
     are nobody's reading; the one nearest the middle is what was asked."""
-    from audio_transcriber.transcription.escalation import EscalationOutcome, apply_answers
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 
     token = _disputed_word()  # 10.0 to 10.5
     outcome = EscalationOutcome(

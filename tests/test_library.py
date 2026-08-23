@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 import wave
 
-from audio_transcriber.audio.library import (
+from vox_verbatim.audio.library import (
     DurationState,
     is_supported_audio_file,
     list_audio_files,

@@ -31,8 +31,8 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
-from audio_transcriber.transcription.grouping import affected_summary
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.grouping import affected_summary
+from vox_verbatim.transcription.model import (
     AudioSpan,
     Candidate,
     CanonicalAudio,
@@ -51,10 +51,10 @@ from audio_transcriber.transcription.model import (
     TokenReference,
     Transcript,
 )
-from audio_transcriber.transcription.project import ProjectStore
-from audio_transcriber.ui import review_lists
-from audio_transcriber.ui import review_window as review_window_module
-from audio_transcriber.ui.review_lists import (
+from vox_verbatim.transcription.project import ProjectStore
+from vox_verbatim.ui import review_lists
+from vox_verbatim.ui import review_window as review_window_module
+from vox_verbatim.ui.review_lists import (
     GROUP_COLUMN_CONFIDENCE,
     GROUP_COLUMN_COUNT,
     GROUP_COLUMN_REVIEWED,
@@ -70,7 +70,7 @@ from audio_transcriber.ui.review_lists import (
     REVIEWED_AS_DETECTED,
     REVIEWED_AUTOMATICALLY,
 )
-from audio_transcriber.ui.review_window import (
+from vox_verbatim.ui.review_window import (
     AUDIO_EVENT,
     CANDIDATE_COLUMN_CHOICE,
     CANDIDATE_COLUMN_CONFIDENCE,

@@ -1,9 +1,9 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem  Build the shareable copy of Audio Transcriber.
+rem  Build the shareable copy of VoxVerbatim.
 rem
 rem  Double-click this file. It builds the application into the "publish"
-rem  folder, as "publish\Audio Transcriber". That folder holds the program and
+rem  folder, as "publish\VoxVerbatim". That folder holds the program and
 rem  everything it needs, including Python itself, so it can be copied to
 rem  somebody else's Windows computer and run there without anything being
 rem  installed first.
@@ -14,7 +14,7 @@ rem  building are all downloaded first. Later builds take about a minute and
 rem  a half.
 rem ---------------------------------------------------------------------------
 setlocal enableextensions
-title Publishing Audio Transcriber
+title Publishing VoxVerbatim
 
 rem Work in the folder this script lives in, whichever folder it was started from.
 cd /d "%~dp0"
@@ -22,8 +22,8 @@ cd /d "%~dp0"
 set "VENV_DIR=.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "PUBLISH_DIR=publish"
-set "APP_DIR=%PUBLISH_DIR%\Audio Transcriber"
-set "APP_EXE=%APP_DIR%\Audio Transcriber.exe"
+set "APP_DIR=%PUBLISH_DIR%\VoxVerbatim"
+set "APP_EXE=%APP_DIR%\VoxVerbatim.exe"
 
 if not exist "%VENV_PY%" call :create_venv
 if not exist "%VENV_PY%" goto :no_python
@@ -54,7 +54,7 @@ echo.
 "%VENV_PY%" -m PyInstaller --noconfirm ^
     --distpath "%PUBLISH_DIR%" ^
     --workpath "build\pyinstaller" ^
-    "packaging\audio-transcriber.spec"
+    "packaging\vox-verbatim.spec"
 if errorlevel 1 goto :build_failed
 if not exist "%APP_EXE%" goto :build_failed
 
@@ -67,7 +67,7 @@ echo Done. The application is in:
 echo    %CD%\%APP_DIR%
 echo.
 echo Copy that whole folder to share it. The person you send it to runs
-echo "Audio Transcriber.exe" inside it. Nothing needs to be installed on
+echo "VoxVerbatim.exe" inside it. Nothing needs to be installed on
 echo their computer.
 echo.
 pause

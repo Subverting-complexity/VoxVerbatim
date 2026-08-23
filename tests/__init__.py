@@ -1,1 +1,1 @@
-"""Tests for the Audio Transcriber application."""
+"""Tests for the VoxVerbatim application."""

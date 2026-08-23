@@ -17,29 +17,29 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication, QDialog, QWidget
 
-from audio_transcriber.audio.player import AudioPlayer
-from audio_transcriber.session import SessionStore
-from audio_transcriber.transcription import grouping
-from audio_transcriber.transcription.calibration import ProviderStatistics
-from audio_transcriber.transcription.model import (
+from vox_verbatim.audio.player import AudioPlayer
+from vox_verbatim.session import SessionStore
+from vox_verbatim.transcription import grouping
+from vox_verbatim.transcription.calibration import ProviderStatistics
+from vox_verbatim.transcription.model import (
     FinalToken,
     ReviewReason,
     ReviewStatus,
     Transcript,
 )
-from audio_transcriber.transcription.normalise import normalise
-from audio_transcriber.transcription.project import ProjectStore, ReplacementRule
-from audio_transcriber.transcription.runner import RecordingOutcome, RunSummary
-from audio_transcriber.transcription.store import TranscriptStore
-from audio_transcriber.transcription.vocabulary import (
+from vox_verbatim.transcription.normalise import normalise
+from vox_verbatim.transcription.project import ProjectStore, ReplacementRule
+from vox_verbatim.transcription.runner import RecordingOutcome, RunSummary
+from vox_verbatim.transcription.store import TranscriptStore
+from vox_verbatim.transcription.vocabulary import (
     Vocabulary,
     VocabularyLevel,
     VocabularyProfile,
 )
-from audio_transcriber.ui import main_window as main_window_module
-from audio_transcriber.ui import review_lists
-from audio_transcriber.ui.main_window import MainWindow
-from audio_transcriber.ui.settings_dialog import SettingsDialog
+from vox_verbatim.ui import main_window as main_window_module
+from vox_verbatim.ui import review_lists
+from vox_verbatim.ui.main_window import MainWindow
+from vox_verbatim.ui.settings_dialog import SettingsDialog
 
 from tests.conftest import wait_until, write_fake_audio
 
@@ -1093,7 +1093,7 @@ def test_the_review_window_constructor_matches_the_shared_contract(qapp):
     written contract, so the signature is worth asserting rather than
     discovering at run time in front of a user.
     """
-    from audio_transcriber.ui.review_window import ReviewWindow
+    from vox_verbatim.ui.review_window import ReviewWindow
 
     parameters = list(inspect.signature(ReviewWindow.__init__).parameters)
     assert parameters[:7] == [

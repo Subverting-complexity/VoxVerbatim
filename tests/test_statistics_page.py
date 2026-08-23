@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 
-from audio_transcriber.transcription.calibration import (
+from vox_verbatim.transcription.calibration import (
     DEFAULT_WEIGHT,
     Observation,
     ProviderStatistics,
 )
-from audio_transcriber.transcription.model import Confidence, Language, Provider
-from audio_transcriber.ui.statistics_page import (
+from vox_verbatim.transcription.model import Confidence, Language, Provider
+from vox_verbatim.ui.statistics_page import (
     COLUMN_CHOSEN,
     COLUMN_COUNT,
     COLUMN_EVIDENCE,

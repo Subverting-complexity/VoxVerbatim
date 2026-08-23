@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from audio_transcriber.ui.enhance_notes import (
+from vox_verbatim.ui.enhance_notes import (
     CEILING,
     FILES,
     LIMITER,

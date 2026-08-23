@@ -5,8 +5,8 @@ from __future__ import annotations
 import threading
 import time
 
-from audio_transcriber.audio import scanner as scanner_module
-from audio_transcriber.audio.scanner import FolderScanner
+from vox_verbatim.audio import scanner as scanner_module
+from vox_verbatim.audio.scanner import FolderScanner
 
 from tests.conftest import wait_until, write_fake_audio
 

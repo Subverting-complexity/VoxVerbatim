@@ -15,13 +15,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
 
-from vox_verbatim import APPLICATION_NAME
+from vox_verbatim import DISTRIBUTION_NAME
 from vox_verbatim.session import SESSION_FILE_NAME
 from vox_verbatim.settings import SETTINGS_FILE_NAME
 from vox_verbatim.transcription.calibration import CALIBRATION_FILE_NAME
 from vox_verbatim.transcription.vocabulary import VOCABULARY_FILE_NAME
 
-LOG_FILE_NAME = "vox-verbatim.log"
+LOG_FILE_NAME = f"{DISTRIBUTION_NAME}.log"
 
 
 def config_directory(create: bool = False) -> Path:
@@ -34,7 +34,7 @@ def config_directory(create: bool = False) -> Path:
     """
     location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
     if not location:
-        location = str(Path.home() / f".{APPLICATION_NAME.lower().replace(' ', '-')}")
+        location = str(Path.home() / f".{DISTRIBUTION_NAME}")
     directory = Path(location)
     if create:
         directory.mkdir(parents=True, exist_ok=True)

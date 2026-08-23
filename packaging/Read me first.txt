@@ -6,9 +6,9 @@ installed. To start it, open "VoxVerbatim.exe" in this folder.
 
 Keep the folder together. The .exe needs the files beside it, so move or
 copy the whole folder rather than the .exe on its own. To start it from your
-desktop, right-click "VoxVerbatim.exe", choose "Show more options",
-then "Send to", then "Desktop (create shortcut)". The shortcut points back
-here, so leave this folder where it is.
+desktop, right-click "VoxVerbatim.exe", choose "Show more options", then
+"Send to", then "Desktop (create shortcut)". The shortcut points back here,
+so leave this folder where it is.
 
 
 The first time you run it

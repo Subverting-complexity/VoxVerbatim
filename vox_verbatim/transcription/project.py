@@ -67,6 +67,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from vox_verbatim import DISTRIBUTION_NAME
 from vox_verbatim.json_store import read_json_object, write_json_object
 from vox_verbatim.transcription.model import Confidence, Language
 
@@ -76,7 +77,7 @@ _log = logging.getLogger(__name__)
 #: application wrote it, because it sits among the user's own recordings
 #: rather than in a folder of ours, and somebody who finds it there should be
 #: able to tell what it belongs to before they decide whether to delete it.
-PROJECT_FILE_NAME = "vox-verbatim-project.json"
+PROJECT_FILE_NAME = f"{DISTRIBUTION_NAME}-project.json"
 
 #: Bumped only if the on-disk shape changes in a way that needs migrating.
 PROJECT_FORMAT_VERSION = 1

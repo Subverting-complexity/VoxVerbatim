@@ -11,7 +11,85 @@ transcribe them to text. For each recording it asks several speech-to-text
 services at the same time and combines their answers into a single result,
 which is more accurate than trusting any one service on its own.
 
+The application itself is free, but the transcription is not its own. It
+holds no account with any speech service and has no service of its own
+behind it. You sign up with the services yourself and paste your own keys
+into Settings, and several of them give new accounts enough free credit to
+transcribe a good deal before you have paid anybody anything. The next
+section says exactly what you need and why it works this way.
+
 This project is released under the [MIT License](LICENSE).
+
+## You bring your own accounts
+
+Nothing about the application costs money and there is nothing to subscribe
+to. Everything it does on your own computer is free and needs no account at
+all: listing a folder, playing recordings, measuring them, writing louder
+copies of the quiet ones, and working through a finished transcript
+afterwards.
+
+Transcription is the exception, because transcription is somebody else's
+computer doing the work. The application does not stand between you and the
+speech services and does not resell them. It has no account of its own, no
+server, and no arrangement with any of them. You sign up with each service
+in your own name, generate an API key, and paste it into that service's page
+in the Settings dialog on `Ctrl+,`. Whatever a run costs, the service bills
+you for it directly.
+
+This is a choice rather than something left undone, and it is worth saying
+what you get for it. With nothing in the middle there is nobody marking the
+price up, nobody metering what you use, nobody keeping a copy of your
+recordings, and nothing that stops working on the day somebody else stops
+paying for a server. You are each service's own customer, so you pay their
+real prices, you keep whatever they give new accounts, and your recordings
+go from your computer to the service and nowhere else. The cost of it is
+that the sign-ups are yours to do.
+
+### What you need an account with
+
+| Service | What it is asked to do | Needed? |
+| --- | --- | --- |
+| ElevenLabs Scribe | Reads every recording in full, and measures where each word falls in the audio | Yes |
+| OpenAI | Reads every recording in full. A second, separate key lets a reasoning model settle the words the others could not agree on | Yes |
+| Microsoft MAI-Transcribe | Reads every recording in full, as a third opinion | Optional |
+| AssemblyAI | Asked only about the passages the others disagreed on, so it is paid for a second opinion and nothing else | Optional |
+| Deepgram | Nothing yet. It has a settings page and a working adapter, but takes no part in a run | No |
+
+Out of the box everything except Deepgram is switched on, so a first run
+expects all four to be set up. Two accounts are the least you can get away
+with, ElevenLabs and OpenAI, because those two are what every transcript is
+built from and the application will not begin a run without them. If you
+want to start with only those, switch Microsoft and AssemblyAI off on their
+own Settings pages first. A service that is switched off is never called and
+never billed, and one that is switched on but not set up stops the run
+before it starts rather than half way through it, with a sentence saying
+which key is missing.
+
+OpenAI appears twice in Settings, once for transcription and once for
+settling disputes, because the two want different models and you may want to
+choose them separately. That is still one OpenAI account; the same key goes
+in both pages.
+
+Microsoft is the most work of the four. MAI-Transcribe is reached through an
+Azure resource you create yourself rather than through a sign-up page and a
+key on a dashboard, so allow more time for that one than for the others.
+
+### About the free credit
+
+Several of these services give a new account a starting credit or a free
+monthly allowance, and some of it is generous enough to transcribe hours of
+audio before you have spent anything. It is worth signing up to all of them
+and spending what you are given before you decide where your money should
+go, because the point of asking several services the same question is that
+you find out which of them is good at your recordings, and your recordings
+are not like anybody else's.
+
+What each one gives away, and what it charges once that runs out, changes
+often enough that a figure written here would be wrong within months. Check
+each service's own pricing page. The application does not know their prices
+either: the rates it uses to tell you what a run will cost, before the run
+starts, are ones you type into the Costs page in Settings yourself, and an
+estimate is only ever as current as what you last typed there.
 
 ## Running it
 

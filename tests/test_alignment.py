@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from audio_transcriber.transcription.alignment import (
+from vox_verbatim.transcription.alignment import (
     AlignedTable,
     AlignmentOptions,
     ProviderAlignment,
@@ -30,9 +30,9 @@ from audio_transcriber.transcription.alignment import (
 
 # The windowing is the most important decision in the module, so it is
 # tested directly rather than only through its effect on the output.
-from audio_transcriber.transcription.alignment import _build_stream, _windows
+from vox_verbatim.transcription.alignment import _build_stream, _windows
 
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AlignmentStatus,
     Provider,
     ProviderResult,
@@ -560,8 +560,8 @@ def test_a_silence_and_a_change_of_speaker_are_natural_places_to_cut():
 
 def _align_window_cell_by_cell(backbone, other, window, provider, options):
     """The matrix as it was first written, one question per cell."""
-    from audio_transcriber.transcription.alignment import _columns_from_moves, _similarity
-    from audio_transcriber.transcription.normalise import are_equivalent
+    from vox_verbatim.transcription.alignment import _columns_from_moves, _similarity
+    from vox_verbatim.transcription.normalise import are_equivalent
 
     backbone_words = backbone.words[window.backbone_start : window.backbone_end]
     other_words = other.words[window.aligned_start : window.aligned_end]
@@ -709,7 +709,7 @@ def test_the_fast_matrix_gives_exactly_the_cell_by_cell_answer():
     the cases where a key worked out in advance could disagree with the
     function it stands in for.
     """
-    from audio_transcriber.transcription import alignment as module
+    from vox_verbatim.transcription import alignment as module
 
     options = AlignmentOptions(maximum_window_words=12)
     for seed in range(80):
@@ -737,8 +737,8 @@ def test_the_word_keys_agree_exactly_when_the_texts_are_equivalent():
     """
     from itertools import permutations
 
-    from audio_transcriber.transcription.alignment import _key_of, _keys_agree
-    from audio_transcriber.transcription.normalise import are_equivalent
+    from vox_verbatim.transcription.alignment import _key_of, _keys_agree
+    from vox_verbatim.transcription.normalise import are_equivalent
 
     texts = _AWKWARD_VOCABULARY + ["data base", "twenty five", "up to date", "I am", ""]
     for left, right in permutations(texts, 2):
@@ -749,7 +749,7 @@ def test_the_word_keys_agree_exactly_when_the_texts_are_equivalent():
 
 
 def test_the_single_word_index_finds_exactly_the_words_the_keys_agree_with():
-    from audio_transcriber.transcription.alignment import _SingleWords, _key_of, _keys_agree
+    from vox_verbatim.transcription.alignment import _SingleWords, _key_of, _keys_agree
 
     keys = [_key_of(text) for text in _AWKWARD_VOCABULARY]
     index = _SingleWords(keys)

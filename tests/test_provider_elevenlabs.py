@@ -22,16 +22,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from audio_transcriber.transcription import providers
-from audio_transcriber.transcription.model import Language, Provider
-from audio_transcriber.transcription.providers import elevenlabs as elevenlabs_module
-from audio_transcriber.transcription.providers.base import (
+from vox_verbatim.transcription import providers
+from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription.providers import elevenlabs as elevenlabs_module
+from vox_verbatim.transcription.providers.base import (
     ProviderError,
     ProviderNotConfigured,
     ProviderUnavailable,
     TranscriptionRequest,
 )
-from audio_transcriber.transcription.providers.elevenlabs import (
+from vox_verbatim.transcription.providers.elevenlabs import (
     DEFAULT_MAXIMUM_KEYTERMS,
     KEYTERM_MINIMUM_CHARGE_THRESHOLD,
     MAXIMUM_KEYTERM_CHARACTERS,
@@ -910,7 +910,7 @@ def test_the_adapters_are_reachable_from_the_package():
 @pytest.fixture(autouse=True)
 def no_waiting(monkeypatch):
     """Take the backoff out, so a retried request does not slow the suite."""
-    from audio_transcriber.transcription.providers import base
+    from vox_verbatim.transcription.providers import base
 
     monkeypatch.setattr(base, "_sleep", lambda seconds: None)
     monkeypatch.setattr(elevenlabs_module, "_sleep", lambda seconds: None)
@@ -976,7 +976,7 @@ def test_a_retry_that_never_succeeds_says_how_many_times_it_tried(request_for):
 
 
 def test_the_wait_a_rate_limit_asks_for_is_read_off_the_error(monkeypatch, request_for):
-    from audio_transcriber.transcription.providers import base
+    from vox_verbatim.transcription.providers import base
 
     waits: list[float] = []
     monkeypatch.setattr(base, "_sleep", waits.append)

@@ -23,8 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from audio_transcriber.transcription import adjudication as adjudication_module
-from audio_transcriber.transcription.adjudication import (
+from vox_verbatim.transcription import adjudication as adjudication_module
+from vox_verbatim.transcription.adjudication import (
     ADJUDICATION_PURPOSE,
     ADJUDICATION_SCHEMA,
     Adjudicator,
@@ -33,7 +33,7 @@ from audio_transcriber.transcription.adjudication import (
     RefusalReason,
     build_prompt,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AlignmentStatus,
     Candidate,
     Confidence,
@@ -46,7 +46,7 @@ from audio_transcriber.transcription.model import (
     RiskCategory,
     TimingStatus,
 )
-from audio_transcriber.transcription.normalise import normalise
+from vox_verbatim.transcription.normalise import normalise
 
 #: Obviously not real, but distinctive, so a test can prove it appears
 #: nowhere in what gets written to provenance.

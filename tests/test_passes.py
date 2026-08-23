@@ -25,10 +25,10 @@ from pathlib import Path
 
 import pytest
 
-from audio_transcriber.transcription import passes
-from audio_transcriber.transcription.canonical import prepare_canonical_audio
-from audio_transcriber.transcription.context import build_context_package
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription import passes
+from vox_verbatim.transcription.canonical import prepare_canonical_audio
+from vox_verbatim.transcription.context import build_context_package
+from vox_verbatim.transcription.model import (
     CanonicalAudio,
     Language,
     Provider,
@@ -37,13 +37,13 @@ from audio_transcriber.transcription.model import (
     ProviderToken,
     RecordingConfiguration,
 )
-from audio_transcriber.transcription.providers.base import (
+from vox_verbatim.transcription.providers.base import (
     ProviderCapabilities,
     ProviderError,
     TranscriptionProvider,
     TranscriptionRequest,
 )
-from audio_transcriber.transcription.store import TranscriptStore
+from vox_verbatim.transcription.store import TranscriptStore
 
 from tests.conftest import write_real_audio
 

@@ -42,14 +42,14 @@ from typing import Any
 
 import pytest
 
-from audio_transcriber.transcription.model import Language, Provider
-from audio_transcriber.transcription.providers import deepgram
-from audio_transcriber.transcription.providers.base import (
+from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription.providers import deepgram
+from vox_verbatim.transcription.providers.base import (
     ProviderNotConfigured,
     ProviderUnavailable,
     TranscriptionRequest,
 )
-from audio_transcriber.transcription.providers.deepgram import DeepgramProvider
+from vox_verbatim.transcription.providers.deepgram import DeepgramProvider
 
 API_KEY = "deepgram-secret-key-77b3"
 

@@ -23,9 +23,9 @@ import logging
 
 import pytest
 
-from audio_transcriber.settings import TranscriptionSettings
-from audio_transcriber.transcription import exports, pipeline
-from audio_transcriber.transcription.model import (
+from vox_verbatim.settings import TranscriptionSettings
+from vox_verbatim.transcription import exports, pipeline
+from vox_verbatim.transcription.model import (
     Candidate,
     Confidence,
     FinalToken,
@@ -36,9 +36,9 @@ from audio_transcriber.transcription.model import (
     ReviewReason,
     Transcript,
 )
-from audio_transcriber.transcription.providers import registry
-from audio_transcriber.transcription.providers.assemblyai import ASSEMBLYAI_CAPABILITIES
-from audio_transcriber.transcription.store import TranscriptStore
+from vox_verbatim.transcription.providers import registry
+from vox_verbatim.transcription.providers.assemblyai import ASSEMBLYAI_CAPABILITIES
+from vox_verbatim.transcription.store import TranscriptStore
 
 from tests.conftest import write_real_audio
 from tests.test_passes import (
@@ -614,7 +614,7 @@ class SecondOpinion:
         return "https://uploads.example/recording"
 
     def transcribe_window(self, request, *, audio_url=None, window=None, cancelled=None):
-        from audio_transcriber.transcription.model import ProviderToken
+        from vox_verbatim.transcription.model import ProviderToken
 
         self.windows.append(window)
         self.requests.append(request)
@@ -758,7 +758,7 @@ def test_a_stage_that_breaks_after_the_services_answered_keeps_the_transcript(
     transcribe, monkeypatch
 ):
     """Everything after reconciliation is a refinement of words already paid for."""
-    from audio_transcriber.transcription import escalation
+    from vox_verbatim.transcription import escalation
 
     def broken(*args, **kwargs):
         raise RuntimeError("a bug in planning")
@@ -786,7 +786,7 @@ class BatchCountingAdjudicator:
         return True
 
     def adjudicate(self, disputes, **kwargs):
-        from audio_transcriber.transcription.adjudication import AdjudicationOutcome
+        from vox_verbatim.transcription.adjudication import AdjudicationOutcome
 
         self.batches.append(len(disputes))
         for dispute in disputes:
@@ -820,7 +820,7 @@ def test_only_words_whose_text_is_in_doubt_are_put_to_the_language_model():
 
 
 def test_disputes_go_to_the_language_model_in_batches(monkeypatch):
-    from audio_transcriber.transcription import adjudication
+    from vox_verbatim.transcription import adjudication
 
     built: list[BatchCountingAdjudicator] = []
 
@@ -864,7 +864,7 @@ def test_disputes_go_to_the_language_model_in_batches(monkeypatch):
 
 
 def test_moved_words_are_gathered_into_phrases_by_adjacency_and_time():
-    from audio_transcriber.transcription.model import TimingStatus
+    from vox_verbatim.transcription.model import TimingStatus
 
     def moved(text, start, end):
         return FinalToken(
@@ -904,7 +904,7 @@ class ClipRecordingAligner:
         return True
 
     def align(self, audio_path, text, language, canonical_offset):
-        from audio_transcriber.transcription.canonical import probe_audio
+        from vox_verbatim.transcription.canonical import probe_audio
 
         duration = probe_audio(audio_path).duration
         self.calls.append((text, str(audio_path), duration))
@@ -955,7 +955,7 @@ def test_a_phrase_of_inserted_words_alone_is_not_sent_for_alignment():
     """An inserted word has no span of its own, only the gap between its
     neighbours. A phrase made of nothing else would have an aligner place
     words nobody measured onto the neighbours' audio."""
-    from audio_transcriber.transcription.model import AudioSpan as Span, TimingStatus
+    from vox_verbatim.transcription.model import AudioSpan as Span, TimingStatus
 
     inserted = FinalToken(
         text="um", timing_status=TimingStatus.UNALIGNED, source_audio_span=Span(1.0, 1.0)
@@ -972,7 +972,7 @@ def test_a_phrase_of_inserted_words_alone_is_not_sent_for_alignment():
 
 
 def test_a_word_with_only_a_start_still_places_its_phrase():
-    from audio_transcriber.transcription.model import AudioSpan as Span, TimingStatus
+    from vox_verbatim.transcription.model import AudioSpan as Span, TimingStatus
 
     start_only = FinalToken(text="x", start=1.0, timing_status=TimingStatus.MAPPED_SUBSTITUTION)
     whole = FinalToken(text="y", start=1.4, end=1.8, timing_status=TimingStatus.MAPPED_SUBSTITUTION)

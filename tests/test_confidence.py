@@ -8,7 +8,7 @@ corrections without having to build a whole recording first.
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.confidence import (
+from vox_verbatim.transcription.confidence import (
     ASSUMED_ACOUSTIC_CONFIDENCE,
     HIGH_CONFIDENCE_THRESHOLD,
     LOW_ACOUSTIC_THRESHOLD,
@@ -26,7 +26,7 @@ from audio_transcriber.transcription.confidence import (
     strength_percentage,
     timing_confidence,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AlignmentStatus,
     Confidence,
     Provider,
@@ -320,7 +320,7 @@ def test_provider_confidences_are_never_averaged_together() -> None:
 
 
 def test_alignment_status_names_the_right_kind_of_problem() -> None:
-    from audio_transcriber.transcription.confidence import alignment_reasons
+    from vox_verbatim.transcription.confidence import alignment_reasons
 
     assert ReviewReason.UNALIGNED_WORD in alignment_reasons(AlignmentStatus.INSERTION, 1.0)
     assert ReviewReason.WEAK_ALIGNMENT in alignment_reasons(AlignmentStatus.SUBSTITUTION, 0.1)

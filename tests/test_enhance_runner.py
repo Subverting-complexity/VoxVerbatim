@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from audio_transcriber.audio import enhance_runner as runner_module
-from audio_transcriber.audio.enhance import EnhanceOptions, FileResult, Outcome
-from audio_transcriber.audio.enhance_runner import EnhanceRunner
-from audio_transcriber.transcription import runner as transcription_runner
+from vox_verbatim.audio import enhance_runner as runner_module
+from vox_verbatim.audio.enhance import EnhanceOptions, FileResult, Outcome
+from vox_verbatim.audio.enhance_runner import EnhanceRunner
+from vox_verbatim.transcription import runner as transcription_runner
 
 from tests.conftest import wait_until
 

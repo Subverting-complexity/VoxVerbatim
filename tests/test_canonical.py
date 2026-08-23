@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from audio_transcriber.audio.enhance import OUTPUT_FORMATS
-from audio_transcriber.transcription.canonical import (
+from vox_verbatim.audio.enhance import OUTPUT_FORMATS
+from vox_verbatim.transcription.canonical import (
     CanonicalAudioError,
     containers_accepted_by_all,
     cut_window,
@@ -31,8 +31,8 @@ from audio_transcriber.transcription.canonical import (
     prepare_canonical_audio,
     probe_audio,
 )
-from audio_transcriber.transcription.model import AudioSpan
-from audio_transcriber.transcription.providers.base import ProviderCapabilities
+from vox_verbatim.transcription.model import AudioSpan
+from vox_verbatim.transcription.providers.base import ProviderCapabilities
 
 from tests.conftest import write_fake_audio, write_real_audio
 

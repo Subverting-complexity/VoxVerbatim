@@ -14,7 +14,7 @@ design the whole application rests on.
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.diarisation import (
+from vox_verbatim.transcription.diarisation import (
     DiarisationConcern,
     DiarisationOptions,
     SpeakerDecision,
@@ -28,8 +28,8 @@ from audio_transcriber.transcription.diarisation import (
     speakers_to_expect,
     turns_from_result,
 )
-from audio_transcriber.transcription.escalation import EscalationReason
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.escalation import EscalationReason
+from vox_verbatim.transcription.model import (
     AudioSpan,
     Confidence,
     FinalToken,
@@ -125,7 +125,7 @@ def test_the_expected_count_anchors_how_many_speakers_may_be_found():
 
 
 def test_the_expected_count_is_read_off_the_recording_configuration():
-    from audio_transcriber.transcription.model import RecordingConfiguration
+    from vox_verbatim.transcription.model import RecordingConfiguration
 
     options = DiarisationOptions.from_configuration(
         RecordingConfiguration(expected_speaker_count=3)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from audio_transcriber.transcription.calibration import (
+from vox_verbatim.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     DEFAULT_WEIGHT,
     MINIMUM_DIMENSION_EVIDENCE,
@@ -14,8 +14,8 @@ from audio_transcriber.transcription.calibration import (
     ProviderStatistics,
     evidence_phrase,
 )
-from audio_transcriber.transcription.model import Confidence, Language, Provider
-from audio_transcriber.transcription.vocabulary import TermCategory
+from vox_verbatim.transcription.model import Confidence, Language, Provider
+from vox_verbatim.transcription.vocabulary import TermCategory
 
 
 def word(

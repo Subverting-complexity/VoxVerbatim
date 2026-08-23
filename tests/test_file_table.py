@@ -8,8 +8,8 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
 
-from audio_transcriber.audio.library import AudioFile
-from audio_transcriber.ui.file_table import (
+from vox_verbatim.audio.library import AudioFile
+from vox_verbatim.ui.file_table import (
     COLUMN_DURATION,
     COLUMN_NAME,
     COLUMN_SIZE,

@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AudioSpan,
     Confidence,
     FinalToken,
     ReviewReason,
     ReviewStatus,
 )
-from audio_transcriber.ui.review_queue import (
+from vox_verbatim.ui.review_queue import (
     COLUMN_CONFIDENCE,
     COLUMN_REASON,
     COLUMN_TEXT,

@@ -8,8 +8,8 @@ reasoning happens at all when the user has said the recording contains none.
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.alignment import build_aligned_table
-from audio_transcriber.transcription.language import (
+from vox_verbatim.transcription.alignment import build_aligned_table
+from vox_verbatim.transcription.language import (
     CONFIDENT_LANGUAGE_THRESHOLD,
     MICROSOFT_MINIMUM_WEIGHT,
     LanguageWeights,
@@ -19,7 +19,7 @@ from audio_transcriber.transcription.language import (
     provider_language_weight,
     read_languages,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AudioSpan,
     Language,
     LanguageEvidence,

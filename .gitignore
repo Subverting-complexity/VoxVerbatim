@@ -33,7 +33,7 @@ MANIFEST
 *.spec
 #   Ours is not generated. It is how the shareable build is defined, it is
 #   written by hand and commented, and publish.cmd is useless without it.
-!packaging/audio-transcriber.spec
+!packaging/vox-verbatim.spec
 
 # Installer logs
 pip-log.txt

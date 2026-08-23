@@ -24,14 +24,14 @@ from typing import Any
 
 import pytest
 
-from audio_transcriber.transcription.model import Language, Provider
-from audio_transcriber.transcription.providers import microsoft
-from audio_transcriber.transcription.providers.base import (
+from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription.providers import microsoft
+from vox_verbatim.transcription.providers.base import (
     ProviderNotConfigured,
     ProviderUnavailable,
     TranscriptionRequest,
 )
-from audio_transcriber.transcription.providers.microsoft import MicrosoftProvider
+from vox_verbatim.transcription.providers.microsoft import MicrosoftProvider
 
 API_KEY = "microsoft-secret-key-9f2a"
 ENDPOINT = "https://my-resource.cognitiveservices.azure.com"
@@ -759,7 +759,7 @@ def block_import(monkeypatch, name: str) -> None:
 
 @pytest.fixture(autouse=True)
 def no_waiting(monkeypatch):
-    from audio_transcriber.transcription.providers import base
+    from vox_verbatim.transcription.providers import base
 
     monkeypatch.setattr(base, "_sleep", lambda seconds: None)
 
@@ -823,7 +823,7 @@ def test_a_rejected_key_is_not_tried_again(tmp_path: Path) -> None:
 def test_the_wait_a_rate_limit_asks_for_is_read_off_the_response(
     monkeypatch, tmp_path: Path
 ) -> None:
-    from audio_transcriber.transcription.providers import base
+    from vox_verbatim.transcription.providers import base
 
     waits: list[float] = []
     monkeypatch.setattr(base, "_sleep", waits.append)

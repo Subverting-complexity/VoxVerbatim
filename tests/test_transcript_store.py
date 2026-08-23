@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AlignmentStatus,
     AudioSpan,
     Candidate,
@@ -34,7 +34,7 @@ from audio_transcriber.transcription.model import (
     TokenReference,
     Transcript,
 )
-from audio_transcriber.transcription.store import (
+from vox_verbatim.transcription.store import (
     DEFAULT_FOLDER_SUFFIX,
     REDACTED_TEXT,
     TranscriptStore,
@@ -409,7 +409,7 @@ def test_a_path_past_the_windows_limit_is_named_as_the_reason(tmp_path, monkeypa
 
 def test_a_transcript_held_open_is_kept_beside_the_file_rather_than_lost(tmp_path, monkeypatch):
     """The save says it failed, and the finished transcript is still on the disk."""
-    from audio_transcriber import json_store
+    from vox_verbatim import json_store
 
     store = TranscriptStore(tmp_path / "talk.m4a")
     assert store.save(Transcript(recording_name="talk.m4a")) is True

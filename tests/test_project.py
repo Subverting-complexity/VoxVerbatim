@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from audio_transcriber.transcription.project import (
+from vox_verbatim.transcription.project import (
     DEFAULT_GROUPING_TOLERANCE,
     DEFAULT_MINIMUM_CONFIDENCE,
     PROJECT_FILE_NAME,

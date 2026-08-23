@@ -14,12 +14,12 @@ import pytest
 from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication, QDialog
 
-from audio_transcriber.audio.enhance import EnhanceOptions, Outcome
-from audio_transcriber.audio.enhance_runner import EnhanceRunner
-from audio_transcriber.session import SessionStore
-from audio_transcriber.settings import SETTINGS_FILE_NAME, EnhanceSettings, SettingsStore
-from audio_transcriber.ui.enhance_dialog import EnhanceAudioDialog
-from audio_transcriber.ui.main_window import MainWindow
+from vox_verbatim.audio.enhance import EnhanceOptions, Outcome
+from vox_verbatim.audio.enhance_runner import EnhanceRunner
+from vox_verbatim.session import SessionStore
+from vox_verbatim.settings import SETTINGS_FILE_NAME, EnhanceSettings, SettingsStore
+from vox_verbatim.ui.enhance_dialog import EnhanceAudioDialog
+from vox_verbatim.ui.main_window import MainWindow
 
 from tests.conftest import wait_until, write_real_audio
 

@@ -20,22 +20,22 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
-from audio_transcriber.audio.library import AudioFile
-from audio_transcriber.session import SessionStore
-from audio_transcriber.settings import EnhanceSettings
-from audio_transcriber.ui import enhance_dialog as enhance_dialog_module
-from audio_transcriber.ui import main_window as main_window_module
-from audio_transcriber.ui import enhance_notes as notes
-from audio_transcriber.ui.enhance_dialog import EnhanceAudioDialog
-from audio_transcriber.ui.file_info_panel import FileInfoPanel
-from audio_transcriber.ui.file_table import (
+from vox_verbatim.audio.library import AudioFile
+from vox_verbatim.session import SessionStore
+from vox_verbatim.settings import EnhanceSettings
+from vox_verbatim.ui import enhance_dialog as enhance_dialog_module
+from vox_verbatim.ui import main_window as main_window_module
+from vox_verbatim.ui import enhance_notes as notes
+from vox_verbatim.ui.enhance_dialog import EnhanceAudioDialog
+from vox_verbatim.ui.file_info_panel import FileInfoPanel
+from vox_verbatim.ui.file_table import (
     COLUMN_DURATION,
     COLUMN_NAME,
     AudioFileTableModel,
     AudioFileTableView,
 )
-from audio_transcriber.ui.main_window import MainWindow
-from audio_transcriber.ui.player_panel import (
+from vox_verbatim.ui.main_window import MainWindow
+from vox_verbatim.ui.player_panel import (
     STATUS_FINISHED,
     STATUS_NO_FILE,
     STATUS_PAUSED,

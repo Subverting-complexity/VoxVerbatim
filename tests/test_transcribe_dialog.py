@@ -25,23 +25,23 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 
-from audio_transcriber.audio.library import AudioFile
-from audio_transcriber import settings as settings_module
-from audio_transcriber.settings import TranscriptionSettings
-from audio_transcriber.transcription import pipeline
-from audio_transcriber.transcription.model import (
+from vox_verbatim.audio.library import AudioFile
+from vox_verbatim import settings as settings_module
+from vox_verbatim.settings import TranscriptionSettings
+from vox_verbatim.transcription import pipeline
+from vox_verbatim.transcription.model import (
     FinalToken,
     Provider,
     ReviewStatus,
     Transcript,
 )
-from audio_transcriber.transcription.vocabulary import (
+from vox_verbatim.transcription.vocabulary import (
     Vocabulary,
     VocabularyLevel,
     VocabularyProfile,
 )
-from audio_transcriber.ui import transcribe_dialog as transcribe_dialog_module
-from audio_transcriber.ui.transcribe_dialog import AFRIKAANS, TranscribeDialog
+from vox_verbatim.ui import transcribe_dialog as transcribe_dialog_module
+from vox_verbatim.ui.transcribe_dialog import AFRIKAANS, TranscribeDialog
 
 from tests.conftest import wait_until
 
@@ -420,7 +420,7 @@ def test_a_library_that_cannot_be_loaded_refuses_the_run_like_a_missing_key(
 def test_a_transcript_folder_that_cannot_be_written_refuses_the_run(
     qapp, monkeypatch, recordings
 ):
-    from audio_transcriber.transcription.store import TranscriptStore
+    from vox_verbatim.transcription.store import TranscriptStore
 
     fake_pipeline(monkeypatch, lambda *args, **kwargs: pytest.fail("Nothing should be sent."))
     monkeypatch.setattr(
@@ -857,7 +857,7 @@ def test_the_transcript_folder_button_opens_the_folder_beside_the_recording(
     silence_message_boxes(monkeypatch)
     opened: list[str] = []
     monkeypatch.setattr(
-        "audio_transcriber.ui.transcribe_dialog.QDesktopServices.openUrl",
+        "vox_verbatim.ui.transcribe_dialog.QDesktopServices.openUrl",
         lambda url: opened.append(url.toLocalFile()) or True,
     )
 

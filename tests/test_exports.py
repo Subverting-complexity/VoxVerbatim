@@ -6,15 +6,15 @@ it is about. Nothing reads audio and nothing calls a service.
 
 from __future__ import annotations
 
-from audio_transcriber.transcription.cost import estimate_cost
-from audio_transcriber.transcription.exports import (
+from vox_verbatim.transcription.cost import estimate_cost
+from vox_verbatim.transcription.exports import (
     REPORT_EXPORT_NAME,
     TEXT_EXPORT_NAME,
     format_timestamp,
     render_plain_text,
     render_review_report,
 )
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     AudioSpan,
     Candidate,
     CanonicalAudio,

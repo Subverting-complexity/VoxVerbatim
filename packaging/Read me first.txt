@@ -1,12 +1,12 @@
-Audio Transcriber
-=================
+VoxVerbatim
+===========
 
 This folder holds a complete copy of the application. Nothing needs to be
-installed. To start it, open "Audio Transcriber.exe" in this folder.
+installed. To start it, open "VoxVerbatim.exe" in this folder.
 
 Keep the folder together. The .exe needs the files beside it, so move or
 copy the whole folder rather than the .exe on its own. To start it from your
-desktop, right-click "Audio Transcriber.exe", choose "Show more options",
+desktop, right-click "VoxVerbatim.exe", choose "Show more options",
 then "Send to", then "Desktop (create shortcut)". The shortcut points back
 here, so leave this folder where it is.
 
@@ -42,7 +42,7 @@ Where it keeps your settings
 
 In your own user folder, not in this one:
 
-    C:\Users\<you>\AppData\Local\JB Org\Audio Transcriber
+    C:\Users\<you>\AppData\Local\JB Org\VoxVerbatim
 
 That holds what you chose in the dialogs, where you were when you last
 closed the application, and a log file. The File menu opens both the log

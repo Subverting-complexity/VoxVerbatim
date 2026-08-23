@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from audio_transcriber import APPLICATION_NAME, ORGANISATION_NAME
+from vox_verbatim import APPLICATION_NAME, ORGANISATION_NAME
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-SPEC_FILE = REPOSITORY_ROOT / "packaging" / "audio-transcriber.spec"
+SPEC_FILE = REPOSITORY_ROOT / "packaging" / "vox-verbatim.spec"
 PUBLISH_SCRIPT = REPOSITORY_ROOT / "publish.cmd"
 READ_ME = REPOSITORY_ROOT / "packaging" / "Read me first.txt"
 
@@ -119,7 +119,7 @@ def test_the_build_does_not_collect_libraries_that_are_no_longer_needed() -> Non
 @pytest.mark.parametrize(
     "expected",
     [
-        '"packaging\\audio-transcriber.spec"',
+        '"packaging\\vox-verbatim.spec"',
         '"packaging\\Read me first.txt"',
         'set "PUBLISH_DIR=publish"',
     ],
@@ -139,7 +139,7 @@ def test_the_publish_script_looks_for_the_program_the_build_produces() -> None:
     """The built program is named from the package, and the script is not.
 
     The specification takes the application's name from
-    ``audio_transcriber/__init__.py``, so the folder and the .exe are named
+    ``vox_verbatim/__init__.py``, so the folder and the .exe are named
     from there too. The batch file cannot read Python, so it has the name
     written into it. Renaming the application would leave the script looking
     for a program PyInstaller never produced, and it would report a failure
@@ -177,7 +177,7 @@ def test_the_note_sends_people_to_the_folder_their_settings_are_really_in() -> N
 
 # -- The launcher --------------------------------------------------------
 
-LAUNCHER = REPOSITORY_ROOT / "Audio Transcriber.cmd"
+LAUNCHER = REPOSITORY_ROOT / "VoxVerbatim.cmd"
 
 
 def _launcher_import_check() -> set[str]:

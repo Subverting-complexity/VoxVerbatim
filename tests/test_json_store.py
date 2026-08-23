@@ -13,8 +13,8 @@ import json
 import os
 from pathlib import Path
 
-from audio_transcriber import json_store
-from audio_transcriber.json_store import (
+from vox_verbatim import json_store
+from vox_verbatim.json_store import (
     REPLACE_ATTEMPTS,
     read_json_object,
     unsaved_copy_path,

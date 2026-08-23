@@ -42,5 +42,5 @@ deepgram-sdk>=5.0
 # MAI-Transcribe is not a deployed model with an endpoint of its own; it is
 # a mode inside the ordinary Azure Speech endpoint, and the official package
 # does not expose the two fields that select it. See the note in
-# audio_transcriber/transcription/providers/microsoft.py.
+# vox_verbatim/transcription/providers/microsoft.py.
 httpx>=0.27

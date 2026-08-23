@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
-from audio_transcriber.settings import (
+from vox_verbatim.settings import (
     DEFAULT_ELEVENLABS_TRANSCRIPTION_MODEL,
     AssemblyAiSettings,
     CostSettings,
@@ -41,16 +41,16 @@ from audio_transcriber.settings import (
     Settings,
     TranscriptionSettings,
 )
-from audio_transcriber.transcription.vocabulary import (
+from vox_verbatim.transcription.vocabulary import (
     TermCategory,
     Vocabulary,
     VocabularyLevel,
     VocabularyProfile,
     VocabularyTerm,
 )
-from audio_transcriber.ui import settings_notes as notes
-from audio_transcriber.ui import settings_pages as pages_module
-from audio_transcriber.ui.settings_pages import (
+from vox_verbatim.ui import settings_notes as notes
+from vox_verbatim.ui import settings_pages as pages_module
+from vox_verbatim.ui.settings_pages import (
     ProviderPage,
     StatisticsSettingsPage,
     TermTableModel,

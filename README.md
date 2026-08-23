@@ -1,6 +1,6 @@
-# Audio Transcriber
+# VoxVerbatim
 
-**Audio Transcriber** turns folders of audio recordings into accurate,
+**VoxVerbatim** turns folders of audio recordings into accurate,
 readable transcripts. It is a Windows desktop application built with
 accessibility first, so it works well with screen readers and screen
 magnifiers such as JAWS, NVDA and ZoomText.
@@ -15,7 +15,7 @@ This project is released under the [MIT License](LICENSE).
 
 ## Running it
 
-Double-click **Audio Transcriber.cmd**.
+Double-click **VoxVerbatim.cmd**.
 
 The first run creates a private Python environment in a `.venv` folder and
 downloads the libraries the application needs, which takes about a minute
@@ -26,13 +26,13 @@ You need Python 3.11 or newer installed, from
 during the installation.
 
 To put the application on your desktop or taskbar, right-click
-**Audio Transcriber.cmd**, choose "Show more options" and then "Send to",
+**VoxVerbatim.cmd**, choose "Show more options" and then "Send to",
 and pick "Desktop (create shortcut)".
 
 If you would rather start it yourself from a command prompt:
 
 ```bash
-python -m audio_transcriber
+python -m vox_verbatim
 ```
 
 ## Sending it to somebody else
@@ -41,10 +41,10 @@ Everything above asks the person running the application to have Python,
 which is a great deal to ask of somebody who was simply sent a program to
 try. Double-click **publish.cmd** and you get a copy that does not.
 
-It builds the application into `publish\Audio Transcriber`, a folder holding
+It builds the application into `publish\VoxVerbatim`, a folder holding
 the program and everything it needs, Python included. Copy that whole folder
 to another Windows computer and the person you sent it to opens
-**Audio Transcriber.exe** inside it. Nothing is installed on their machine;
+**VoxVerbatim.exe** inside it. Nothing is installed on their machine;
 the folder is the application. Their settings still go to their own user
 folder rather than into it, so you can send them a newer folder later
 without disturbing anything they have chosen or taught it.
@@ -320,7 +320,7 @@ falls into the review queue instead. A spelling you have never accepted a
 correction for is never rewritten silently — it is put in front of you,
 beside the spellings you have already settled, so one action clears it.
 
-The folder's own state lives in `audio-transcriber-project.json` beside the
+The folder's own state lives in `vox-verbatim-project.json` beside the
 recordings, so it travels with them when the folder is copied or backed up.
 
 ### What ends up beside the recording
@@ -486,10 +486,10 @@ settings, so you never have to go looking for either.
 Everything the application writes for itself lives in one folder:
 
 ```
-%LOCALAPPDATA%\JB Org\Audio Transcriber
+%LOCALAPPDATA%\JB Org\VoxVerbatim
 ```
 
-That is `C:\Users\<you>\AppData\Local\JB Org\Audio Transcriber`. The path is
+That is `C:\Users\<you>\AppData\Local\JB Org\VoxVerbatim`. The path is
 not written into the code. It comes from asking Windows where per-user
 configuration belongs, using the organisation name and the application name,
 so renaming either moves the folder.
@@ -502,7 +502,7 @@ Five files live there:
 | `session.json` | Where you were: folder, checked files, highlighted file, window layout |
 | `vocabulary.json` | Your vocabulary profiles, and the corrections you have made |
 | `calibration.json` | How each service has done on your own recordings |
-| `audio-transcriber.log` | What went wrong, if anything did |
+| `vox-verbatim.log` | What went wrong, if anything did |
 
 They are separate on purpose. Your settings are decisions you made and
 expect to keep; the session is only where you happened to be. The vocabulary
@@ -521,7 +521,7 @@ that a recording and its transcript travel together.
 ## How the code is arranged
 
 ```
-audio_transcriber/
+vox_verbatim/
     app.py           Starting up: logging, the stores, the main window
     paths.py         Where the settings, the session, the vocabulary and the log are kept
     json_store.py    Reading and writing those files safely
@@ -584,12 +584,12 @@ audio_transcriber/
         flow_layout.py     A row of buttons that wraps when space is short
 
 packaging/
-    audio-transcriber.spec  How the shareable build is put together
-    launch.py               What the built application starts from
-    Read me first.txt       The note that travels inside the built folder
+    vox-verbatim.spec  How the shareable build is put together
+    launch.py          What the built application starts from
+    Read me first.txt  The note that travels inside the built folder
 ```
 
-Nothing in `audio_transcriber/session.py`, `settings.py`, `formatting.py`,
+Nothing in `vox_verbatim/session.py`, `settings.py`, `formatting.py`,
 `audio/` or `transcription/` depends on the user interface, apart from the
 two runners, whose whole job is to put slow work on a background thread and
 report back. The whole of transcription can therefore be run, and is tested,

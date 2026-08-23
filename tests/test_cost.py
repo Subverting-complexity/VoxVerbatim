@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import pytest
 
-from audio_transcriber.transcription.cost import (
+from vox_verbatim.transcription.cost import (
     adjudication_rate,
     describe_duration,
     describe_money,
     estimate_cost,
     rates_mapping,
 )
-from audio_transcriber.transcription.model import Provider
+from vox_verbatim.transcription.model import Provider
 
 #: A minute of audio at these rates, chosen so the sums are easy to follow.
 RATES = {
@@ -159,7 +159,7 @@ def test_the_real_cost_settings_are_understood_as_they_stand():
     estimating a cost never depends on the shape the settings happen to have
     today. This test is what keeps the two in step.
     """
-    from audio_transcriber.settings import CostSettings
+    from vox_verbatim.settings import CostSettings
 
     settings = CostSettings()
     table = rates_mapping(settings)
@@ -170,7 +170,7 @@ def test_the_real_cost_settings_are_understood_as_they_stand():
 
 
 def test_the_price_of_an_adjudication_comes_from_the_same_settings():
-    from audio_transcriber.settings import CostSettings
+    from vox_verbatim.settings import CostSettings
 
     settings = CostSettings()
 

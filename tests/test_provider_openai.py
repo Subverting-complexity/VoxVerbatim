@@ -23,14 +23,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from audio_transcriber.transcription.model import Language, Provider
-from audio_transcriber.transcription.providers import openai as openai_module
-from audio_transcriber.transcription.providers.base import (
+from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription.providers import openai as openai_module
+from vox_verbatim.transcription.providers.base import (
     ProviderNotConfigured,
     ProviderUnavailable,
     TranscriptionRequest,
 )
-from audio_transcriber.transcription.providers.openai import (
+from vox_verbatim.transcription.providers.openai import (
     MODEL_FAMILY,
     OpenAiTranscriptionProvider,
     is_permitted_model,
@@ -735,7 +735,7 @@ def test_an_empty_answer_is_an_empty_result_rather_than_a_failure(request_for):
 
 @pytest.fixture(autouse=True)
 def no_waiting(monkeypatch):
-    from audio_transcriber.transcription.providers import base
+    from vox_verbatim.transcription.providers import base
 
     monkeypatch.setattr(base, "_sleep", lambda seconds: None)
 

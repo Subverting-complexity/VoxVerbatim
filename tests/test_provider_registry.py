@@ -22,9 +22,9 @@ import sys
 
 import pytest
 
-from audio_transcriber.settings import TranscriptionSettings
-from audio_transcriber.transcription.model import Provider
-from audio_transcriber.transcription.providers import (
+from vox_verbatim.settings import TranscriptionSettings
+from vox_verbatim.transcription.model import Provider
+from vox_verbatim.transcription.providers import (
     assemblyai as assemblyai_module,
     deepgram as deepgram_module,
     elevenlabs as elevenlabs_module,
@@ -163,7 +163,7 @@ def test_a_missing_client_library_loses_one_service_rather_than_raising(
     machine without the package would raise.
     """
     monkeypatch.setitem(
-        sys.modules, "audio_transcriber.transcription.providers.elevenlabs", None
+        sys.modules, "vox_verbatim.transcription.providers.elevenlabs", None
     )
 
     assert registry.build_provider(Provider.ELEVENLABS, settings) is None
@@ -173,7 +173,7 @@ def test_a_missing_client_library_does_not_take_the_other_services_with_it(
     settings, monkeypatch
 ):
     monkeypatch.setitem(
-        sys.modules, "audio_transcriber.transcription.providers.elevenlabs", None
+        sys.modules, "vox_verbatim.transcription.providers.elevenlabs", None
     )
 
     built = registry.build_providers(settings)
@@ -183,7 +183,7 @@ def test_a_missing_client_library_does_not_take_the_other_services_with_it(
 
 def test_a_missing_library_also_switches_off_forced_alignment(settings, monkeypatch):
     monkeypatch.setitem(
-        sys.modules, "audio_transcriber.transcription.providers.elevenlabs", None
+        sys.modules, "vox_verbatim.transcription.providers.elevenlabs", None
     )
 
     assert registry.build_forced_aligner(settings) is None

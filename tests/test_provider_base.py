@@ -15,13 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from audio_transcriber.transcription.model import (
+from vox_verbatim.transcription.model import (
     Provider,
     ProviderRequestRecord,
     ProviderResult,
 )
-from audio_transcriber.transcription.providers import base
-from audio_transcriber.transcription.providers.base import (
+from vox_verbatim.transcription.providers import base
+from vox_verbatim.transcription.providers.base import (
     ProviderCapabilities,
     ProviderError,
     TranscriptionProvider,

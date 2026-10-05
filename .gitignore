@@ -230,3 +230,16 @@ __marimo__/
 #   megabytes of copied libraries, all of it rebuildable from the source
 #   beside it, so it is kept out of the repository.
 /publish/
+
+# graphify — generated artifacts (rebuild via `graphify update .`, ~10s, 0 tokens)
+graphify-out/graph.json
+graphify-out/graph.html
+graphify-out/cost.json
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/GRAPH_REPORT.md
+# Path/mtime indexes: embed absolute worktree paths + timestamps, so they
+# churn on every run in every worktree. The content-addressed cache stays
+# committed; these rebuild locally for free.
+graphify-out/manifest.json
+graphify-out/cache/stat-index.json

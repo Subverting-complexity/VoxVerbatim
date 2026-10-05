@@ -1,5 +1,10 @@
 # Line endings.
 #
+# Every text file is stored and checked out with Unix line endings, so a
+# worktree on Windows does not show every file as changed. The two rules
+# at the end of this file come later and override this one.
+* text=auto eol=lf
+
 # Two kinds of file here are read by Windows itself rather than by a
 # programmer's editor, and both must have Windows line endings whatever the
 # machine they were last edited on.

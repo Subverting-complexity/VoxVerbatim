@@ -1374,12 +1374,16 @@ class TranscribeDialog(QDialog):
         self._stage_label.setText(message)
         self._announced_stage = message
 
-    def _refuse(self, message: str) -> None:
-        """Report why the run cannot start, on screen and out loud."""
+    def _refuse(self, message: str, spoken: str | None = None) -> None:
+        """Report why the run cannot start, on screen and out loud.
+
+        ``spoken`` replaces ``message`` in the announcement when the screen
+        reader should hear more than the label shows.
+        """
         self._progress_group.setVisible(True)
         self._grow_to_fit()
         self._set_progress_text(message)
-        announce(self._progress_bar, message, urgent=True)
+        announce(self._progress_bar, spoken or message, urgent=True)
 
     def _refuse_with_problems(self, problems: list[str]) -> None:
         """Refuse to start, and say exactly what is missing.
@@ -1427,10 +1431,7 @@ class TranscribeDialog(QDialog):
                 f"{headline} The first is: {problems[0]} All {len(problems)} are listed, "
                 "one to a line, in the What was done box."
             )
-        self._progress_group.setVisible(True)
-        self._grow_to_fit()
-        self._set_progress_text(headline)
-        announce(self._progress_bar, spoken, urgent=True)
+        self._refuse(headline, spoken)
 
     # -- What to do with the result ---------------------------------------
 

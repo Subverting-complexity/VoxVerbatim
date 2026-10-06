@@ -74,6 +74,12 @@ class EnhanceRunner(QObject):
         super().__init__(parent)
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+        # Whether this runner holds a request for the machine to stay awake.
+        # The request is withdrawn both when a run finishes and from stop(),
+        # which runs on every close of the dialog, and the requests are
+        # counted across runners. Without the flag the second withdrawal
+        # would take a transcription run's request away mid-run.
+        self._holding_awake = False
         # A run still going when the application quits would be emitting
         # signals at an object that is being taken apart, so it is stopped
         # first.
@@ -105,6 +111,7 @@ class EnhanceRunner(QObject):
         # Enhancing a folder of long recordings takes long enough for a
         # laptop to decide nobody is using it. Same arrangement as the
         # transcription runner, and withdrawn on the same thread.
+        self._holding_awake = True
         keep_system_awake(True)
         return True
 
@@ -123,9 +130,13 @@ class EnhanceRunner(QObject):
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout_seconds)
-        keep_system_awake(False)
+        self._let_the_system_sleep()
 
-    def _let_the_system_sleep(self, _summary: object) -> None:
+    def _let_the_system_sleep(self, _summary: object = None) -> None:
+        """Withdraw this run's request to stay awake, once."""
+        if not self._holding_awake:
+            return
+        self._holding_awake = False
         keep_system_awake(False)
 
     # -- The background thread -------------------------------------------

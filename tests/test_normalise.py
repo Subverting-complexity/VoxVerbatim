@@ -165,6 +165,39 @@ def test_a_full_stop_between_digits_is_left_exactly_where_it_is():
 
 
 @pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("-5", "5"),
+        ("-1,200", "1,200"),
+        ("50%", "50"),
+        ("10:30", "1030"),
+    ],
+)
+def test_a_minus_a_per_cent_sign_or_a_time_colon_changes_the_value(first, second):
+    """A dropped sign reads perfectly well and names a different value.
+
+    These are the values a person has to see, so a service that left the
+    sign out does not agree with one that kept it.
+    """
+    assert equivalence_kind(first, second) is EquivalenceKind.DIFFERENT
+    assert not are_equivalent(first, second)
+
+
+def test_every_shape_of_minus_sign_is_the_same_minus():
+    assert are_equivalent("−5", "-5")
+    assert are_equivalent("–5", "-5")
+    assert are_equivalent("-1,200", "-1200")
+    assert read_number("-5") is None
+
+
+def test_a_hyphen_between_words_or_numbers_is_still_a_hyphen():
+    assert are_equivalent("well-known", "well known")
+    assert normalise("well-known") == normalise("well known")
+    assert normalise("10-20") == normalise("10 20")
+    assert normalise("10-20") != normalise("-10 20")
+
+
+@pytest.mark.parametrize(
     ("text", "value"),
     [
         ("25", 25),

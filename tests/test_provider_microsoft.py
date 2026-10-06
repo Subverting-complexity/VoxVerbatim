@@ -857,3 +857,104 @@ def test_a_negative_duration_does_not_put_the_end_before_the_start(tmp_path: Pat
 
     token = result.tokens[0]
     assert token.end == token.start == pytest.approx(120.5 + 1.0)
+
+
+# -- Phrases with and without a word list --------------------------------
+
+#: A phrase-level answer in the shape MAI-Transcribe is documented and
+#: reported to return: phrases with text, a span and a locale, and no
+#: ``words`` list, because word-level timestamps were not asked for. This is
+#: NOT a live capture. It was written by hand from the documented response
+#: shape, with no call to the service, and should be replaced by a real
+#: captured answer when one is available.
+PHRASE_LEVEL_RESPONSE = {
+    "durationMilliseconds": 9040,
+    "combinedPhrases": [{"text": "With lockdown. Guten Tag ."}],
+    "phrases": [
+        {
+            "offsetMilliseconds": 80,
+            "durationMilliseconds": 6960,
+            "text": "With lockdown.",
+            "locale": "en-US",
+            "confidence": 0,
+        },
+        {
+            "offsetMilliseconds": 7040,
+            "durationMilliseconds": 2000,
+            "text": "Guten Tag .",
+            "locale": "de-DE",
+            "confidence": 0,
+        },
+    ],
+}
+
+
+def test_a_phrase_without_a_word_list_is_split_into_words(tmp_path: Path) -> None:
+    """Each word becomes its own token, so alignment has something to match.
+
+    One token holding the whole phrase would match no word any other service
+    wrote. The words carry no times, because the service gave none for them,
+    and each keeps the locale of the phrase it came from. The stray full stop
+    in the second phrase is there to show that a piece made only of
+    punctuation is marked as such.
+    """
+    client = FakeHttpClient(FakeResponse(PHRASE_LEVEL_RESPONSE))
+
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert result.succeeded
+    assert [token.text for token in result.tokens] == [
+        "With",
+        "lockdown.",
+        "Guten",
+        "Tag",
+        ".",
+    ]
+    assert [token.index for token in result.tokens] == [0, 1, 2, 3, 4]
+    assert all(token.start is None and token.end is None for token in result.tokens)
+    assert [token.language for token in result.tokens] == [
+        Language.ENGLISH,
+        Language.ENGLISH,
+        Language.GERMAN,
+        Language.GERMAN,
+        Language.GERMAN,
+    ]
+    assert [token.is_punctuation for token in result.tokens] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert all(token.confidence is None for token in result.tokens)
+
+
+def test_a_phrase_with_a_word_list_keeps_its_word_times(tmp_path: Path) -> None:
+    """Where the service does time its words, those times are kept."""
+    result = make_provider().transcribe(make_request(tmp_path))
+
+    assert [token.text for token in result.tokens] == ["With", "lockdown.", "Guten", "Tag."]
+    assert [token.start for token in result.tokens] == pytest.approx([120.58, 120.8, 127.54, 128.0])
+    assert [token.end for token in result.tokens] == pytest.approx([120.74, 121.3, 127.94, 128.54])
+
+
+def test_both_phrase_shapes_in_one_answer_number_their_words_in_order(tmp_path: Path) -> None:
+    body = {
+        "phrases": [
+            PHRASE_LEVEL_RESPONSE["phrases"][0],
+            RESPONSE["phrases"][1],
+        ]
+    }
+    client = FakeHttpClient(FakeResponse(body))
+
+    result = make_provider(client).transcribe(make_request(tmp_path))
+
+    assert [token.text for token in result.tokens] == ["With", "lockdown.", "Guten", "Tag."]
+    assert [token.index for token in result.tokens] == [0, 1, 2, 3]
+    assert result.tokens[0].start is None
+    assert result.tokens[2].start == pytest.approx(127.54)
+
+
+def test_word_timing_is_not_claimed() -> None:
+    """The adapter never asks for word timestamps, so it does not promise them."""
+    assert MicrosoftProvider.capabilities.word_timings is False

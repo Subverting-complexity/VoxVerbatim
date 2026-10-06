@@ -148,6 +148,84 @@ def test_numbers_written_in_words_match_the_same_number_in_digits(words, digits)
     assert are_equivalent(digits, words)
 
 
+def test_the_german_articles_ein_and_eine_are_words_not_the_number_one():
+    """"ein" and "eine" are "a" and "an" far more often than they are 1.
+
+    Reading them as the number would make one service hearing "ein" and
+    another hearing "eine" agree, when the two are different words.
+    """
+    assert equivalence_kind("ein", "eine") is EquivalenceKind.DIFFERENT
+    assert not are_equivalent("ein", "eine")
+    assert normalise("ein") == "ein"
+    assert normalise("eine") == "eine"
+    assert normalise("Eine") == "eine"
+    assert read_number("ein") is None
+    assert read_number("eine") is None
+    assert not are_equivalent("ein", "1")
+    assert not are_equivalent("eine", "eins")
+
+
+@pytest.mark.parametrize(
+    ("words", "digits"),
+    [
+        ("eins", "1"),
+        ("einundzwanzig", "21"),
+        ("einunddreißig", "31"),
+        ("einhundert", "100"),
+        ("eintausend", "1000"),
+        ("einhunderteins", "101"),
+        ("eintausendeinhundert", "1100"),
+        ("zwei", "2"),
+        ("neunzehn", "19"),
+    ],
+)
+def test_eins_and_compounds_that_start_with_ein_are_still_numbers(words, digits):
+    """Inside a joined compound, "ein" is unmistakably the number.
+
+    "einhundert" and "eintausend" are in here on purpose: they carry the
+    same value as the bare words "hundert" and "tausend", which are left as
+    words, so they need to be recognised as compounds rather than by value.
+    """
+    assert normalise(words) == digits
+    assert read_number(words) == int(digits)
+    assert equivalence_kind(words, digits) is EquivalenceKind.NUMBER_FORMAT
+
+
+@pytest.mark.parametrize(
+    ("words", "digits"),
+    [
+        ("eine Million", "1 Million"),
+        ("eine Milliarde", "1 Milliarde"),
+        ("ein tausend", "1000"),
+        ("ein hundert", "100"),
+    ],
+)
+def test_ein_and_eine_in_front_of_a_scale_word_are_the_number_one(words, digits):
+    """"eine Million" is the ordinary German way to write a million.
+
+    A scale word cannot follow the article, so here "ein" and "eine" are the
+    number, and a service writing the words agrees with one writing digits.
+    """
+    assert equivalence_kind(words, digits) is EquivalenceKind.NUMBER_FORMAT
+
+
+def test_ein_and_eine_in_front_of_any_other_word_stay_the_article():
+    assert equivalence_kind("ein Haus", "1 Haus") is EquivalenceKind.DIFFERENT
+    assert equivalence_kind("eine Frau", "1 Frau") is EquivalenceKind.DIFFERENT
+
+
+def test_ein_uhr_is_one_o_clock_and_eine_uhr_is_a_clock():
+    """"Uhr" is feminine, so "ein Uhr" can only be the time."""
+    assert equivalence_kind("um ein Uhr", "um 1 Uhr") is EquivalenceKind.NUMBER_FORMAT
+    assert equivalence_kind("eine Uhr", "1 Uhr") is EquivalenceKind.DIFFERENT
+
+
+def test_the_bare_scale_words_are_still_not_numbers():
+    assert read_number("hundert") is None
+    assert read_number("tausend") is None
+    assert read_number("thousand") is None
+
+
 def test_a_thousands_comma_does_not_change_the_number():
     assert equivalence_kind("1,000", "1000") is EquivalenceKind.NUMBER_FORMAT
     assert are_equivalent("15,000", "fifteen thousand")

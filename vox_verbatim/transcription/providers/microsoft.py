@@ -150,7 +150,14 @@ MAXIMUM_DURATION_SECONDS = 2 * 60 * 60
 ACCEPTED_CONTAINERS = frozenset({"wav", "mp3", "flac"})
 
 MICROSOFT_CAPABILITIES = ProviderCapabilities(
-    word_timings=True,
+    # False, because this adapter never asks for word timestamps. Azure says
+    # a phrase carries its ``words`` list only when word-level timestamps are
+    # requested, and MAI-Transcribe is reported to answer in whole phrases
+    # regardless, so the normal answer has no per-word times at all. Where a
+    # response does carry ``words``, their times are still kept on the tokens;
+    # they are simply not something the rest of the application may count on
+    # from this service. The README says the same: only ElevenLabs times words.
+    word_timings=False,
     # Not switched off, and not weak. The service has no diarisation of any
     # kind, so nothing upstream should ever ask this adapter who spoke.
     diarisation=False,
@@ -470,6 +477,19 @@ class MicrosoftProvider(TranscriptionProvider):
         an assumption: the service genuinely reports a locale per phrase, and
         it is the only per-segment language evidence this application receives
         from anywhere.
+
+        A phrase need not carry a ``words`` list at all, and from
+        MAI-Transcribe that is probably the usual case: Azure includes the
+        list only when word-level timestamps are asked for, which this adapter
+        does not do. Such a phrase is cut into words on whitespace, exactly as
+        the OpenAI adapter cuts its text, and each word comes back with no
+        start and no end. The obvious alternative, one token holding the whole
+        phrase, looks harmless but breaks alignment: "With lockdown. Guten
+        Tag." as a single word matches no word any other service wrote, so
+        everything Microsoft said in that phrase would be lost as evidence.
+        The phrase's own span is not shared out among its words either,
+        because an even split would invent times the service never gave;
+        alignment against the backbone is what places these words.
         """
         tokens: list[ProviderToken] = []
         index = 0
@@ -477,10 +497,23 @@ class MicrosoftProvider(TranscriptionProvider):
             language = Language.from_code(_field(phrase, "locale"))
             words = _field(phrase, "words") or []
             if not words:
-                # A phrase with no word breakdown still carries text, a span
-                # and a locale, so it is kept as one token covering the whole
-                # phrase rather than thrown away.
-                words = [phrase]
+                for text in (_field(phrase, "text") or "").split():
+                    tokens.append(
+                        ProviderToken(
+                            provider=self.provider,
+                            index=index,
+                            text=text,
+                            start=None,
+                            end=None,
+                            speaker=None,
+                            confidence=None,
+                            language=language,
+                            chunk_index=request.chunk_index,
+                            is_punctuation=_is_punctuation_only(text),
+                        )
+                    )
+                    index += 1
+                continue
             for word in words:
                 text = _field(word, "text") or ""
                 start_ms = _as_float(_field(word, "offsetMilliseconds"))

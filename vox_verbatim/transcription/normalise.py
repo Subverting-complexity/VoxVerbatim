@@ -192,13 +192,45 @@ _ENGLISH_UNITS: dict[str, int] = {
     "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
 }
 
+#: German "ein" and "eine" are deliberately left out. They are the
+#: indefinite article, "a" and "an", far more often than they are the
+#: number, and reading them as 1 does two kinds of harm: one service
+#: hearing "ein" and another hearing "eine" would count as agreement, when
+#: the two words are different and the difference matters, and every
+#: article in a German recording would be flagged as a quantity that must
+#: not be guessed at. The counting word "eins" is here and does the work.
 _GERMAN_UNITS: dict[str, int] = {
-    "null": 0, "ein": 1, "eine": 1, "eins": 1, "zwei": 2, "drei": 3,
+    "null": 0, "eins": 1, "zwei": 2, "drei": 3,
     "vier": 4, "fünf": 5, "sechs": 6, "sieben": 7, "acht": 8, "neun": 9,
     "zehn": 10, "elf": 11, "zwölf": 12, "dreizehn": 13, "vierzehn": 14,
     "fünfzehn": 15, "sechzehn": 16, "siebzehn": 17, "achtzehn": 18,
     "neunzehn": 19,
 }
+
+#: Parts that only ever count as a number inside a joined compound. Inside
+#: one, "ein" is unmistakably the number: "einundzwanzig" is 21,
+#: "einhundert" is 100 and "eintausend" is 1000. Standing on its own it is
+#: the article, which is why it is not in :data:`_GERMAN_UNITS`. These are
+#: used when a word is broken into parts and never when a whole word is
+#: looked up, so that the bare word "ein" stays a word.
+_COMPOUND_ONLY_UNITS: dict[str, int] = {
+    "ein": 1,
+}
+
+#: The words in front of which a separate "ein" or "eine" is the number 1
+#: after all. "eine Million" is the ordinary German way to write a million,
+#: and "ein tausend" is a common enough way to write a thousand, so leaving
+#: the article out everywhere would make "eine Million" and "1 Million"
+#: disagree. A scale word cannot follow the article "a" in any other sense,
+#: so reading the article as 1 here costs nothing. Before any other word it
+#: stays the article.
+#:
+#: Clock times work the same way for "ein" alone. "Uhr" is feminine, so "a
+#: clock" is always "eine Uhr", and "ein Uhr" can only be one o'clock.
+_GERMAN_ONE_WORDS = ("ein", "eine")
+_GERMAN_SCALE_FOLLOWERS = frozenset({
+    "hundert", "tausend", "million", "millionen", "milliarde", "milliarden",
+})
 
 #: Afrikaans "ag" for eight is deliberately left out. It is also the
 #: everyday interjection, and turning every sighed "ag" in a recording into
@@ -291,13 +323,18 @@ def _drop_german_letters(text: str) -> str:
     return stripped
 
 
-def _atom_table(dropped: bool) -> dict[str, tuple[str, int]]:
+def _atom_table(dropped: bool, compound: bool = False) -> dict[str, tuple[str, int]]:
     """Build the numeral lookup in the same spelling the text will be in.
 
     The tables above are written with real German letters because that is
     how a person reads them. By the time a numeral is looked up, the text
     has already been through the German folding, so the keys have to go
     through exactly the same folding or nothing would ever match.
+
+    With ``compound`` set, the table also holds the parts that only count
+    inside a joined compound, such as the "ein" of "einundzwanzig". That
+    table is for breaking a word into parts, never for looking a whole word
+    up.
     """
     fold = _drop_german_letters if dropped else _german_fold
 
@@ -319,11 +356,16 @@ def _atom_table(dropped: bool) -> dict[str, tuple[str, int]]:
         table[key(word)] = (_JOIN_COMPOUND, 0)
     for word in _SCALE_JOINERS:
         table[key(word)] = (_JOIN_SCALE, 0)
+    if compound:
+        for word, value in _COMPOUND_ONLY_UNITS.items():
+            table[key(word)] = (_UNIT, value)
     return table
 
 
 _ATOMS = _atom_table(dropped=False)
 _DROPPED_ATOMS = _atom_table(dropped=True)
+_COMPOUND_ATOMS = _atom_table(dropped=False, compound=True)
+_DROPPED_COMPOUND_ATOMS = _atom_table(dropped=True, compound=True)
 
 
 # -- Contractions --------------------------------------------------------
@@ -640,13 +682,19 @@ def _word_atom(word: str, dropped: bool) -> tuple[str, int] | None:
 
     A joined compound counts as whatever its last part was, so that
     "fünfundzwanzig tausend" still reads as twenty-five thousand.
+
+    A whole word is looked up in the ordinary table, and only a word being
+    broken into parts may use the compound parts as well. That split is what
+    lets "einundzwanzig" read as 21 while the bare article "ein" stays a
+    word. A compound has to have at least two parts, so "ein" on its own
+    can never come back as 1 through the splitting route either.
     """
-    table = _DROPPED_ATOMS if dropped else _ATOMS
-    direct = table.get(word)
+    direct = (_DROPPED_ATOMS if dropped else _ATOMS).get(word)
     if direct is not None:
         return direct
     if not word.isalpha():
         return None
+    table = _DROPPED_COMPOUND_ATOMS if dropped else _COMPOUND_ATOMS
     parts = _split_into_atoms(word, table)
     if parts is None or len(parts) < 2:
         return None
@@ -691,6 +739,12 @@ def _read_numbers(form: str, dropped: bool) -> str:
     """
     words = form.split()
     atoms = [_word_atom(word, dropped) for word in words]
+    for index, word in enumerate(words[:-1]):
+        following = words[index + 1]
+        if (word in _GERMAN_ONE_WORDS and following in _GERMAN_SCALE_FOLLOWERS) or (
+            word == "ein" and following == "uhr"
+        ):
+            atoms[index] = (_UNIT, 1)
     output: list[str] = []
     start = 0
     while start < len(words):
@@ -707,7 +761,9 @@ def _read_numbers(form: str, dropped: bool) -> str:
         while end < len(words) and atoms[end] is not None:
             end += 1
         run = [atom for atom in atoms[start:end] if atom is not None]
-        value = _read_run(run)
+        table = _DROPPED_ATOMS if dropped else _ATOMS
+        joined = any(word not in table for word in words[start:end])
+        value = _read_run(run, joined)
         if value is None:
             output.extend(words[start:end])
         else:
@@ -716,18 +772,22 @@ def _read_numbers(form: str, dropped: bool) -> str:
     return " ".join(output)
 
 
-def _read_run(run: Sequence[tuple[str, int]]) -> int | None:
+def _read_run(run: Sequence[tuple[str, int]], joined: bool = False) -> int | None:
     """Read a whole run of numeral words, or refuse to read it at all.
 
     Nothing partial is accepted. Reading "nineteen eighty four" as a
     nineteen followed by an eighty-four would drop the fact that the three
     words belong together, and the words are left exactly as they are
     instead. A run also has to name a quantity: a lone "thousand" with
-    nothing in front of it is the ordinary word, not the number 1000. A
-    joined compound such as "zweihundert" has its quantity inside it, and
-    shows that by carrying a value other than the bare scale.
+    nothing in front of it is the ordinary word, not the number 1000.
+
+    A joined compound such as "zweihundert" has its quantity inside it, and
+    ``joined`` says the run holds one. The value alone cannot say so:
+    "einhundert" carries 100, exactly what the bare word "hundert" carries,
+    and judging by the value would leave "einhundert" and "eintausend" as
+    words while "zweihundert" became 200.
     """
-    if not any(
+    if not joined and not any(
         kind in (_UNIT, _TENS) or (kind in _SCALE_KINDS and value not in (100, 1000))
         for kind, value in run
     ):

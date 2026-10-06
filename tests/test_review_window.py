@@ -164,6 +164,9 @@ class Folder:
         self.transcripts = dict(transcripts)
         self.reads: list[str] = []
         self.saved: list[tuple[str, Transcript]] = []
+        # The recordings whose transcripts cannot be written, standing in for
+        # a full disk or a file a sync client is holding open.
+        self.refusing: set[str] = set()
 
     @property
     def names(self) -> list[str]:
@@ -173,9 +176,12 @@ class Folder:
         self.reads.append(recording_name)
         return self.transcripts.get(recording_name)
 
-    def save(self, recording_name: str, transcript: Transcript) -> None:
+    def save(self, recording_name: str, transcript: Transcript) -> bool:
+        if recording_name in self.refusing:
+            return False
         self.transcripts[recording_name] = transcript
         self.saved.append((recording_name, transcript))
+        return True
 
     def token(self, recording_name: str, token_id: str) -> FinalToken | None:
         return self.transcripts[recording_name].token_by_id(token_id)
@@ -3720,3 +3726,300 @@ def test_a_save_that_fails_as_the_window_closes_keeps_it_there_to_say_so(
     window.close()
 
     assert window.isVisible() is False
+
+
+# -- A transcript that cannot be written ------------------------------------
+
+
+def test_a_correction_that_could_not_be_saved_is_said_from_this_window(
+    qapp, tmp_path, monkeypatch
+):
+    """The failure used to be said only by the main window, which is behind this one.
+
+    Meanwhile this window kept the change, marked the word replaced and said
+    it was done. The person moved away and back, the file gave the old text
+    back, and the project no longer flagged the word.
+    """
+    folder = two_file_folder()
+    emitted: list[str] = []
+    window = open_window(tmp_path, folder, process=True)
+    window.transcriptChanged.connect(lambda name, transcript: emitted.append(name))
+    try:
+        select_word(window, "Bosch")
+        occurrence = window.current_occurrence()
+        before = folder.token(occurrence.recording_name, occurrence.token_id).text
+        folder.refusing.add(occurrence.recording_name)
+        said = capture(monkeypatch)
+        window._replacement_edit.setText("Bosche")
+
+        assert window.apply_replacement_to_occurrence() is False
+
+        assert len(said) == 1, said
+        message, urgent = said[0]
+        assert "could not be saved" in message
+        assert occurrence.recording_name in message
+        assert "has not been made" in message
+        assert urgent is True
+        # Nothing in the project, the file, the window's copy or the signal
+        # says the change happened.
+        assert occurrence.reviewed is False
+        assert occurrence.replacement is None
+        assert folder.token(occurrence.recording_name, occurrence.token_id).text == before
+        transcript = window._transcript(occurrence.recording_name)
+        assert transcript.token_by_id(occurrence.token_id).text == before
+        assert emitted == []
+    finally:
+        window.close()
+
+
+def test_every_one_occurrence_action_stops_when_its_save_fails(
+    qapp, tmp_path, monkeypatch
+):
+    """Confirming, the speaker and the timing all went on as if it had worked."""
+
+    def change_speaker(window: ReviewWindow) -> bool:
+        window._speaker_box.setCurrentText("Speaker speaker_1")
+        return window.apply_speaker_correction()
+
+    for act in (
+        lambda window: window.confirm_item(),
+        lambda window: window.decide_timing(True),
+        change_speaker,
+    ):
+        folder = Folder({RECORDING: make_transcript([weak_token("contract", 30.0)])})
+        window = open_window(tmp_path, folder, process=True)
+        try:
+            occurrence = window.current_occurrence()
+            folder.refusing.add(RECORDING)
+            folder.saved.clear()
+            said = capture(monkeypatch)
+
+            assert act(window) is False
+
+            assert folder.saved == []
+            assert occurrence.reviewed is False
+            assert occurrence.correct_as_detected is False
+            assert len(said) == 1, said
+            assert "could not be saved" in said[0][0]
+            assert said[0][1] is True
+        finally:
+            window.close()
+
+
+def test_a_word_none_of_whose_files_could_be_saved_is_left_exactly_as_it_was(
+    qapp, tmp_path, monkeypatch
+):
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        group = window.state.group(window.current_row().group_id)
+        folder.refusing.update({RECORDING, OTHER_RECORDING})
+        said = capture(monkeypatch)
+        window._replacement_edit.setText("Bosch")
+
+        assert window.apply_replacement_to_word() is False
+
+        # Said once for the whole word, not once for each file.
+        assert len(said) == 1, said
+        message, urgent = said[0]
+        assert "2 recordings" in message
+        assert urgent is True
+        assert group.reviewed is False
+        assert group.replacement is None
+        assert window.state.rules == []
+        assert not any(item.reviewed for item in window.state.occurrences_of(group.id))
+        assert folder.texts(RECORDING) == ["Bosch", "Bosh", "15,000"]
+        assert folder.texts(OTHER_RECORDING) == ["Bosche", "settled"]
+    finally:
+        window.close()
+
+
+def test_a_word_saved_in_some_files_only_stays_open_and_says_which_failed(
+    qapp, tmp_path, monkeypatch
+):
+    """Settling it would take it off the list while one file still says the old word."""
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        group = window.state.group(window.current_row().group_id)
+        folder.refusing.add(OTHER_RECORDING)
+        said = capture(monkeypatch)
+        window._replacement_edit.setText("Bosch")
+
+        assert window.apply_replacement_to_word() is True
+
+        assert len(said) == 1, said
+        message, urgent = said[0]
+        assert "not to all of them" in message
+        assert OTHER_RECORDING in message
+        assert urgent is True
+        assert folder.texts(RECORDING) == ["Bosch", "Bosch", "15,000"]
+        assert folder.texts(OTHER_RECORDING) == ["Bosche", "settled"]
+        # The word and its rules wait until every file has taken the change.
+        assert group.reviewed is False
+        assert group.replacement is None
+        assert window.state.rules == []
+        for item in window.state.occurrences_of(group.id):
+            assert item.reviewed is (item.recording_name == RECORDING)
+
+        # And applying it again, once the file can be written, finishes it.
+        folder.refusing.clear()
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+
+        assert window.apply_replacement_to_word() is True
+
+        assert folder.texts(OTHER_RECORDING) == ["Bosch", "settled"]
+        assert group.reviewed is True
+        assert group.replacement == "Bosch"
+        assert len(window.state.rules) == 3
+    finally:
+        window.close()
+
+
+def test_correcting_a_word_as_detected_keeps_the_replacement_when_no_file_was_saved(
+    qapp, tmp_path, monkeypatch
+):
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        group = window.state.group(window.current_row().group_id)
+        window._replacement_edit.setText("Bosch")
+        window.apply_replacement_to_word()
+        window.set_show_reviewed(True)
+        select_word(window, "Bosch")
+        folder.refusing.update({RECORDING, OTHER_RECORDING})
+        said = capture(monkeypatch)
+
+        assert window.correct_word_as_detected() is False
+
+        assert len(said) == 1, said
+        assert "could not be saved" in said[0][0]
+        assert said[0][1] is True
+        assert group.replacement == "Bosch"
+        assert group.correct_as_detected is False
+        assert len(window.state.rules) == 3
+        assert not any(
+            item.correct_as_detected for item in window.state.occurrences_of(group.id)
+        )
+        assert folder.texts(RECORDING) == ["Bosch", "Bosch", "15,000"]
+    finally:
+        window.close()
+
+
+def test_correcting_a_word_as_detected_in_some_files_only_keeps_the_word_open(
+    qapp, tmp_path, monkeypatch
+):
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        group = window.state.group(window.current_row().group_id)
+        window._replacement_edit.setText("Bosch")
+        window.apply_replacement_to_word()
+        window.set_show_reviewed(True)
+        select_word(window, "Bosch")
+        folder.refusing.add(OTHER_RECORDING)
+        said = capture(monkeypatch)
+
+        assert window.correct_word_as_detected() is True
+
+        message, urgent = said[-1]
+        assert "but not in all of them" in message
+        assert OTHER_RECORDING in message
+        assert urgent is True
+        assert folder.texts(RECORDING) == ["Bosch", "Bosh", "15,000"]
+        assert folder.texts(OTHER_RECORDING) == ["Bosch", "settled"]
+        # The group keeps its replacement and its rules until every file agrees.
+        assert group.correct_as_detected is False
+        assert len(window.state.rules) == 3
+        for item in window.state.occurrences_of(group.id):
+            assert item.correct_as_detected is (item.recording_name == RECORDING)
+    finally:
+        window.close()
+
+
+def test_a_rule_answer_that_could_not_be_saved_is_not_counted(qapp, tmp_path):
+    """Nothing was changed, so neither the run nor the rule's tally may count it."""
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+        window.apply_replacement_to_word()
+        rule = next(rule for rule in window.state.rules if rule.matched_text == "Bosh")
+        occurrence = next(
+            item for item in window.state.occurrences if item.detected_text == "Bosh"
+        )
+        folder.transcripts[occurrence.recording_name] = (
+            folder.transcripts[occurrence.recording_name].with_correction(
+                occurrence.token_id, text="Bosh"
+            )
+        )
+        window._cached_name = None
+        occurrence.auto_applied = True
+        occurrence.applied_rule_id = rule.id
+        occurrence.replacement = "Bosch"
+        folder.refusing.add(occurrence.recording_name)
+
+        assert window._write_rule_answers() == 0
+
+        assert rule.occurrence_count == 0
+        assert window._unsaved_rule_answers == [occurrence.recording_name]
+        assert folder.token(occurrence.recording_name, occurrence.token_id).text == "Bosh"
+    finally:
+        window.close()
+
+
+def test_processing_says_which_automatic_answers_could_not_be_saved(
+    qapp, tmp_path, monkeypatch
+):
+    """In the one sentence about the run, because a second would wipe it out."""
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+
+        def write_none() -> int:
+            window._unsaved_rule_answers = [OTHER_RECORDING]
+            return 0
+
+        window._write_rule_answers = write_none
+        said = capture(monkeypatch)
+
+        window.regroup_words()
+
+        message, urgent = said[-1]
+        assert "could not be saved" in message
+        assert OTHER_RECORDING in message
+        assert "written again the next time the folder is processed" in message
+        assert urgent is True
+    finally:
+        window.close()
+
+
+def test_a_window_with_nowhere_to_save_still_makes_the_change(qapp, tmp_path):
+    """No callback at all means every save counts as having worked."""
+    folder = two_file_folder()
+    window = ReviewWindow(
+        tmp_path,
+        folder.names,
+        folder.load,
+        {name: Path(f"C:/Audio/{name}") for name in folder.names},
+        ProjectStore(tmp_path),
+        FakePlayer(),
+    )
+    window.show()
+    window.process_low_confidence_words()
+    try:
+        select_word(window, "Bosch")
+        occurrence = window.current_occurrence()
+        window._replacement_edit.setText("Bosche")
+
+        assert window.apply_replacement_to_occurrence() is True
+
+        assert occurrence.reviewed is True
+        assert occurrence.replacement == "Bosche"
+    finally:
+        window.close()

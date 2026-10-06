@@ -558,11 +558,8 @@ def _build_rows(
 
     rows: list[AlignedRow] = []
     for position in range(len(stream.words) + 1):
-        for column in inserted_before.get(position, []):
-            # Each inserted word gets its own row rather than being merged
-            # with its neighbours, because two services inserting different
-            # words in the same gap are not agreeing with each other.
-            rows.append(AlignedRow(position=position, columns=(column,)))
+        for group in _group_insertions(inserted_before.get(position, [])):
+            rows.append(AlignedRow(position=position, columns=group))
         if position == len(stream.words):
             break
         rows.append(
@@ -574,6 +571,49 @@ def _build_rows(
             )
         )
     return tuple(rows)
+
+
+def _group_insertions(
+    columns: Sequence[AlignmentColumn],
+) -> list[tuple[AlignmentColumn, ...]]:
+    """Put the words several services inserted in one gap into rows.
+
+    Where the backbone missed a word and two other services both heard it,
+    those two services are agreeing with each other, and the word has to
+    be one row with both of them in it. Giving each service's insertion a
+    row of its own would make reconciliation judge each one alone, and two
+    services that both heard "very" where the backbone heard nothing would
+    each clear the bar on their own and put "very very" into the
+    transcript. Grouping them makes the second
+    service count as further evidence for the same word, which is what it
+    is.
+
+    Two things stay apart. Services that inserted different words in the
+    same gap are not agreeing with each other, so each different word keeps
+    a row of its own, compared in the same comparison form alignment uses
+    everywhere else. And a row never holds two columns from the same
+    service: a service that heard "very very" said the word twice, and
+    folding both into one row would quietly drop one of them. A second
+    "very" from a service already in the row opens a row of its own, which
+    a later service's second "very" can then join.
+
+    Rows come out in the order their first word was seen, which keeps each
+    service's own words in the order it said them.
+    """
+    groups: list[list[AlignmentColumn]] = []
+    forms: list[str] = []
+    for column in columns:
+        form = normalise(column.text)
+        for index, group in enumerate(groups):
+            if forms[index] == form and all(
+                member.provider != column.provider for member in group
+            ):
+                group.append(column)
+                break
+        else:
+            groups.append([column])
+            forms.append(form)
+    return [tuple(group) for group in groups]
 
 
 def _provider_of(

@@ -421,6 +421,9 @@ class MainWindow(QMainWindow):
         self._folder_panel.set_folder(folder)
         if not folder.is_dir():
             self._folder = folder
+            # Held for F5 once the drive is back, the same as for a scan.
+            self._pending_checked = list(self._session.checked_files)
+            self._pending_selected = self._session.selected_file
             self._set_status(
                 f"The folder {folder} is not available. It may be on a drive that is "
                 "not connected.",
@@ -474,11 +477,17 @@ class MainWindow(QMainWindow):
         if self._folder is None:
             self._set_status("There is no folder to refresh.", alert=True)
             return
-        self._load_folder(
-            self._folder,
-            checked=self._model.checked_names(),
-            selected=self._selected_file_name(),
-        )
+        if self._file_list_is_current:
+            checked = self._model.checked_names()
+            selected = self._selected_file_name()
+        else:
+            # The list has not been read yet: the folder was unavailable at
+            # start-up, or its first scan has not finished. The empty list
+            # says nothing about what was checked, and passing it on would
+            # let the next save throw the remembered files away.
+            checked = self._pending_checked
+            selected = self._pending_selected
+        self._load_folder(self._folder, checked=checked, selected=selected)
 
     def _load_folder(
         self,

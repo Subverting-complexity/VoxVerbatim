@@ -1239,7 +1239,7 @@ candidate readings, what each service reported, and the text around them.
 That means the reasoning models are the right family here, and they move
 faster than anything else named in this dialog, which is why this is plain text
 rather than a list. A name that does not exist is rejected by OpenAI with a
-message saying so.
+message saying so. The default is gpt-6.1-sol, OpenAI's name for GPT-6.1 Sol.
 
 A more capable model settles more disputes correctly and costs more per
 request. On a difficult recording with hundreds of disputes that difference is
@@ -1266,13 +1266,14 @@ the request. Clearing this box is how you say "do not send it", which is what a
 model without the parameter needs.
 
 The words a model accepts are its own business and have changed more than once,
-which is the other reason this is free text. Recent models take low, medium and
-high, and some take minimal as well. Check what the model you have chosen
-accepts.
+which is the other reason this is free text. Recent models take low, medium,
+high, xhigh and max, and some take minimal or none as well. Check what the
+model you have chosen accepts.
 
-Medium is a sensible starting point. Raise it if adjudications are coming back
-wrong on cases you think are settleable; clear it if the model rejects the
-request because it does not know the parameter.""",
+The default is low, the least that the default model, GPT-6.1 Sol, accepts. It
+does not take minimal or none. Raise it if adjudications are coming back wrong
+on cases you think are settleable; clear it if the model rejects the request
+because it does not know the parameter.""",
     ),
     _parameters_note(
         OPENAI_ADJUDICATION,

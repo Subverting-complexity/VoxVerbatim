@@ -78,14 +78,15 @@ DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-transcribe"
 #: because adjudication is a reasoning task rather than a listening one.
 #: This is the model family that moves fastest of everything named here,
 #: which is exactly why the setting is free text.
-DEFAULT_OPENAI_ADJUDICATION_MODEL = "gpt-5.6"
+DEFAULT_OPENAI_ADJUDICATION_MODEL = "gpt-6.1-sol"
 
 #: How hard the adjudicating model should think. Which words a model
 #: accepts here is its own business, and they have changed more than once,
 #: so this is free text rather than a list. Empty is meaningful: it means
 #: the parameter is left out of the request altogether, which is what a
-#: model that does not accept it at all needs.
-DEFAULT_OPENAI_REASONING_EFFORT = "medium"
+#: model that does not accept it at all needs. Low is the least effort
+#: GPT-6.1 Sol accepts: it takes neither none nor minimal.
+DEFAULT_OPENAI_REASONING_EFFORT = "low"
 
 #: ElevenLabs Scribe v2, the structural backbone: word timings, speaker
 #: labels and log probabilities all come from it.

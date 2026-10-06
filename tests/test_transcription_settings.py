@@ -598,10 +598,8 @@ def test_an_empty_reasoning_effort_is_kept_because_it_means_do_not_send_it():
     """Models differ in which parameters they accept, and clearing this is
     how the user says the parameter must be left out."""
     assert OpenAiAdjudicationSettings.from_dict({"reasoning_effort": ""}).reasoning_effort == ""
-    assert OpenAiAdjudicationSettings.from_dict({}).reasoning_effort == "medium"
-    assert OpenAiAdjudicationSettings.from_dict({"reasoning_effort": 7}).reasoning_effort == (
-        "medium"
-    )
+    assert OpenAiAdjudicationSettings.from_dict({}).reasoning_effort == "low"
+    assert OpenAiAdjudicationSettings.from_dict({"reasoning_effort": 7}).reasoning_effort == "low"
 
 
 def test_a_switch_that_is_not_a_switch_falls_back():

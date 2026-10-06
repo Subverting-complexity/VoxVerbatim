@@ -666,37 +666,34 @@ def write_chunks(
     that takes the recording whole leaves no empty folder behind.
 
     A failure part-way, such as an error cutting the fourth chunk, deletes
-    every chunk file this call had written, and the folder too if that leaves
-    it empty, and then raises the error as before. The caller never learns
-    which files were written when this raises, so nothing else could clean
-    them up. A plan that already pointed at a file, which can be the user's
+    every chunk file this call had written and then raises the error as
+    before. The caller never learns which files were written when this
+    raises, so nothing else could clean them up. The folder itself is left
+    for the passes to remove once every service has finished, because other
+    services' threads share it. A plan that already pointed at a file, which can be the user's
     own recording, is never deleted.
     """
     created: list[Path] = []
     try:
         return _write_pending(canonical, plans, folder, options, capabilities, created)
     except BaseException:
-        _delete_written_chunks(created, folder)
+        _delete_written_chunks(created)
         raise
 
 
-def _delete_written_chunks(created: Sequence[Path], folder: Path) -> None:
-    """Delete the chunk files a failed write made, then the folder if empty.
+def _delete_written_chunks(created: Sequence[Path]) -> None:
+    """Delete the chunk files a failed write made.
 
-    The folder is removed only when it is empty: another service's thread
-    may have just written its own chunks into it, and ``rmdir`` then fails
-    and is left alone.
+    The folder is not removed here. Another service's thread may have just
+    made it and be about to write its first chunk into it, so removing it
+    would make that service fail. The passes remove the empty folder once
+    every service has finished.
     """
     for path in created:
         try:
             path.unlink(missing_ok=True)
         except OSError as error:
             _log.warning("Could not delete the chunk file %s: %s", path, error)
-    if created and folder.is_dir():
-        try:
-            folder.rmdir()
-        except OSError as error:
-            _log.debug("Left the chunk folder %s in place: %s", folder, error)
 
 
 def _write_pending(

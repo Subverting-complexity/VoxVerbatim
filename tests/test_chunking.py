@@ -520,7 +520,7 @@ def test_a_failure_part_way_through_writing_leaves_no_chunks(monkeypatch, canoni
 
     assert len(destinations) == 4
     assert not any(path.exists() for path in destinations)
-    assert not folder.exists(), "the empty chunk folder should be removed too"
+    assert folder.is_dir(), "the shared folder is left for the passes to remove"
     assert Path(canonical.path).exists(), "the canonical recording is never touched"
 
 

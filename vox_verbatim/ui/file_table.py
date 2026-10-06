@@ -9,9 +9,8 @@ Two ideas live side by side in this table and must not be confused:
 
 * The **selected** row is the file the audio player is working with. There
   is always exactly one, and moving the highlight changes what plays.
-* The **checked** files are the ones marked for transcription in a later
-  phase. Any number can be checked, and checking one has no effect on
-  playback.
+* The **checked** files are the ones Enhance Audio and Transcribe act on.
+  Any number can be checked, and checking one has no effect on playback.
 """
 
 from __future__ import annotations

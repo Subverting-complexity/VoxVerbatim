@@ -130,11 +130,12 @@ def test_no_user_facing_text_promises_a_later_phase():
     reader reads both aloud.
     """
     package = Path(review_window.__file__).resolve().parent.parent
+    # The whole text is searched, so a phrase split across a line break in
+    # a docstring is still found.
     stale = [
-        f"{path.relative_to(package)}:{number}"
+        str(path.relative_to(package))
         for path in package.rglob("*.py")
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if re.search(r"later (phase|version)", line)
+        if re.search(r"later\s+(phase|version)", path.read_text(encoding="utf-8"))
     ]
 
     assert stale == []

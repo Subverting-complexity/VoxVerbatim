@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from vox_verbatim.transcription import passes
-from vox_verbatim.transcription.canonical import prepare_canonical_audio
+from vox_verbatim.transcription.canonical import CanonicalAudioError, prepare_canonical_audio
 from vox_verbatim.transcription.context import build_context_package
 from vox_verbatim.transcription.model import (
     CanonicalAudio,
@@ -725,6 +725,42 @@ def test_chunk_files_are_deleted_even_when_the_pass_fails(canonical, store):
     run(canonical, store, {Provider.OPENAI: chunked})
 
     assert not chunk_folder.exists()
+
+
+def test_chunk_files_are_deleted_when_writing_them_fails_part_way(
+    monkeypatch, canonical, store
+):
+    """A chunk that cannot be written must not strand the ones written before it.
+
+    The pass never learns which chunks were written when the writing fails,
+    so the clean-up it does once the service has answered cannot cover this.
+    """
+    from vox_verbatim.transcription import chunking
+
+    chunk_folder = store.folder / "chunks"
+    capabilities = replace(TEXT_ONLY_CAPABILITIES, maximum_file_bytes=15_000)
+    assert len(chunking.plan_chunks(canonical, Provider.OPENAI, capabilities)) >= 4
+    chunked = FakeService(Provider.OPENAI, capabilities=capabilities)
+    real_cut_window = chunking.cut_window
+    calls: list[Path] = []
+
+    def failing_cut_window(canonical, span, destination, *args, **kwargs):
+        calls.append(Path(destination))
+        if len(calls) == 4:
+            raise CanonicalAudioError("The disc filled up while writing a chunk.")
+        return real_cut_window(canonical, span, destination, *args, **kwargs)
+
+    monkeypatch.setattr(chunking, "cut_window", failing_cut_window)
+
+    outcome = run(canonical, store, {Provider.OPENAI: chunked})
+
+    result = outcome.results[Provider.OPENAI]
+    assert not result.succeeded
+    assert "could not be prepared" in result.error
+    assert len(calls) == 4
+    assert chunked.requests_received == []
+    assert not chunk_folder.exists()
+    assert Path(canonical.path).exists(), "the canonical recording is never touched"
 
 
 def test_a_service_that_took_the_recording_whole_leaves_it_where_it_was(canonical, store):

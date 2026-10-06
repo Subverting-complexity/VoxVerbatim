@@ -480,6 +480,84 @@ def test_a_chunk_that_cannot_be_cut_small_enough_is_refused_in_words(canonical, 
     assert "10 byte limit" in message
 
 
+def cut_window_failing_on_call(monkeypatch, failing_call: int) -> list[Path]:
+    """Make the chunk writer's ``cut_window`` fail on the given call.
+
+    The calls before it cut real audio, so real chunk files are on disc when
+    the failure comes. The destinations asked for are returned, so a test can
+    show that the failure really came part-way through.
+    """
+    from vox_verbatim.transcription import chunking
+
+    destinations: list[Path] = []
+
+    def failing_cut_window(canonical, span, destination, *args, **kwargs):
+        destinations.append(Path(destination))
+        if len(destinations) == failing_call:
+            # Leave a half-written file behind, as a cut that dies part-way would.
+            Path(destination).write_bytes(b"partial")
+            raise CanonicalAudioError("The disc filled up while writing a chunk.")
+        return cut_window(canonical, span, destination, *args, **kwargs)
+
+    monkeypatch.setattr(chunking, "cut_window", failing_cut_window)
+    return destinations
+
+
+def test_a_failure_part_way_through_writing_leaves_no_chunks(monkeypatch, canonical, tmp_path):
+    """A chunk that cannot be written takes the chunks before it with it.
+
+    Whoever asked for the chunks never gets the list of what was written
+    when the writing fails, so nothing but the writer can clean up after it.
+    """
+    small = ProviderCapabilities(maximum_file_bytes=30_000)
+    plans = plan_chunks(canonical, Provider.OPENAI, small)
+    assert len(plans) >= 4, "the failure must come after several chunks were written"
+    folder = tmp_path / "chunks"
+    destinations = cut_window_failing_on_call(monkeypatch, 4)
+
+    with pytest.raises(CanonicalAudioError):
+        write_chunks(canonical, plans, folder, capabilities=small)
+
+    assert len(destinations) == 4
+    assert not any(path.exists() for path in destinations)
+    assert not folder.exists(), "the empty chunk folder should be removed too"
+    assert Path(canonical.path).exists(), "the canonical recording is never touched"
+
+
+def test_a_failure_part_way_never_deletes_a_file_the_plan_already_pointed_at(
+    monkeypatch, canonical
+):
+    """A plan that points at a file, perhaps the recording itself, is not the writer's to delete.
+
+    The chunks are written into the folder the recording is in, so the
+    folder is not empty after the clean-up and must be left where it is.
+    """
+    recording = Path(canonical.path)
+    folder = recording.parent
+
+    def plan(start: float, end: float, path: str | None = None) -> ChunkRecord:
+        return ChunkRecord(
+            provider=Provider.OPENAI,
+            chunk_index=0,
+            canonical_start=start,
+            canonical_end=end,
+            canonical_offset=start,
+            encoded_size_bytes=1,
+            path=path,
+        )
+
+    plans = [plan(0.0, 2.0), plan(0.0, canonical.duration, str(recording)), plan(2.0, 4.0)]
+    destinations = cut_window_failing_on_call(monkeypatch, 2)
+
+    with pytest.raises(CanonicalAudioError):
+        write_chunks(canonical, plans, folder)
+
+    assert len(destinations) == 2
+    assert not any(path.exists() for path in destinations)
+    assert recording.exists(), "the file a plan already pointed at must be left alone"
+    assert folder.is_dir()
+
+
 def test_a_time_inside_a_chunk_adds_up_to_the_right_canonical_time(canonical, tmp_path):
     """The whole reason chunks carry an offset, checked against the audio.
 

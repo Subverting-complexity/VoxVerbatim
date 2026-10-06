@@ -664,7 +664,50 @@ def write_chunks(
 
     The folder is made only when a chunk is actually written, so a service
     that takes the recording whole leaves no empty folder behind.
+
+    A failure part-way, such as an error cutting the fourth chunk, deletes
+    every chunk file this call had written, and the folder too if that leaves
+    it empty, and then raises the error as before. The caller never learns
+    which files were written when this raises, so nothing else could clean
+    them up. A plan that already pointed at a file, which can be the user's
+    own recording, is never deleted.
     """
+    created: list[Path] = []
+    try:
+        return _write_pending(canonical, plans, folder, options, capabilities, created)
+    except BaseException:
+        _delete_written_chunks(created, folder)
+        raise
+
+
+def _delete_written_chunks(created: Sequence[Path], folder: Path) -> None:
+    """Delete the chunk files a failed write made, then the folder if empty.
+
+    The folder is removed only when it is empty: another service's thread
+    may have just written its own chunks into it, and ``rmdir`` then fails
+    and is left alone.
+    """
+    for path in created:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            _log.warning("Could not delete the chunk file %s: %s", path, error)
+    if created and folder.is_dir():
+        try:
+            folder.rmdir()
+        except OSError as error:
+            _log.debug("Left the chunk folder %s in place: %s", folder, error)
+
+
+def _write_pending(
+    canonical: CanonicalAudio,
+    plans: Sequence[ChunkRecord],
+    folder: Path,
+    options: ChunkingOptions,
+    capabilities: ProviderCapabilities | None,
+    created: list[Path],
+) -> list[ChunkRecord]:
+    """The body of ``write_chunks``, noting every file it writes in ``created``."""
     rate, channels = chunk_rate_and_channels(canonical, options)
     limit = None if capabilities is None else capabilities.maximum_file_bytes
     least_overlap = min(options.overlap_seconds, options.maximum_overlap_seconds)
@@ -680,6 +723,9 @@ def write_chunks(
         destination = folder / (
             f"{plan.provider.value}-chunk-{index:03d}{options.output_format.extension}"
         )
+        # Noted before the cut, so that a file the cut leaves half written
+        # when it fails is deleted too.
+        created.append(destination)
         clip = cut_window(
             canonical,
             AudioSpan(plan.canonical_start, plan.canonical_end),

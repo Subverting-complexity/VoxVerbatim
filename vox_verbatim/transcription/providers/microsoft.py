@@ -676,6 +676,17 @@ class MicrosoftProvider(TranscriptionProvider):
                     value,
                 )
                 continue
+            if key == "phrases":
+                # Not a field of the Microsoft definition. The vocabulary
+                # belongs in phraseList, which is built above only for a model
+                # that accepts it; copying this through would send the terms
+                # to a model that must not get them, and record them as sent.
+                _log.warning(
+                    "A top-level 'phrases' field is not part of the Microsoft "
+                    "definition and was left out of the request. The vocabulary "
+                    "goes in 'phraseList' instead."
+                )
+                continue
             definition[key] = value
 
         phrase_list = definition.get("phraseList")

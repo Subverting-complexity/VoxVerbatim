@@ -846,6 +846,7 @@ def _finish(
     """
     transcript.completed_at = _now()
     if stopped:
+        transcript.stopped = True
         transcript.warnings.append(
             "The run was stopped before it finished, so this transcript is "
             "incomplete."

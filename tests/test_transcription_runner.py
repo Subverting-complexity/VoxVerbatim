@@ -328,6 +328,92 @@ def test_a_failure_is_named_in_the_summary():
     assert "0 of 1 recordings transcribed" in text
 
 
+NO_SERVICE = "No transcription service produced a result, so there is nothing to compare."
+
+
+def test_a_transcript_with_no_words_is_a_failure_not_a_success():
+    outcome = RecordingOutcome.of_transcript(
+        Path("a.m4a"), make_transcript("a.m4a", words=0, warnings=(NO_SERVICE,))
+    )
+
+    assert outcome.succeeded is False
+    assert outcome.incomplete is False
+    assert NO_SERVICE in outcome.error
+    # The reason is said once, not again as a warning after it.
+    assert outcome.message == f"a.m4a could not be transcribed. {NO_SERVICE}"
+
+
+def test_a_transcript_with_no_words_and_no_warning_still_says_why():
+    outcome = RecordingOutcome.of_transcript(Path("a.m4a"), make_transcript("a.m4a", words=0))
+
+    assert outcome.error == "No service returned any words."
+
+
+def test_a_run_where_no_service_answered_is_not_reported_as_finished():
+    summary = RunSummary(
+        results=[
+            RecordingOutcome.of_transcript(
+                Path("a.m4a"), make_transcript("a.m4a", words=0, warnings=(NO_SERVICE,))
+            )
+        ]
+    )
+
+    text = summarise(summary)
+    assert summary.failed == 1
+    assert summary.transcripts == []
+    assert "0 of 1 recordings transcribed" in text
+    assert "1 could not be transcribed" in text
+    assert not text.startswith("Finished.")
+
+
+def test_a_recording_stopped_part_way_is_reported_as_incomplete():
+    transcript = make_transcript("a.m4a", words=5)
+    transcript.stopped = True
+    outcome = RecordingOutcome.of_transcript(Path("a.m4a"), transcript)
+    summary = RunSummary(results=[outcome])
+
+    assert outcome.incomplete is True
+    # A partial transcript can still be opened and read.
+    assert outcome.succeeded is True
+    assert "incomplete" in outcome.message
+    assert summary.transcribed == 0
+    assert summary.failed == 0
+    assert summary.incomplete == 1
+    assert summary.transcripts == [outcome]
+    text = summarise(summary)
+    assert "1 stopped part way" in text
+    assert not text.startswith("Finished.")
+
+
+def test_a_recording_stopped_before_any_words_says_so():
+    transcript = make_transcript("a.m4a", words=0)
+    transcript.stopped = True
+    outcome = RecordingOutcome.of_transcript(Path("a.m4a"), transcript)
+
+    assert outcome.succeeded is False
+    assert outcome.incomplete is True
+    assert outcome.message == "a.m4a was stopped before it was transcribed."
+    assert RunSummary(results=[outcome]).failed == 0
+
+
+def test_the_runner_reports_an_empty_transcript_as_a_failure(qapp, monkeypatch, recordings):
+    def transcribe(recording, options, progress=None, cancelled=None):
+        return make_transcript(recording.name, words=0, warnings=(NO_SERVICE,))
+
+    fake_pipeline(monkeypatch, transcribe)
+    runner = TranscriptionRunner()
+    summaries: list[RunSummary] = []
+    runner.runFinished.connect(summaries.append)
+
+    runner.start(recordings[:1], pipeline.PipelineOptions())
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    summary = summaries[0]
+    assert summary.failed == 1
+    assert summary.transcribed == 0
+    assert NO_SERVICE in summary.results[0].message
+
+
 # -- What an outcome carries ---------------------------------------------
 
 

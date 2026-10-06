@@ -550,6 +550,29 @@ def test_a_recording_that_failed_is_named_in_the_report(qapp, monkeypatch, recor
         dialog.close()
 
 
+def test_a_run_with_no_words_offers_nothing_to_open(qapp, monkeypatch, recordings):
+    def transcribe(recording, options, progress=None, cancelled=None):
+        transcript = make_transcript(recording.name, words=0)
+        transcript.warnings.append("No transcription service produced a result.")
+        return transcript
+
+    fake_pipeline(monkeypatch, transcribe)
+    shown = silence_message_boxes(monkeypatch)
+
+    dialog = open_dialog(recordings[:1])
+    try:
+        run_and_wait(qapp, dialog)
+
+        assert dialog.summary.failed == 1
+        # The headline a screen reader reads out states the failure.
+        assert "could not be transcribed" in shown[0]
+        assert not shown[0].startswith("Finished.")
+        assert dialog._review_button.isEnabled() is False
+        assert dialog._folder_button.isEnabled() is False
+    finally:
+        dialog.close()
+
+
 def test_cancelling_stops_the_run(qapp, monkeypatch, recordings):
     release = threading.Event()
 

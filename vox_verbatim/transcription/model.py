@@ -960,6 +960,14 @@ class Transcript:
     """Things that went wrong without stopping the run, such as a service
     that did not answer. The user is told these plainly at the end."""
 
+    stopped: bool = False
+    """Whether the run that made this transcript was stopped part way.
+
+    This describes the run in hand only and is never saved: a transcript read
+    back from its file is always ``False`` here. It exists so that the runner
+    can report an incomplete transcript without matching the wording of the
+    warning that says so."""
+
     @property
     def review_tokens(self) -> list[FinalToken]:
         return [token for token in self.tokens if token.needs_review]

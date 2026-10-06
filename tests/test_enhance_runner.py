@@ -45,6 +45,33 @@ def test_an_engine_that_raises_still_ends_the_run_with_a_failed_summary(
     assert runner.is_running is False
 
 
+
+def test_a_crash_after_clashes_were_reported_still_names_every_file_once(
+    qapp, monkeypatch, tmp_path
+):
+    """Clashing files are reported before the others, so results are out of file order."""
+    files = [tmp_path / "talk.m4a", tmp_path / "quiet.m4a", tmp_path / "talk.mp3"]
+
+    def explode(sources, options, progress, cancelled, on_start, on_result):
+        on_result(FileResult(source=sources[0], outcome=Outcome.SKIPPED, message="Clash."))
+        on_result(FileResult(source=sources[2], outcome=Outcome.SKIPPED, message="Clash."))
+        on_start(sources[1], 3, len(sources))
+        raise RuntimeError("The decoder fell over.")
+
+    monkeypatch.setattr(runner_module, "enhance_files", explode)
+    runner = EnhanceRunner()
+    summaries: list = []
+    runner.runFinished.connect(summaries.append)
+
+    assert runner.start(files, EnhanceOptions(output_folder=tmp_path / "enhanced")) is True
+    assert wait_until(qapp, lambda: bool(summaries))
+
+    summary = summaries[0]
+    assert sorted(result.name for result in summary.results) == sorted(f.name for f in files)
+    assert summary.failed == 1
+    failed = [result for result in summary.results if result.outcome is Outcome.FAILED]
+    assert failed[0].name == "quiet.m4a"
+
 def test_the_machine_is_held_awake_for_the_run_and_released_after(qapp, monkeypatch, tmp_path):
     asked: list[int] = []
     monkeypatch.setattr(transcription_runner, "set_thread_execution_state", asked.append)

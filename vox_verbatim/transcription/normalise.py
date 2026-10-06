@@ -395,13 +395,14 @@ def _case_form(text: str) -> str:
 def _is_minus(text: str, index: int) -> bool:
     """Whether the dash at ``index`` is a minus sign rather than a hyphen.
 
-    It is a minus when it starts a word and a digit follows it. A dash after
-    a letter or a digit joins two things, as in "well-known" or "10-20", and
-    stays a hyphen.
+    It is a minus when a digit follows it and no letter or digit comes before
+    it, as at the start of a word or after a bracket or quote mark. A dash
+    after a letter or a digit joins two things, as in "well-known" or
+    "10-20", and stays a hyphen.
     """
     return (
         text[index] in MINUS_SIGNS
-        and (index == 0 or text[index - 1].isspace())
+        and (index == 0 or not text[index - 1].isalnum())
         and index + 1 < len(text)
         and text[index + 1].isdigit()
     )

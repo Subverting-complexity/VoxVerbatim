@@ -242,8 +242,8 @@ def transcribe_recording(
         _log.exception("Comparing the services' answers failed for %s.", recording.name)
         transcript.warnings.append(
             "The services answered, but their answers could not be compared and "
-            f"reconciled: {error}. Each service's words are kept in the transcript "
-            "file and in the raw-responses folder."
+            f"reconciled: {error}. Each service's words are kept in the raw-responses "
+            "folder, and in the transcript file when this run saves one."
         )
         return _finish(transcript, store, started, stopped=False)
     reporter.stage("reconciling", 1.0, _reconciled_sentence(tokens))

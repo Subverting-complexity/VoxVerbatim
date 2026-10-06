@@ -1389,9 +1389,16 @@ class TranscribeDialog(QDialog):
         services that are configured answer and are charged for, and the run
         then has nothing usable to show for it.
 
-        The list goes in the report box as well as being announced, because
-        several missing keys are several sentences, and a text box can be read
-        back a line at a time where a spoken announcement cannot.
+        The whole list goes in the report box, because several missing keys
+        are several sentences, and a text box can be read back a line at a
+        time where a spoken announcement cannot. What is announced is the
+        count and the first problem in full, so a single missing key is heard
+        by name without leaving Start. With more than one, the announcement
+        also says how many there are and that the "What was done" box lists
+        them all. Focus stays on Start rather than jumping to that box: moving
+        it would make the screen reader read the box's name and description
+        over the announcement, and Start is where the person returns once the
+        problems are put right.
         """
         # "First" rather than "in Settings first": a missing key is put right
         # in Settings, but a library that will not load is put right by
@@ -1413,7 +1420,17 @@ class TranscribeDialog(QDialog):
             )
         self._report_text.setPlainText("\n".join(lines))
         self._report_group.setVisible(True)
-        self._refuse(headline)
+        if len(problems) == 1:
+            spoken = f"{headline} {problems[0]}"
+        else:
+            spoken = (
+                f"{headline} The first is: {problems[0]} All {len(problems)} are listed, "
+                "one to a line, in the What was done box."
+            )
+        self._progress_group.setVisible(True)
+        self._grow_to_fit()
+        self._set_progress_text(headline)
+        announce(self._progress_bar, spoken, urgent=True)
 
     # -- What to do with the result ---------------------------------------
 

@@ -417,6 +417,62 @@ def test_a_library_that_cannot_be_loaded_refuses_the_run_like_a_missing_key(
         dialog.close()
 
 
+def test_a_single_problem_is_announced_by_name(qapp, monkeypatch, recordings):
+    """A screen reader hears what is missing, not only that something is."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        transcribe_dialog_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    monkeypatch.setattr(
+        settings_module,
+        "_probe_library",
+        lambda module, attribute: "No module named 'assemblyai'." if module == "assemblyai" else None,
+    )
+
+    dialog = open_dialog(recordings)
+    try:
+        assert dialog.start() is False
+
+        assert len(said) == 1
+        assert "1 thing must be put right first." in said[0]
+        assert "AssemblyAI is switched on, but the assemblyai library" in said[0]
+        assert "No module named 'assemblyai'." in said[0]
+    finally:
+        dialog.close()
+
+
+def test_several_problems_are_counted_and_the_report_box_is_named(
+    qapp, monkeypatch, recordings
+):
+    """Several sentences are too many to speak, so the first is said and the rest pointed to."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        transcribe_dialog_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+
+    dialog = open_dialog(recordings, TranscriptionSettings())
+    try:
+        problems = dialog.preflight_problems()
+        assert len(problems) > 1
+
+        assert dialog.start() is False
+
+        assert len(said) == 1
+        assert f"{len(problems)} things must be put right first." in said[0]
+        assert problems[0] in said[0]
+        assert f"All {len(problems)} are listed" in said[0]
+        assert "What was done box" in said[0]
+        report = dialog._report_text.toPlainText()
+        for problem in problems:
+            assert problem in report
+    finally:
+        dialog.close()
+
+
 def test_a_transcript_folder_that_cannot_be_written_refuses_the_run(
     qapp, monkeypatch, recordings
 ):

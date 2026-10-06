@@ -18,6 +18,11 @@ into Settings, and several of them give new accounts enough free credit to
 transcribe a good deal before you have paid anybody anything. The next
 section says exactly what you need and why it works this way.
 
+New to it? Two short guides take you through the first steps:
+
+* [Quick start: set up your API keys](docs/quick-start-api-keys.md)
+* [Quick start: transcribe your first file](docs/quick-start-first-transcript.md)
+
 This project is released under the [MIT License](LICENSE).
 
 ## You bring your own accounts

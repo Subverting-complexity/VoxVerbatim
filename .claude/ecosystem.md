@@ -12,7 +12,7 @@ which files, functions, and modules depend on which — so agents answer
 "how does X relate to Y" from the graph instead of guessing from a few
 open files.
 **Use it:** `graphify update .` after any pull or fresh worktree
-(rebuilds from committed cache, ~10s, 0 tokens), then
+(rebuilds its local cache, ~15s, 0 tokens), then
 `graphify query "..."`, `graphify path A B`, `graphify explain X`. Never
 load `graph.json` into context directly — it is megabytes of mostly
 irrelevant detail. This graph is code-only: the 8 Markdown docs need an

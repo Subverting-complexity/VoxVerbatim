@@ -735,6 +735,35 @@ def test_a_weakly_supported_insertion_is_kept_out_of_the_transcript() -> None:
     assert any(token.rejected_tokens for token in tokens)
 
 
+def test_a_word_two_services_both_inserted_appears_once_with_both_as_support() -> None:
+    """Two services hearing the word the backbone missed are one word.
+
+    Each service's insertion used to be judged on its own, and both cleared
+    the bar, so the transcript said "it was very very good today".
+    """
+    backbone = spoken(Provider.ELEVENLABS, ["it", "was", "good", "today"])
+    heard = ["it", "was", "very", "good", "today"]
+    openai = spoken(Provider.OPENAI, heard, timed=False)
+    microsoft = spoken(Provider.MICROSOFT, heard, timed=False)
+
+    tokens = reconcile(table_of(backbone, openai, microsoft))
+
+    assert texts_of(tokens) == heard
+    very = token_at(tokens, "very")
+    assert very.alignment_status is AlignmentStatus.INSERTION
+    assert set(very.candidates[0].providers) == {Provider.OPENAI, Provider.MICROSOFT}
+    assert {reference.provider for reference in very.source_tokens} == {
+        Provider.OPENAI,
+        Provider.MICROSOFT,
+    }
+    components = very.candidates[0].components
+    assert components["supporting_providers"] == 2.0
+    # Agreement adds evidence, so the shared word scores above either
+    # service on its own.
+    assert components["combined"] > components["openai.score"]
+    assert components["combined"] > components["microsoft.score"]
+
+
 # -- Words the backbone may have imagined ----------------------------------
 
 

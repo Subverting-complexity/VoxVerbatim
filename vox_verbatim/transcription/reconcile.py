@@ -1566,7 +1566,7 @@ def _insertion_token(
     historical: HistoricalWeight | None,
     options: ReconciliationOptions,
 ) -> FinalToken | None:
-    """Decide what to do with a word only one service heard.
+    """Decide what to do with a word the backbone never heard.
 
     Section 19 is clear that such a word has to be verified as actually
     spoken before it enters the verbatim transcript, and nothing available
@@ -1576,34 +1576,75 @@ def _insertion_token(
     dropped into provenance where a pattern of one service inventing words
     can still be seen. Either way the word is never quietly accepted and
     never quietly lost.
+
+    A row can hold the same word from several services, because alignment
+    puts services that inserted the same word in the same gap into one row.
+    Each of them is scored on its own and the scores are put together the
+    way agreeing readings of a backbone word are, by :func:`_combine`, so a
+    second service hearing the word counts as further evidence for it and
+    not as a second word. The text comes from the service with the best
+    score, and every service in the row is listed as support.
     """
     tokens = tuple(token for column in row.columns for token in column.aligned_tokens)
     if not tokens:
         return None
-    column = row.columns[0]
-    reliability = weights.for_provider(column.provider)
     evidence = languages.for_position(row.position)
-    language_weight = provider_language_weight(
-        column.provider, evidence, languages.afrikaans_enabled
-    )
-    measured, _source = best_acoustic_confidence(tokens)
-    acoustic = ASSUMED_ACOUSTIC_CONFIDENCE if measured is None else measured
-    vocabulary_factor, in_vocabulary = _vocabulary_factor(column.text, vocabulary, options)
-    # An inserted word scores low on alignment quality by construction: there
-    # was nothing on the other side for it to line up with. Using that raw
-    # would mean no insertion could ever clear any threshold, which would be
-    # a decision taken by arithmetic rather than by the rule below.
-    alignment = options.alignment_floor + (1.0 - options.alignment_floor) * column.quality
-    score = reliability * language_weight * acoustic * vocabulary_factor * alignment
-    if historical is not None:
-        score *= max(0.0, min(1.0, historical(WordFacts(provider=column.provider))))
+    components: dict[str, float] = {}
+    scored: list[tuple[float, AlignmentColumn]] = []
+    in_vocabulary = False
+    for column in row.columns:
+        if not column.aligned_tokens:
+            continue
+        reliability = weights.for_provider(column.provider)
+        language_weight = provider_language_weight(
+            column.provider, evidence, languages.afrikaans_enabled
+        )
+        measured, _source = best_acoustic_confidence(column.aligned_tokens)
+        acoustic = ASSUMED_ACOUSTIC_CONFIDENCE if measured is None else measured
+        vocabulary_factor, known = _vocabulary_factor(column.text, vocabulary, options)
+        # An inserted word scores low on alignment quality by construction:
+        # there was nothing on the other side for it to line up with. Using
+        # that raw would mean no insertion could ever clear any threshold,
+        # which would be a decision taken by arithmetic rather than by the
+        # rule below.
+        alignment = options.alignment_floor + (1.0 - options.alignment_floor) * column.quality
+        raw = reliability * language_weight * acoustic * vocabulary_factor * alignment
+        if historical is not None:
+            raw *= max(0.0, min(1.0, historical(WordFacts(provider=column.provider))))
+        name = column.provider.value
+        components[f"{name}.provider_reliability"] = round(reliability, 4)
+        components[f"{name}.language_reliability"] = round(language_weight, 4)
+        components[f"{name}.acoustic_confidence"] = round(acoustic, 4)
+        components[f"{name}.vocabulary_evidence"] = round(vocabulary_factor, 4)
+        components[f"{name}.alignment_quality"] = round(alignment, 4)
+        components[f"{name}.alignment_measured"] = round(column.quality, 4)
+        scored.append((raw, column))
+        in_vocabulary = in_vocabulary or known
+
+    # One service on its own keeps exactly the score it always had. Putting a
+    # lone score through the combination would cap it just below one, which
+    # changes nothing about the threshold but would change the number a
+    # person sees in the review window for no reason.
+    if len(scored) == 1:
+        score = scored[0][0]
+    else:
+        score = _combine([raw for raw, _column in scored], options)
+        for raw, column in scored:
+            components[f"{column.provider.value}.score"] = round(raw, 4)
+        components["supporting_providers"] = float(len(scored))
+    components["combined"] = round(score, 4)
     if score < options.insertion_keep_threshold:
         return None
+    # The strongest supporter gives the text, which matters only where the
+    # services wrote the same word differently. On a tie, max keeps the
+    # first, which is the service alignment saw first.
+    lead = max(scored, key=lambda pair: pair[0])[1]
+    providers = tuple(column.provider for _raw, column in scored)
 
     token = FinalToken(
-        text=column.text,
-        normalised_text=normalise(column.text),
-        text_source=column.provider,
+        text=lead.text,
+        normalised_text=normalise(lead.text),
+        text_source=lead.provider,
         text_confidence=Confidence.REVIEW_REQUIRED,
         timing_status=TimingStatus.UNALIGNED,
         timing_confidence=Confidence.UNRESOLVED,
@@ -1614,18 +1655,10 @@ def _insertion_token(
         alignment_status=AlignmentStatus.INSERTION,
         candidates=[
             Candidate(
-                text=column.text,
-                providers=(column.provider,),
+                text=lead.text,
+                providers=providers,
                 score=score,
-                components={
-                    f"{column.provider.value}.provider_reliability": round(reliability, 4),
-                    f"{column.provider.value}.language_reliability": round(language_weight, 4),
-                    f"{column.provider.value}.acoustic_confidence": round(acoustic, 4),
-                    f"{column.provider.value}.vocabulary_evidence": round(vocabulary_factor, 4),
-                    f"{column.provider.value}.alignment_quality": round(alignment, 4),
-                    f"{column.provider.value}.alignment_measured": round(column.quality, 4),
-                    "combined": round(score, 4),
-                },
+                components=components,
                 source_tokens=tuple(
                     TokenReference(token.provider, token.index) for token in tokens
                 ),

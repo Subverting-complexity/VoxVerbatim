@@ -435,6 +435,78 @@ def test_an_inserted_word_gets_a_row_of_its_own_before_the_word_it_precedes():
     assert table.rows[3].backbone_token.text == "contract"
 
 
+def _insertion_rows(backbone_text: str, **others: str) -> list:
+    """The insertion rows of a table built from plain sentences.
+
+    The backbone is ElevenLabs, timed; every keyword names another service
+    and gives what it heard.
+    """
+    backbone = ProviderResult(
+        provider=Provider.ELEVENLABS,
+        tokens=words(Provider.ELEVENLABS, backbone_text, timed=True),
+    )
+    results = [
+        ProviderResult(provider=Provider(name), tokens=words(Provider(name), text))
+        for name, text in others.items()
+    ]
+    table = build_aligned_table(backbone, results)
+    return [row for row in table.rows if row.is_insertion_row]
+
+
+def test_a_word_two_services_both_inserted_is_one_row_with_both_of_them():
+    """Two services hearing the word the backbone missed are agreeing.
+
+    Giving each its own row made reconciliation judge them separately, and
+    the transcript said "very very".
+    """
+    inserted = _insertion_rows(
+        "it was good today",
+        openai="it was very good today",
+        microsoft="it was very good today",
+    )
+
+    assert len(inserted) == 1
+    assert inserted[0].position == 2
+    assert inserted[0].texts == {Provider.OPENAI: "very", Provider.MICROSOFT: "very"}
+
+
+def test_two_services_inserting_different_words_in_one_gap_keep_separate_rows():
+    inserted = _insertion_rows(
+        "it was good today",
+        openai="it was very good today",
+        microsoft="it was really good today",
+    )
+
+    assert [row.texts for row in inserted] == [
+        {Provider.OPENAI: "very"},
+        {Provider.MICROSOFT: "really"},
+    ]
+
+
+def test_one_service_saying_a_word_twice_keeps_both_rows():
+    """A row never holds two columns from the same service.
+
+    A service that heard "very very" said the word twice. Folding both into
+    one row would drop one of them, so the second opens a row of its own,
+    and a second service's second "very" joins that one.
+    """
+    alone = _insertion_rows("it was good today", openai="it was very very good today")
+    assert [row.texts for row in alone] == [
+        {Provider.OPENAI: "very"},
+        {Provider.OPENAI: "very"},
+    ]
+
+    shared = _insertion_rows(
+        "it was good today",
+        openai="it was very very good today",
+        microsoft="it was very very good today",
+    )
+    assert [row.texts for row in shared] == [
+        {Provider.OPENAI: "very", Provider.MICROSOFT: "very"},
+        {Provider.OPENAI: "very", Provider.MICROSOFT: "very"},
+    ]
+
+
 # -- Windowing -----------------------------------------------------------
 
 

@@ -449,6 +449,86 @@ def test_a_run_cancelled_before_anything_was_sent_still_saves_a_transcript(trans
     assert run.store.transcript_path.is_file()
 
 
+# -- Keeping an earlier transcript ---------------------------------------
+
+
+def every_service_failing() -> dict:
+    return {
+        provider: FakeService(provider, error="Nothing came back.")
+        for provider in (Provider.ELEVENLABS, Provider.OPENAI, Provider.MICROSOFT)
+    }
+
+
+def files_on_disk(store: TranscriptStore) -> dict[str, bytes]:
+    """The transcript and both exports, byte for byte."""
+    paths = [
+        store.transcript_path,
+        store.exports_folder / exports.TEXT_EXPORT_NAME,
+        store.exports_folder / exports.REPORT_EXPORT_NAME,
+    ]
+    return {path.name: path.read_bytes() for path in paths}
+
+
+def test_a_rerun_where_no_service_answers_keeps_the_earlier_transcript(transcribe):
+    """The earlier file holds the user's review corrections; nothing replaces it."""
+    first = transcribe()
+    assert first.transcript.tokens
+    before = files_on_disk(first.store)
+
+    run = transcribe(every_service_failing())
+
+    assert run.transcript.tokens == []
+    assert files_on_disk(run.store) == before
+    assert run.warned_about("already had a transcript", "kept unchanged")
+
+
+def test_a_rerun_cancelled_before_anything_was_sent_keeps_the_earlier_transcript(
+    transcribe,
+):
+    first = transcribe()
+    before = files_on_disk(first.store)
+
+    run = transcribe(cancelled=lambda: True)
+
+    assert files_on_disk(run.store) == before
+    assert run.warned_about("stopped before it finished")
+    assert run.warned_about("already had a transcript", "kept unchanged")
+
+
+def test_an_earlier_transcript_that_cannot_be_read_is_kept_rather_than_replaced(
+    transcribe,
+):
+    """A damaged or locked file may still hold work, so it is not overwritten."""
+    first = transcribe()
+    first.store.transcript_path.write_text("{ not json", encoding="utf-8")
+    before = files_on_disk(first.store)
+
+    run = transcribe(every_service_failing())
+
+    assert files_on_disk(run.store) == before
+    assert run.warned_about("already had a transcript", "kept unchanged")
+
+
+def test_an_earlier_transcript_with_no_words_is_replaced_as_before(transcribe):
+    first = transcribe(every_service_failing())
+    assert first.saved["tokens"] == []
+
+    run = transcribe(every_service_failing())
+
+    assert not run.warned_about("already had a transcript")
+    assert run.saved["completed_at"] == run.transcript.completed_at
+
+
+def test_a_rerun_that_produces_words_replaces_the_earlier_transcript(transcribe):
+    first = transcribe(every_service_failing())
+    assert first.saved["tokens"] == []
+
+    run = transcribe()
+
+    assert run.saved["tokens"]
+    assert not run.warned_about("already had a transcript")
+
+
 # -- Keeping the evidence ------------------------------------------------
 
 

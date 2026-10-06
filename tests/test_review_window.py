@@ -1371,6 +1371,77 @@ def test_a_second_play_in_the_same_file_does_not_load_it_again(qapp, tmp_path):
         window.close()
 
 
+def _moved_folder_window(tmp_path, canonical_path: Path, player: FakePlayer) -> ReviewWindow:
+    """A window on a folder whose transcript still names where it used to be.
+
+    The recording itself is in ``tmp_path / "new"``, which is where the window
+    is told it is, as it would be after the folder was opened from its new
+    place.
+    """
+    transcript = make_transcript([weak_token("word", 30.0)])
+    transcript.canonical_audio.path = str(canonical_path)
+    folder = Folder({RECORDING: transcript})
+    recording = tmp_path / "new" / RECORDING
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"original")
+    window = ReviewWindow(
+        recording.parent,
+        folder.names,
+        folder.load,
+        {RECORDING: recording},
+        ProjectStore(tmp_path),
+        player,
+        folder.save,
+    )
+    window.show()
+    window.process_low_confidence_words()
+    return window
+
+
+def test_a_moved_folder_plays_the_recording_beside_the_transcript(qapp, tmp_path):
+    """The saved path is absolute and names a place the folder has left."""
+    player = FakePlayer()
+    old = tmp_path / "old" / RECORDING
+    window = _moved_folder_window(tmp_path, old, player)
+    try:
+        assert window.play_span() is True
+
+        assert player.loaded == str(tmp_path / "new" / RECORDING)
+    finally:
+        window.close()
+
+
+def test_a_moved_folder_still_plays_the_converted_copy_that_moved_with_it(qapp, tmp_path):
+    """The copy's timestamps are the ones to trust, so it wins over the original."""
+    player = FakePlayer()
+    copy_name = "board meeting-canonical.wav"
+    old = tmp_path / "old" / f"{RECORDING}.transcript" / copy_name
+    moved_copy = tmp_path / "new" / f"{RECORDING}.transcript" / copy_name
+    moved_copy.parent.mkdir(parents=True)
+    moved_copy.write_bytes(b"copy")
+    window = _moved_folder_window(tmp_path, old, player)
+    try:
+        assert window.play_span() is True
+
+        assert player.loaded == str(moved_copy)
+    finally:
+        window.close()
+
+
+def test_a_converted_copy_that_is_still_where_it_was_saved_is_played(qapp, tmp_path):
+    player = FakePlayer()
+    copy = tmp_path / "work" / "board meeting-canonical.wav"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(b"copy")
+    window = _moved_folder_window(tmp_path, copy, player)
+    try:
+        assert window.play_span() is True
+
+        assert player.loaded == str(copy)
+    finally:
+        window.close()
+
+
 def test_playback_stops_at_the_end_of_the_region_rather_than_running_on(qapp, tmp_path):
     player = FakePlayer()
     folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})

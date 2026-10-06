@@ -416,7 +416,7 @@ def _transcribe_chunks(
             # said twice, so the user is told rather than left to find it.
             warnings.append(
                 f"{name}: the join between two pieces of the recording could not be "
-                f"matched confidently. {join}"
+                f"matched confidently. {join.description}"
             )
 
     tokens = _renumber(tokens)

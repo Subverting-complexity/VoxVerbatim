@@ -224,6 +224,9 @@ _COMPOUND_ONLY_UNITS: dict[str, int] = {
 #: disagree. A scale word cannot follow the article "a" in any other sense,
 #: so reading the article as 1 here costs nothing. Before any other word it
 #: stays the article.
+#:
+#: Clock times work the same way for "ein" alone. "Uhr" is feminine, so "a
+#: clock" is always "eine Uhr", and "ein Uhr" can only be one o'clock.
 _GERMAN_ONE_WORDS = ("ein", "eine")
 _GERMAN_SCALE_FOLLOWERS = frozenset({
     "hundert", "tausend", "million", "millionen", "milliarde", "milliarden",
@@ -737,7 +740,10 @@ def _read_numbers(form: str, dropped: bool) -> str:
     words = form.split()
     atoms = [_word_atom(word, dropped) for word in words]
     for index, word in enumerate(words[:-1]):
-        if word in _GERMAN_ONE_WORDS and words[index + 1] in _GERMAN_SCALE_FOLLOWERS:
+        following = words[index + 1]
+        if (word in _GERMAN_ONE_WORDS and following in _GERMAN_SCALE_FOLLOWERS) or (
+            word == "ein" and following == "uhr"
+        ):
             atoms[index] = (_UNIT, 1)
     output: list[str] = []
     start = 0

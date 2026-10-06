@@ -214,6 +214,12 @@ def test_ein_and_eine_in_front_of_any_other_word_stay_the_article():
     assert equivalence_kind("eine Frau", "1 Frau") is EquivalenceKind.DIFFERENT
 
 
+def test_ein_uhr_is_one_o_clock_and_eine_uhr_is_a_clock():
+    """"Uhr" is feminine, so "ein Uhr" can only be the time."""
+    assert equivalence_kind("um ein Uhr", "um 1 Uhr") is EquivalenceKind.NUMBER_FORMAT
+    assert equivalence_kind("eine Uhr", "1 Uhr") is EquivalenceKind.DIFFERENT
+
+
 def test_the_bare_scale_words_are_still_not_numbers():
     assert read_number("hundert") is None
     assert read_number("tausend") is None

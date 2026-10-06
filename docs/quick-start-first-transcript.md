@@ -8,6 +8,10 @@ Before you start, set up your API keys. Read
 ## What you need
 
 - VoxVerbatim, with your API keys set up.
+- Python 3.11 or newer, from <https://www.python.org/downloads/windows/>.
+  When you install it, tick **Add python.exe to PATH**. You do not need
+  Python if somebody sent you a VoxVerbatim folder that contains
+  **VoxVerbatim.exe**.
 - A recording in one of these formats: `.m4a`, `.mp3`, `.wav` or `.flac`.
 - A connection to the internet.
 
@@ -16,10 +20,15 @@ It is fast and it costs very little.
 
 ## Step 1: Start VoxVerbatim
 
-Double-click **VoxVerbatim.cmd**.
+Double-click **VoxVerbatim.cmd**. If somebody sent you a VoxVerbatim
+folder, double-click **VoxVerbatim.exe** in it instead.
 
-The first time, this takes about 1 minute. VoxVerbatim downloads the
-parts it needs. After that, it starts immediately.
+If Windows shows "Windows protected your PC", select **More info**, then
+**Run anyway**.
+
+The first time you use **VoxVerbatim.cmd**, it takes about 1 minute,
+because it downloads the parts it needs. After that, it starts
+immediately.
 
 ## Step 2: Open the folder with your recording
 
@@ -54,9 +63,9 @@ All of these are optional. Good answers give a better transcript.
 
 | Box | What to type |
 | --- | --- |
-| **Afrikaans may be spoken in these recordings** | Tick this only if a person in the recording can speak Afrikaans. Otherwise, leave it clear. |
+| **Afrikaans may be spoken in these recordings** | Tick this only if some of the speech in the recording can be in Afrikaans. Otherwise, leave it clear. This makes the run cheaper and more accurate. |
 | **Expected number of speakers** | The number of people who speak in the recording. |
-| **Known speaker names** | The names of the people, if you know them. |
+| **Known speaker names** | The names of the people, if you know them. Put a comma between the names. |
 | **Recording context** | One sentence about the recording. For example: "A meeting about the new office lease." |
 | **Vocabulary profiles to use** | Tick the lists of special words that apply. On your first run, you will not have any. |
 
@@ -71,6 +80,11 @@ The real cost can be a little different.
 
 ## Step 7: Start the transcription
 
+When you select **Start**, VoxVerbatim first checks that everything is
+ready. If something is missing, such as a key, a message tells you what
+to do. VoxVerbatim sends nothing, and you pay nothing. Do what the message
+tells you, then select **Start** again.
+
 1. Select **Start**.
 2. A message asks "Start transcribing these recordings?" It shows the
    cost again.
@@ -79,17 +93,15 @@ The real cost can be a little different.
 **Note:** In this message, `Enter` selects **Cancel**. This prevents an
 accidental start. Use `Tab` to move to **Yes**, then press `Space`.
 
-If something is missing, such as a key, VoxVerbatim tells you before it
-sends anything. You do not pay for a run that cannot finish. Do what the
-message tells you, then start again.
-
 ## Step 8: Wait for the transcription to finish
 
 A progress bar and a sentence show what VoxVerbatim is doing. A short
 recording takes a few minutes. A long recording takes longer.
 
-To stop, select **Cancel**. VoxVerbatim keeps the work it has done. It
-marks the transcript as incomplete.
+To stop, select **Cancel**. VoxVerbatim stops after the current request.
+This can take a few minutes. You still pay for the requests that it
+already sent. VoxVerbatim keeps the work it has done, and the review
+report says that the transcript is incomplete.
 
 ## Step 9: Read your transcript
 
@@ -126,13 +138,27 @@ VoxVerbatim never guesses numbers, amounts or dates. You must decide.
 To decide, use the review window:
 
 1. Press `Ctrl+R`, or select **Open review window**.
-2. Select an item. VoxVerbatim plays that part of the recording.
-3. Do one of these:
-   - If the word is correct, press `F4`. VoxVerbatim goes to the next
-     item automatically.
-   - If the word is wrong, type the correct word.
-4. To move without a decision, press `F3` for the next item, or
-   `Shift+F3` for the one before. Press `F5` to hear the item again.
+2. Go to the **Occurrences** list (`Alt+O`). Select an occurrence.
+   VoxVerbatim plays that part of the recording. Press `F5` to hear it
+   again.
+3. Go to **What was said**. It shows what each service heard. The
+   **Chosen** column shows the word that VoxVerbatim keeps if you
+   confirm it.
+4. Do one of these:
+   - If the chosen word is correct, press `F4`. VoxVerbatim goes to the
+     next occurrence automatically.
+   - If a different candidate is correct, select it in **What was said**.
+     Select **Use this candidate**. Then select **Apply to this
+     occurrence only**.
+   - If no candidate is correct, press `F2` and type the correct word in
+     **Replacement**. Then select **Apply to this occurrence only**.
+5. To move without a decision, press `F3` for the next occurrence, or
+   `Shift+F3` for the occurrence before.
+
+**Caution:** If you press `Enter` in **Replacement**, or select **Apply
+to this word**, VoxVerbatim changes every occurrence of this word, in all
+the recordings in the folder. Use this only when the same word is wrong
+in each place. VoxVerbatim tells you how many places it will change.
 
 You do not need to save. VoxVerbatim saves each change immediately.
 

@@ -56,14 +56,14 @@ The site shows the key only one time. If you lose it, make a new key.
 ## Step 3: Open the Settings dialog
 
 1. Start VoxVerbatim.
-2. Press `Ctrl+,` (Control and comma). Or, select **File**, then
-   **Settings...**.
+2. Select **File**, then **Settings...**. With the keyboard, press
+   `Alt+F`, then `S`.
 
 The Settings dialog opens. The focus is on the category list at the
 left. Use the `Up` and `Down` arrow keys to move between categories. The
 page for the category shows at the right. Press `Tab` to go into the page.
 
-## Step 4: Type the ElevenLabs key
+## Step 4: Paste the ElevenLabs key
 
 1. In the category list, select **ElevenLabs**.
 2. Make sure that **Use ElevenLabs Scribe** is ticked.
@@ -74,7 +74,7 @@ The key shows as dots. To see the key, tick **Show the key**.
 Below the boxes, a sentence tells you the state of the service. When the
 key is in place, it says "ElevenLabs Scribe is switched on and is set up."
 
-## Step 5: Type the OpenAI key
+## Step 5: Paste the OpenAI key
 
 You type the same OpenAI key on 2 pages.
 
@@ -90,8 +90,8 @@ services do not agree on. This costs a little more for each run.
 
 If you do not want this, clear **Use OpenAI for adjudication**. Then you
 do not need a key on that page. The words that the services do not agree
-on wait for you to decide. The transcript tells you that adjudication was
-not used.
+on wait for you to decide. If there are such words, the review report
+(`review-report.md`) tells you that adjudication was not used.
 
 ## Step 6: Switch off the services you do not use
 
@@ -109,7 +109,8 @@ A service that is switched off is never used, and you do not pay for it.
 ## Step 7: Check that everything is ready
 
 1. In the category list, select **Transcription**.
-2. Read the sentence about what a run needs.
+2. Go to **Before a run can be made**, at the bottom of the page. Read
+   the sentence there.
 
 If everything is correct, it says "Everything a run needs is set up."
 

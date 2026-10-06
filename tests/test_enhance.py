@@ -343,6 +343,68 @@ def test_cancelling_stops_the_run_and_leaves_no_half_written_file(tmp_path, opti
     assert not (options.output_folder / "quiet.wav").exists()
 
 
+def test_cancelling_a_replace_part_way_through_keeps_the_previous_copy(tmp_path):
+    """The run is stopped while the new copy is being written, not before."""
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0, seconds=4.0)
+    folder = tmp_path / "enhanced"
+    folder.mkdir()
+    previous = folder / "quiet.wav"
+    previous.write_bytes(b"the previous enhanced copy")
+    options = EnhanceOptions(output_folder=folder, replace_existing=True)
+    writing: list[float] = []
+
+    def note(fraction: float) -> None:
+        # Past halfway is the second pass, which writes the file.
+        if 0.5 < fraction < 1.0:
+            writing.append(fraction)
+
+    result = enhance_file(source, options, progress=note, cancelled=lambda: bool(writing))
+
+    assert writing, "the run must be cancelled while the file is being written"
+    assert result.outcome == Outcome.CANCELLED
+    assert previous.read_bytes() == b"the previous enhanced copy"
+    assert sorted(path.name for path in folder.iterdir()) == ["quiet.wav"]
+
+
+def test_a_failed_replace_keeps_the_previous_copy(tmp_path, monkeypatch):
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0)
+    folder = tmp_path / "enhanced"
+    folder.mkdir()
+    previous = folder / "quiet.wav"
+    previous.write_bytes(b"the previous enhanced copy")
+    options = EnhanceOptions(output_folder=folder, replace_existing=True)
+
+    def refuse(_source, _destination):
+        raise PermissionError("The file is open in another program")
+
+    monkeypatch.setattr("vox_verbatim.audio.enhance.os.replace", refuse)
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.FAILED
+    assert previous.read_bytes() == b"the previous enhanced copy"
+    assert sorted(path.name for path in folder.iterdir()) == ["quiet.wav"]
+
+
+def test_a_completed_replace_takes_the_place_of_the_previous_copy(tmp_path):
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0)
+    folder = tmp_path / "enhanced"
+    folder.mkdir()
+    previous = folder / "quiet.wav"
+    previous.write_bytes(b"the previous enhanced copy")
+    options = EnhanceOptions(output_folder=folder, replace_existing=True)
+
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.ENHANCED, result.message
+    assert result.output == previous
+    assert previous.read_bytes() != b"the previous enhanced copy"
+    assert previous.read_bytes()[:4] == b"RIFF"
+    assert sorted(path.name for path in folder.iterdir()) == ["quiet.wav"]
+
+
 def test_a_mono_recording_keeps_its_single_channel(tmp_path, options):
     """The channel arrangement is not something this is allowed to change."""
     import av

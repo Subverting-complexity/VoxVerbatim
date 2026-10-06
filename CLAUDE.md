@@ -31,3 +31,11 @@ Treat accessibility failures as functional bugs. Where there is a choice between
 Always fetch https://www.assemblyai.com/docs/llms.txt before writing AssemblyAI code.
 The API has changed — do not rely on memorized parameter names.
 
+
+## Supplementary Files
+
+| File | Purpose |
+| ---- | ------- |
+| `ClaudeProject.md` | Settings for the synergy plugin: identity, quality gate, branch convention, issue fields |
+| `docs/review.config.md` | PR review labels, merge rules and review checks |
+| `.claude/ecosystem.md` | Companion tools available to Claude Code |

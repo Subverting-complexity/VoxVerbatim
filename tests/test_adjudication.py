@@ -308,6 +308,39 @@ def test_a_reading_re_spelled_from_the_vocabulary_credits_the_service_that_heard
     ]
 
 
+def test_a_reading_offered_as_a_phrase_credits_the_service_that_offered_it():
+    """A reading of several words is often one candidate on each of its words."""
+    offered = (("ice cream", Provider.ELEVENLABS), ("I scream", Provider.OPENAI))
+    dispute = Dispute(
+        tokens=(
+            word("ice", identifier="tok-300", start=5.0, end=5.3, candidates=offered),
+            word("cream", identifier="tok-301", start=5.3, end=5.7, candidates=offered),
+        ),
+        preceding_text="we all",
+        following_text="for dessert",
+    )
+    client = FakeClient(answer(decision("tok-300", "replace", "ice cream", "I scream")))
+    outcome = build_adjudicator(client).adjudicate([dispute])
+
+    assert outcome.refused == ()
+    assert [token.text for token in dispute.tokens] == ["I", "scream"]
+    assert [token.text_source for token in dispute.tokens] == [
+        Provider.OPENAI,
+        Provider.OPENAI,
+    ]
+
+
+def test_an_edit_that_is_put_back_restores_the_service_too(plain_dispute, monkeypatch):
+    """The identity check puts the words back, and their credit goes back with them."""
+    identities = iter([("before",), ("after",)])
+    monkeypatch.setattr(adjudication_module, "_identity_of", lambda token: next(identities))
+    client = FakeClient(answer(decision("tok-200", "replace", "affect", "effect")))
+    build_adjudicator(client).adjudicate([plain_dispute])
+
+    assert plain_dispute.tokens[0].text == "affect"
+    assert plain_dispute.tokens[0].text_source is Provider.ELEVENLABS
+
+
 def test_a_reading_only_the_vocabulary_offered_credits_no_service(name_dispute):
     client = FakeClient(
         answer(decision("tok-101", "replace", "Jurgen Miller", "Jurgen Smit"))
@@ -750,6 +783,13 @@ def test_a_parameter_with_token_in_its_name_is_not_taken_for_a_secret():
             "client_secret": API_KEY,
             "password": API_KEY,
             "Authorization": API_KEY,
+            "accessToken": API_KEY,
+            "authToken": API_KEY,
+            "clientSecret": API_KEY,
+            "openaiApiKey": API_KEY,
+            "secretKey": API_KEY,
+            "sessiontoken": API_KEY,
+            "maxOutputTokens": 500,
             "nested": {"token": API_KEY, "max_output_tokens": 10},
         }
     )
@@ -757,6 +797,7 @@ def test_a_parameter_with_token_in_its_name_is_not_taken_for_a_secret():
     assert cleaned == {
         "max_output_tokens": 2000,
         "keywords": ["a"],
+        "maxOutputTokens": 500,
         "nested": {"max_output_tokens": 10},
     }
 

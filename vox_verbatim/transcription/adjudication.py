@@ -104,9 +104,11 @@ SCHEMA_NAME = "transcript_adjudication"
 #: these is dropped before a request is written into provenance, because a
 #: transcript folder is copied around and read by people.
 _CREDENTIAL_NAMES = ("api_key", "apikey", "key", "token", "secret", "password", "authorization")
-"""Matched against a parameter name and against each word in it, never as a
-substring: ``max_output_tokens`` contains "token" but is a length, and a
-provenance record without it cannot say what was sent."""
+"""Matched against the end of each word of a parameter name, never anywhere
+inside it: ``max_output_tokens`` contains "token" but is a length, and a
+provenance record without it cannot say what was sent. Words are split at
+punctuation and at camelCase, and a word only has to end with a name, so
+``accessToken``, ``openaiApiKey`` and ``sessiontoken`` are still removed."""
 
 
 class AdjudicationUnavailable(Exception):
@@ -1095,6 +1097,7 @@ def _write_text(dispute: Dispute, action: EditAction, to_text: str, reason: str)
     """
     before = [_identity_of(token) for token in dispute.tokens]
     previous = [token.text for token in dispute.tokens]
+    previous_sources = [token.text_source for token in dispute.tokens]
     previous_text = " ".join(word for word in previous if word)
     words = to_text.split() if action is EditAction.REPLACE else previous
     # Written where a person reviewing the word will read it, so it says what
@@ -1106,6 +1109,11 @@ def _write_text(dispute: Dispute, action: EditAction, to_text: str, reason: str)
         else f"Kept {previous_text!r}."
     )
 
+    offered_by = (
+        _service_that_offered_phrase(to_text, dispute)
+        if action is EditAction.REPLACE
+        else None
+    )
     for token, word in zip(dispute.tokens, words):
         if action is EditAction.REPLACE and word != token.text:
             token.text = word
@@ -1113,7 +1121,7 @@ def _write_text(dispute: Dispute, action: EditAction, to_text: str, reason: str)
             # The transcript says which service each answer came from, and
             # the service that read the word before has just lost. A reading
             # only the vocabulary offered came from no service at all.
-            token.text_source = _service_that_offered(word, token, dispute)
+            token.text_source = offered_by or _service_that_offered(word, token, dispute)
         # Adjudicated, not proven. The model weighed evidence a rule could
         # not, which is worth more than an unresolved word and less than a
         # person's own reading. So the word improves as far as "review
@@ -1134,11 +1142,29 @@ def _write_text(dispute: Dispute, action: EditAction, to_text: str, reason: str)
 
     after = [_identity_of(token) for token in dispute.tokens]
     if after != before:
-        for token, original in zip(dispute.tokens, previous):
+        for token, original, source in zip(dispute.tokens, previous, previous_sources):
             token.text = original
             token.normalised_text = normalise(original)
+            token.text_source = source
         return False
     return True
+
+
+def _service_that_offered_phrase(to_text: str, dispute: Dispute) -> Provider | None:
+    """The first service that offered the whole chosen reading, or None.
+
+    Reconciliation often keeps a reading of several words as one candidate,
+    such as "I scream", on every word it covers. No single word of it equals
+    that candidate, so the whole reading is looked for first.
+    """
+    for token in dispute.tokens:
+        for candidate in token.candidates:
+            if candidate.providers and are_equivalent(candidate.text, to_text):
+                return candidate.providers[0]
+    heard = " ".join(word.text for word in dispute.escalation_tokens if word.text)
+    if dispute.escalation_tokens and are_equivalent(heard, to_text):
+        return dispute.escalation_tokens[0].provider
+    return None
 
 
 def _service_that_offered(word: str, token: FinalToken, dispute: Dispute) -> Provider | None:
@@ -1273,9 +1299,9 @@ def without_credentials(parameters: dict[str, Any]) -> dict[str, Any]:
     """
     cleaned: dict[str, Any] = {}
     for key, value in parameters.items():
-        lowered = str(key).lower()
-        words = re.split(r"[^a-z0-9]+", lowered)
-        if lowered in _CREDENTIAL_NAMES or any(word in _CREDENTIAL_NAMES for word in words):
+        name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key)).lower()
+        words = [word for word in re.split(r"[^a-z0-9]+", name) if word]
+        if any(word.endswith(_CREDENTIAL_NAMES) for word in words):
             continue
         cleaned[key] = without_credentials(value) if isinstance(value, dict) else value
     return cleaned

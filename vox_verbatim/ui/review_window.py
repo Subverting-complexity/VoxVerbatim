@@ -2205,7 +2205,7 @@ class ReviewWindow(QMainWindow):
         )
         item_menu.addSeparator()
         self._confirm_timing_action = self._add_action(
-            item_menu, "Confirm the T&iming", None, lambda: self.decide_timing(True)
+            item_menu, "Confirm the &Timing", None, lambda: self.decide_timing(True)
         )
         self._reject_timing_action = self._add_action(
             item_menu, "&Reject the Timing", None, lambda: self.decide_timing(False)
@@ -2256,13 +2256,13 @@ class ReviewWindow(QMainWindow):
             view_menu,
             "Widen the &Lists",
             QKeySequence("Ctrl+Shift+Left"),
-            lambda: self.adjust_divider(-1),
+            lambda: self.adjust_divider(1),
         )
         self._widen_details_action = self._add_action(
             view_menu,
             "Widen the &Details",
             QKeySequence("Ctrl+Shift+Right"),
-            lambda: self.adjust_divider(1),
+            lambda: self.adjust_divider(-1),
         )
         view_menu.addSeparator()
         self._show_reviewed_action = self._add_toggle(
@@ -2542,7 +2542,9 @@ class ReviewWindow(QMainWindow):
         could not be done without a mouse at all.
 
         The step is a tenth of the window, which is big enough to be worth a
-        keystroke and small enough to be steered by.
+        keystroke and small enough to be steered by. A positive direction
+        widens the lists, which sit on the left; a negative one widens the
+        detail panel.
         """
         sizes = self._splitter.sizes()
         if len(sizes) != 2 or sum(sizes) <= 0:
@@ -3855,12 +3857,37 @@ class ReviewWindow(QMainWindow):
         played instead. The original is the fallback rather than the first
         choice, for when the copy is a working file that has since been
         cleared away.
+
+        The path saved in the transcript is absolute, so it goes stale as
+        soon as the folder is moved, copied to another drive or restored from
+        a backup. Trusting it without looking made every play fail with the
+        recording sitting right beside its transcript. So the saved path is
+        used only where the file is still there. Otherwise the copy is looked
+        for where it would be now: in the transcript folder of the same name
+        beside the recording, then beside the recording itself. Only then
+        does the original come in. The transcript folder is matched by the
+        saved folder's name rather than rebuilt from the suffix setting,
+        because the suffix may have changed since the transcript was made.
+
+        Where nothing is found anywhere, the saved path is returned as before,
+        so the message about the file that could not be opened still names
+        the file the timestamps belong to.
         """
         transcript = self._transcript(recording_name)
         audio = transcript.canonical_audio if transcript is not None else None
-        if audio is not None and audio.path:
-            return Path(audio.path)
-        return self._recording_paths.get(recording_name)
+        recording = self._recording_paths.get(recording_name)
+        if audio is None or not audio.path:
+            return recording
+        stored = Path(audio.path)
+        candidates = [stored]
+        if recording is not None:
+            beside = recording.parent
+            candidates += [beside / stored.parent.name / stored.name, beside / stored.name]
+            candidates.append(recording)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return stored
 
     def _start_automatic_playback(self) -> None:
         """Line up the audio for the occurrence just landed on.

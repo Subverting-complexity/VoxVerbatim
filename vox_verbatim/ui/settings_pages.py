@@ -271,16 +271,29 @@ class SettingsPage(QWidget):
         is deliberate. A new service added a year from now gets both checks
         without anybody remembering to ask for them, and a service whose
         author forgot would otherwise fail silently.
+
+        Required names are only checked while :meth:`requires_texts` says
+        so. Broken JSON is always reported, because it is lost on saving
+        whether or not anything reads it.
         """
         found: list[Problem] = []
         for box in self._parameter_boxes:
             _, message = parse_parameters(box.toPlainText(), self._parameter_titles[box])
             if message:
                 found.append(Problem(message, box))
-        for edit, message in self._required_texts:
-            if not edit.text().strip():
-                found.append(Problem(message, edit))
+        if self.requires_texts():
+            for edit, message in self._required_texts:
+                if not edit.text().strip():
+                    found.append(Problem(message, edit))
         return found
+
+    def requires_texts(self) -> bool:
+        """Whether an empty required name has to stop OK closing.
+
+        Most pages are always in use, so the answer is yes. A page for a
+        service that can be switched off answers for itself.
+        """
+        return True
 
     # -- Building controls -------------------------------------------------
 
@@ -479,6 +492,10 @@ class ProviderPage(SettingsPage):
     page without this file being touched.
     """
 
+    #: The box that switches the service on and off. Every service page
+    #: builds one, because every service section of the settings has one.
+    _enabled_box: QCheckBox
+
     def __init__(self, category: str, service_name: str, parent: QWidget | None = None) -> None:
         super().__init__(category, parent)
         self.service_name = service_name
@@ -505,6 +522,18 @@ class ProviderPage(SettingsPage):
             f"{self.service_name} is switched on but is not set up. It needs "
             f"{section.requirements}."
         )
+
+    def requires_texts(self) -> bool:
+        """Only while the service is switched on.
+
+        A service that is switched off is never called, so a name it would
+        need for a request does not matter. Refusing to save over it would
+        trap somebody who cleared a box on a service they do not use: the
+        only way out would be to type a model name for that service. The
+        empty name is replaced by the default the next time the settings are
+        loaded, which is what that person needs if they switch it on later.
+        """
+        return self._enabled_box.isChecked()
 
     def refresh_status(self) -> None:
         self._status_label.setText(self.status_message())

@@ -155,6 +155,9 @@ class SettingsDialog(QDialog):
         self._note_keys: dict[QWidget, str] = {}
         self._showing_note: str | None = None
         self._watching_focus = False
+        # The control that OK found a problem in, while the problem is on
+        # show in the note panel. See _report.
+        self._problem_widget: QWidget | None = None
 
         self._pages: list[SettingsPage] = build_pages(self._vocabulary, statistics)
         self._pages_by_category = {page.category: page for page in self._pages}
@@ -492,7 +495,17 @@ class SettingsDialog(QDialog):
         Focus that belongs to nothing in particular, including the note
         panel itself, leaves the note where it is. That is what lets the
         note be read: moving into it to read it must not change it.
+
+        A problem reported by OK stays on show while the focus is on the
+        control that holds it, because _report puts the focus there and the
+        control's own note would otherwise replace the problem at once. The
+        first move anywhere else lets the notes follow the focus again.
         """
+        problem = self._problem_widget
+        if problem is not None:
+            if new is not None and (new is problem or problem.isAncestorOf(new)):
+                return
+            self._problem_widget = None
         widget = new
         while widget is not None and widget is not self:
             key = self._note_keys.get(widget)
@@ -556,6 +569,11 @@ class SettingsDialog(QDialog):
         # Cleared so that moving back onto the offending control shows its
         # explanation again rather than deciding nothing has changed.
         self._showing_note = None
+        # Held until the focus leaves the control. Putting the focus there
+        # below would otherwise show the control's note over the problem
+        # straight away: a screen reader still hears the announcement, but
+        # sighted and ZoomText users would see OK do nothing at all.
+        self._problem_widget = problem.widget
         problem.widget.setFocus(Qt.FocusReason.OtherFocusReason)
         announce(problem.widget, problem.message, urgent=True)
 

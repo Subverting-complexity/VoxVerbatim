@@ -343,6 +343,97 @@ def test_cancelling_stops_the_run_and_leaves_no_half_written_file(tmp_path, opti
     assert not (options.output_folder / "quiet.wav").exists()
 
 
+def test_cancelling_a_replace_part_way_through_keeps_the_previous_copy(tmp_path):
+    """The run is stopped while the new copy is being written, not before."""
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0, seconds=4.0)
+    folder = tmp_path / "enhanced"
+    folder.mkdir()
+    previous = folder / "quiet.wav"
+    previous.write_bytes(b"the previous enhanced copy")
+    options = EnhanceOptions(output_folder=folder, replace_existing=True)
+    writing: list[float] = []
+
+    def note(fraction: float) -> None:
+        # Past halfway is the second pass, which writes the file.
+        if 0.5 < fraction < 1.0:
+            writing.append(fraction)
+
+    result = enhance_file(source, options, progress=note, cancelled=lambda: bool(writing))
+
+    assert writing, "the run must be cancelled while the file is being written"
+    assert result.outcome == Outcome.CANCELLED
+    assert previous.read_bytes() == b"the previous enhanced copy"
+    assert sorted(path.name for path in folder.iterdir()) == ["quiet.wav"]
+
+
+def test_a_failed_replace_keeps_the_previous_copy(tmp_path, monkeypatch):
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0)
+    folder = tmp_path / "enhanced"
+    folder.mkdir()
+    previous = folder / "quiet.wav"
+    previous.write_bytes(b"the previous enhanced copy")
+    options = EnhanceOptions(output_folder=folder, replace_existing=True)
+
+    def refuse(_source, _destination):
+        raise PermissionError("The file is open in another program")
+
+    monkeypatch.setattr("vox_verbatim.audio.enhance.os.replace", refuse)
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.FAILED
+    assert previous.read_bytes() == b"the previous enhanced copy"
+    assert sorted(path.name for path in folder.iterdir()) == ["quiet.wav"]
+
+
+def test_a_completed_replace_takes_the_place_of_the_previous_copy(tmp_path):
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0)
+    folder = tmp_path / "enhanced"
+    folder.mkdir()
+    previous = folder / "quiet.wav"
+    previous.write_bytes(b"the previous enhanced copy")
+    options = EnhanceOptions(output_folder=folder, replace_existing=True)
+
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.ENHANCED, result.message
+    assert result.output == previous
+    assert previous.read_bytes() != b"the previous enhanced copy"
+    assert previous.read_bytes()[:4] == b"RIFF"
+    assert sorted(path.name for path in folder.iterdir()) == ["quiet.wav"]
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_the_unfinished_file_never_writes_over_a_recording(tmp_path, cancel):
+    """The temporary name is a fresh one, never a file already in the folder.
+
+    With the output folder set to the recordings folder, a fixed temporary
+    name such as quiet.unfinished.wav could be a recording, which would be
+    written over and then renamed or deleted.
+    """
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0, seconds=4.0)
+    recording = tmp_path / "quiet.unfinished.wav"
+    recording.write_bytes(b"a recording that happens to have this name")
+    options = EnhanceOptions(output_folder=tmp_path, replace_existing=True)
+    writing: list[float] = []
+
+    def note(fraction: float) -> None:
+        if 0.5 < fraction < 1.0:
+            writing.append(fraction)
+
+    result = enhance_file(
+        source, options, progress=note, cancelled=lambda: cancel and bool(writing)
+    )
+
+    assert result.outcome == (Outcome.CANCELLED if cancel else Outcome.ENHANCED)
+    assert recording.read_bytes() == b"a recording that happens to have this name"
+    expected = ["quiet.m4a", "quiet.unfinished.wav"] + ([] if cancel else ["quiet.wav"])
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(expected)
+
+
 def test_a_mono_recording_keeps_its_single_channel(tmp_path, options):
     """The channel arrangement is not something this is allowed to change."""
     import av

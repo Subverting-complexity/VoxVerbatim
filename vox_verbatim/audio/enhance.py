@@ -46,6 +46,7 @@ import enum
 import logging
 import math
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -346,9 +347,15 @@ def enhance_file(
         ceiling = 10 ** (options.ceiling_dbtp / 20.0)
         filters.append(("alimiter", f"limit={ceiling:.6f}:level=disabled"))
 
+    # The file is written under a temporary name and only takes the real
+    # name once it is complete. Writing straight to the real name would
+    # empty an earlier enhanced copy the moment the file was opened, so a
+    # run that was cancelled or failed part-way through would lose it.
+    unfinished: Path | None = None
     try:
         options.output_folder.mkdir(parents=True, exist_ok=True)
-        with av.open(str(output), "w") as destination:
+        unfinished = _unfinished_path_for(output)
+        with av.open(str(unfinished), "w") as destination:
             written = _run_pass(
                 source,
                 filters=tuple(filters),
@@ -356,11 +363,13 @@ def enhance_file(
                 progress=lambda fraction: report(0.5 + fraction * 0.5),
                 cancelled=stop_requested,
             )
+        os.replace(unfinished, output)
     except _Cancelled:
-        _remove_partial(output)
+        _remove_partial(unfinished)
         return _cancelled_result(source)
     except (OSError, IndexError, av.FFmpegError) as error:
-        _remove_partial(output)
+        if unfinished is not None:
+            _remove_partial(unfinished)
         return _failed_result(source, "could not be written", error)
 
     report(1.0)
@@ -529,6 +538,22 @@ def _cancelled_result(source: Path) -> FileResult:
         outcome=Outcome.CANCELLED,
         message=f"{source.name} was stopped before it finished, and was not written.",
     )
+
+
+def _unfinished_path_for(output: Path) -> Path:
+    """Create the empty file ``output`` is written to until it is complete.
+
+    It sits in the same folder, so that moving it into place is a rename
+    rather than a copy, and it keeps the extension, because FFmpeg picks
+    the container from the extension. The name is one that did not exist
+    a moment ago: the output folder may be the recordings folder, and a
+    fixed name could be a recording, which would then be written over.
+    """
+    handle, name = tempfile.mkstemp(
+        prefix=f"{output.stem}.unfinished-", suffix=output.suffix, dir=output.parent
+    )
+    os.close(handle)
+    return Path(name)
 
 
 def _remove_partial(output: Path) -> None:

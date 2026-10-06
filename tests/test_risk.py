@@ -280,3 +280,17 @@ def test_the_german_verb_achten_is_not_an_eighth() -> None:
     assert risk_at(["wir", "müssen", "darauf", "achten"], 3) == ()
     assert risk_at(["ich", "achte", "darauf"], 1) == ()
     assert RiskCategory.DATE in risk_at(["am", "achten", "Mai"], 1)
+
+
+def test_the_german_articles_ein_and_eine_are_not_quantities() -> None:
+    """Every "ein" and "eine" in a German recording is not a number to check."""
+    assert not is_numeric("ein")
+    assert not is_numeric("eine")
+    assert not is_numeric("Eine")
+    assert risk_at(["das", "ist", "eine", "gute", "Idee"], 2) == ()
+    assert RiskCategory.QUANTITY not in risk_at(["ein", "Haus"], 0)
+
+
+@pytest.mark.parametrize("text", ["eins", "einundzwanzig", "einhundert", "eintausend", "zwei"])
+def test_eins_and_german_compounds_that_start_with_ein_are_numbers(text: str) -> None:
+    assert is_numeric(text)

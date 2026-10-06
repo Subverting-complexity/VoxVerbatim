@@ -3403,6 +3403,57 @@ def test_landing_silently_leaves_the_announcement_to_the_caller(qapp, tmp_path, 
         window.close()
 
 
+def test_landing_silently_on_another_word_says_nothing_and_plays_nothing(
+    qapp, tmp_path, monkeypatch
+):
+    """Moving word is what announced the row and started its audio before."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "15,000")
+        window._play_timer.stop()
+        said.clear()
+
+        assert window.select_recording(OTHER_RECORDING, announce_arrival=False) is True
+
+        assert window.current_row().key == group_row(window, "Bosch").key
+        assert said == []
+        assert not window._play_timer.isActive()
+    finally:
+        window.close()
+
+
+def test_a_correction_that_moves_to_another_word_names_that_word(
+    qapp, tmp_path, monkeypatch
+):
+    """Somebody still in the Replacement box must hear which word they are on."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        corrected = window.current_row().key
+        said.clear()
+
+        window.correct_word_as_detected()
+
+        row = window.current_row()
+        assert row is not None and row.key != corrected
+        assert len(said) == 1
+        assert f"Now on {review_window_module.spoken_group_summary(row)}" in said[0]
+    finally:
+        window.close()
+
+
 # -- Being left in an empty table -----------------------------------------
 
 

@@ -2984,8 +2984,16 @@ class ReviewWindow(QMainWindow):
                 if occurrence.recording_name != recording_name:
                     continue
                 position = self._group_model.row_for_key(row.key)
-                self._groups.select_row(position)
-                self._show_group(row, occurrence.id)
+                # Moving to another word announces it and can start its audio,
+                # which would talk over the caller's own sentence, so a silent
+                # landing is made quietly.
+                quiet = self._quiet
+                self._quiet = quiet or not announce_arrival
+                try:
+                    self._groups.select_row(position)
+                    self._show_group(row, occurrence.id)
+                finally:
+                    self._quiet = quiet
                 note = self._take_focus_note()
                 if announce_arrival:
                     announce(self._groups, f"{spoken_group_summary(row)}{note}")
@@ -4806,10 +4814,14 @@ class ReviewWindow(QMainWindow):
 
         ``word_key`` and ``occurrence_id`` move the selection somewhere other
         than where it was. ``from_word_key`` is the word the change was made
-        on: when the selection has ended up on a different word, that word is
-        named before its occurrence, because the occurrence alone does not
-        tell a screen reader user that they have moved to another word.
+        on, and is the selected word when the caller does not name one: when
+        the selection has ended up on a different word, that word is named
+        before its occurrence, because the occurrence alone does not tell a
+        screen reader user, still in the Replacement box, that they have moved
+        to another word.
         """
+        if from_word_key is None:
+            from_word_key = self._selected_group_key
         saved = self._save_project(quiet=True)
         self.refresh(word_key, occurrence_id)
         occurrence = self.current_occurrence()

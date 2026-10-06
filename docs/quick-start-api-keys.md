@@ -82,11 +82,16 @@ You type the same OpenAI key on 2 pages.
 2. Make sure that **Use OpenAI for transcription** is ticked.
 3. Go to the **API key** box. Paste your OpenAI key.
 4. In the category list, select **OpenAI adjudication**.
-5. Go to the **API key** box. Paste the same OpenAI key.
+5. Make sure that **Use OpenAI for adjudication** is ticked.
+6. Go to the **API key** box. Paste the same OpenAI key.
 
 The second page is for the model that decides between words that the
-services do not agree on. If you do not want this, do not type a key on
-that page. Then do step 7 as well.
+services do not agree on. This costs a little more for each run.
+
+If you do not want this, clear **Use OpenAI for adjudication**. Then you
+do not need a key on that page. The words that the services do not agree
+on wait for you to decide. The transcript tells you that adjudication was
+not used.
 
 ## Step 6: Switch off the services you do not use
 
@@ -111,10 +116,14 @@ If everything is correct, it says "Everything a run needs is set up."
 If not, it tells you what is missing. Do what it says. For example:
 
 - "ElevenLabs Scribe is switched on but is not set up." Do step 4 again.
-- "Adjudication is switched on but is not set up." Do step 5 again, or
-  clear **Let a reasoning model settle what is left** on this page. When
-  that box is clear, words that the services do not agree on wait for you
-  to decide.
+- "Adjudication is switched on but is not set up." Do step 5 again. Or,
+  if you do not want adjudication, clear **Use OpenAI for adjudication**
+  on the **OpenAI adjudication** page.
+
+**Note:** The **Transcription** page also has the box **Let a reasoning
+model settle what is left**. Adjudication occurs only when this box and
+**Use OpenAI for adjudication** are both ticked. Clear either box to stop
+it.
 
 ## Step 8: Save
 

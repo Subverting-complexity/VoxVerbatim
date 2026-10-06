@@ -128,10 +128,11 @@ To decide, use the review window:
 1. Press `Ctrl+R`, or select **Open review window**.
 2. Select an item. VoxVerbatim plays that part of the recording.
 3. Do one of these:
-   - If the word is correct, press `F4`.
+   - If the word is correct, press `F4`. VoxVerbatim goes to the next
+     item automatically.
    - If the word is wrong, type the correct word.
-4. Go to the next item. Press `F3` for the next one, or `Shift+F3` for
-   the one before. Press `F5` to hear it again.
+4. To move without a decision, press `F3` for the next item, or
+   `Shift+F3` for the one before. Press `F5` to hear the item again.
 
 You do not need to save. VoxVerbatim saves each change immediately.
 

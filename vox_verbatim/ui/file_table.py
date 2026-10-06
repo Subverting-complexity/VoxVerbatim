@@ -201,7 +201,7 @@ class AudioFileTableModel(QAbstractTableModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
             return COLUMN_TITLES[section]
         if role == Qt.ItemDataRole.ToolTipRole and section == COLUMN_NAME:
-            return "The check box marks a file for transcription in a later phase."
+            return "The check box selects a file for Enhance Audio and Transcribe."
         return None
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):

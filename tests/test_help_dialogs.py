@@ -121,3 +121,20 @@ def test_the_lists_are_called_words_rather_than_groups():
     assert "group" not in section.replace("grouping tolerance", "").replace(
         "Group the words again", ""
     )
+
+
+def test_no_user_facing_text_promises_a_later_phase():
+    """Transcription shipped, so text saying it is coming later is wrong.
+
+    The About box and the file list's tooltip both said so, and a screen
+    reader reads both aloud.
+    """
+    package = Path(review_window.__file__).resolve().parent.parent
+    stale = [
+        f"{path.relative_to(package)}:{number}"
+        for path in package.rglob("*.py")
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if re.search(r"later (phase|version)", line)
+    ]
+
+    assert stale == []

@@ -217,6 +217,18 @@ _COMPOUND_ONLY_UNITS: dict[str, int] = {
     "ein": 1,
 }
 
+#: The words in front of which a separate "ein" or "eine" is the number 1
+#: after all. "eine Million" is the ordinary German way to write a million,
+#: and "ein tausend" is a common enough way to write a thousand, so leaving
+#: the article out everywhere would make "eine Million" and "1 Million"
+#: disagree. A scale word cannot follow the article "a" in any other sense,
+#: so reading the article as 1 here costs nothing. Before any other word it
+#: stays the article.
+_GERMAN_ONE_WORDS = ("ein", "eine")
+_GERMAN_SCALE_FOLLOWERS = frozenset({
+    "hundert", "tausend", "million", "millionen", "milliarde", "milliarden",
+})
+
 #: Afrikaans "ag" for eight is deliberately left out. It is also the
 #: everyday interjection, and turning every sighed "ag" in a recording into
 #: the number 8 would be worse than missing the odd numeral. The standard
@@ -724,6 +736,9 @@ def _read_numbers(form: str, dropped: bool) -> str:
     """
     words = form.split()
     atoms = [_word_atom(word, dropped) for word in words]
+    for index, word in enumerate(words[:-1]):
+        if word in _GERMAN_ONE_WORDS and words[index + 1] in _GERMAN_SCALE_FOLLOWERS:
+            atoms[index] = (_UNIT, 1)
     output: list[str] = []
     start = 0
     while start < len(words):

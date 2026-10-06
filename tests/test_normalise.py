@@ -191,6 +191,29 @@ def test_eins_and_compounds_that_start_with_ein_are_still_numbers(words, digits)
     assert equivalence_kind(words, digits) is EquivalenceKind.NUMBER_FORMAT
 
 
+@pytest.mark.parametrize(
+    ("words", "digits"),
+    [
+        ("eine Million", "1 Million"),
+        ("eine Milliarde", "1 Milliarde"),
+        ("ein tausend", "1000"),
+        ("ein hundert", "100"),
+    ],
+)
+def test_ein_and_eine_in_front_of_a_scale_word_are_the_number_one(words, digits):
+    """"eine Million" is the ordinary German way to write a million.
+
+    A scale word cannot follow the article, so here "ein" and "eine" are the
+    number, and a service writing the words agrees with one writing digits.
+    """
+    assert equivalence_kind(words, digits) is EquivalenceKind.NUMBER_FORMAT
+
+
+def test_ein_and_eine_in_front_of_any_other_word_stay_the_article():
+    assert equivalence_kind("ein Haus", "1 Haus") is EquivalenceKind.DIFFERENT
+    assert equivalence_kind("eine Frau", "1 Frau") is EquivalenceKind.DIFFERENT
+
+
 def test_the_bare_scale_words_are_still_not_numbers():
     assert read_number("hundert") is None
     assert read_number("tausend") is None

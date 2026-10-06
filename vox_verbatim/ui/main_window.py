@@ -1684,9 +1684,14 @@ class MainWindow(QMainWindow):
             if focused is not None and (focused is panel or panel.isAncestorOf(focused)):
                 current_index = index
                 break
-        name, _panel, focus = panels[(current_index + 1) % len(panels)]
-        focus()
-        self._set_status(name, alert=True)
+        # A panel whose controls are all switched off answers False, and the
+        # next one along is tried, so the name read out is always the panel
+        # the focus actually reached.
+        for step in range(1, len(panels) + 1):
+            name, _panel, focus = panels[(current_index + step) % len(panels)]
+            if focus() is not False:
+                self._set_status(name, alert=True)
+                return
 
     def _focus_file_table(self) -> None:
         self._table.setFocus(Qt.FocusReason.TabFocusReason)

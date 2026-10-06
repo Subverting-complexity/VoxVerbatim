@@ -264,7 +264,7 @@ def speaker_turns(items: Iterable[Any]) -> list[SpeakerTurn]:
             continue
         if label != speaker and speaker is not None and start is not None and end is not None:
             turns.append(SpeakerTurn(speaker, AudioSpan(start, end), tuple(ids)))
-            start, ids = None, []
+            start, end, ids = None, None, []
         speaker = label
         start = first if start is None else min(start, first)
         end = last if end is None or last > end else end

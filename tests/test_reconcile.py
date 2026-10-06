@@ -14,6 +14,8 @@ Afrikaans is disabled.
 
 from __future__ import annotations
 
+import dataclasses
+
 from vox_verbatim.transcription.alignment import build_aligned_table
 from vox_verbatim.transcription.confidence import (
     HIGH_CONFIDENCE_THRESHOLD,
@@ -29,6 +31,7 @@ from vox_verbatim.transcription.model import (
     ProviderToken,
     RecordingConfiguration,
     ReviewReason,
+    ReviewStatus,
     RiskCategory,
     TimingStatus,
 )
@@ -1086,3 +1089,50 @@ def test_the_options_are_all_reachable_from_one_place() -> None:
     assert DEFAULT_OPTIONS.minimum_decision_margin > 0.0
     assert 0.0 < DEFAULT_OPTIONS.agreement_independence < 1.0
     assert DEFAULT_OPTIONS.vocabulary_misrecognition < 1.0 < DEFAULT_OPTIONS.vocabulary_exact
+
+
+# -- Audio events ----------------------------------------------------------
+
+
+def _laughing(texts: list[str]) -> ProviderResult:
+    """ElevenLabs' answer with "(laughter)" marked as an audio event."""
+    result = spoken(Provider.ELEVENLABS, texts)
+    tokens = [
+        dataclasses.replace(token, is_audio_event=True) if token.text == "(laughter)" else token
+        for token in result.tokens
+    ]
+    return dataclasses.replace(result, tokens=tokens)
+
+
+def test_an_audio_event_stays_in_the_transcript_unflagged() -> None:
+    backbone = _laughing(["so", "then", "(laughter)", "we", "left"])
+    table = table_of(
+        backbone,
+        spoken(Provider.OPENAI, ["so", "then", "we", "left"], timed=False),
+        spoken(Provider.DEEPGRAM, ["so", "then", "we", "left"], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert texts_of(tokens) == ["so", "then", "(laughter)", "we", "left"]
+    event = token_at(tokens, "(laughter)")
+    source = backbone.tokens[2]
+    assert event.review_status is ReviewStatus.SETTLED
+    assert not event.needs_review
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in event.review_reasons
+    assert (event.start, event.end) == (source.start, source.end)
+    assert event.timing_status is TimingStatus.EXACT_PROVIDER_TIME
+    assert all(not token.needs_review for token in tokens)
+
+
+def test_an_audio_event_before_the_first_word_comes_first() -> None:
+    table = table_of(
+        _laughing(["(laughter)", "so", "then"]),
+        spoken(Provider.OPENAI, ["so", "then"], timed=False),
+        spoken(Provider.DEEPGRAM, ["so", "then"], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert texts_of(tokens) == ["(laughter)", "so", "then"]
+    assert not tokens[0].needs_review

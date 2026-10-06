@@ -136,8 +136,11 @@ _EQUIVALENCE_DISPLAY_NAMES: dict[EquivalenceKind, str] = {
 # -- The characters that get unified -------------------------------------
 
 #: Every shape an apostrophe arrives in. Services differ, and so do the
-#: keyboards of the people who wrote the vocabulary lists. They are all
-#: dropped rather than replaced, so "don't" and "dont" meet.
+#: keyboards of the people who wrote the vocabulary lists. They are
+#: dropped rather than replaced, so "don't" and "dont" meet. The exception
+#: is a contraction whose apostrophe-free spelling is an ordinary word (see
+#: ``_LEFT_ALONE``): it keeps one straight apostrophe, so "we're" never
+#: meets "were".
 _APOSTROPHES = frozenset("'’‘ʼʹ‛′`´")
 
 #: Every shape a hyphen or a joining slash arrives in. These become spaces
@@ -372,7 +375,9 @@ _DROPPED_COMPOUND_ATOMS = _atom_table(dropped=True, compound=True)
 #
 # The apostrophe has already gone by the time these are used, so the keys
 # are the apostrophe-free spellings. That also means "dont" written without
-# its apostrophe is handled by the same entry, which is the point.
+# its apostrophe is handled by the same entry, which is the point. The
+# forms in ``_LEFT_ALONE`` keep their apostrophe, so they never reach this
+# table.
 
 _CONTRACTIONS: dict[str, str] = {
     "cannot": "can not",
@@ -415,8 +420,11 @@ _CONTRACTIONS: dict[str, str] = {
 #: are ordinary English words and expanding them would make two genuinely
 #: different words compare equal: "were" and "we're", "well" and "we'll",
 #: "shed" and "she'd", "ill" and "I'll", "hell" and "he'll", "id" and
-#: "I'd". The list is here so that nobody adds them back by accident.
-_LEFT_ALONE = ("were", "well", "shed", "hed", "wed", "id", "ill", "hell", "shell")
+#: "I'd". ``_plain_form`` keeps the apostrophe in these words, so they stay
+#: apart from the ordinary word, and nobody should add them to the table.
+_LEFT_ALONE = frozenset(
+    ("were", "well", "shed", "hed", "wed", "id", "ill", "hell", "shell")
+)
 
 #: "its" is in the table above even though it is also the possessive. That
 #: is on purpose: "its" and "it's" sound identical, so as *acoustic
@@ -500,12 +508,29 @@ def _plain_form(text: str) -> str:
         elif character in _DASHES:
             characters.append(" ")
         elif character in _APOSTROPHES:
-            continue
+            characters.append("'")
         elif unicodedata.category(character).startswith("P"):
             continue
         else:
             characters.append(character)
-    return " ".join("".join(characters).split())
+    return " ".join(_settle_apostrophes(word) for word in "".join(characters).split())
+
+
+def _settle_apostrophes(word: str) -> str:
+    """Drop a word's apostrophes, unless dropping them makes another word.
+
+    Apostrophes at either end are quote marks and always go, so "'were'"
+    still meets "were". An apostrophe inside the word goes too, so "don't"
+    meets "dont", except where the word without it is in ``_LEFT_ALONE``:
+    "we're" keeps its apostrophe, because "were" is a different word.
+    """
+    if "'" not in word:
+        return word
+    inner = word.strip("'")
+    joined = inner.replace("'", "")
+    if "'" in inner and joined in _LEFT_ALONE:
+        return inner
+    return joined
 
 
 @lru_cache(maxsize=100_000)

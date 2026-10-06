@@ -67,6 +67,41 @@ def test_punctuation_and_apostrophes_are_set_aside(first, second):
     assert equivalence_kind(first, second) is EquivalenceKind.PUNCTUATION_ONLY
 
 
+@pytest.mark.parametrize(
+    ("contraction", "word"),
+    [
+        ("we're", "were"),
+        ("we'll", "well"),
+        ("I'll", "ill"),
+        ("she'd", "shed"),
+        ("he'll", "hell"),
+        ("I'd", "id"),
+        ("she'll", "shell"),
+    ],
+)
+def test_a_contraction_that_spells_another_word_stays_apart(contraction, word):
+    assert equivalence_kind(contraction, word) is EquivalenceKind.DIFFERENT
+    assert not are_equivalent(contraction, word)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("we're", "we’re"), ("I'll", "I’ll"), ("we’ll", "weʼll")],
+)
+def test_the_shape_of_the_apostrophe_in_a_contraction_does_not_matter(first, second):
+    assert equivalence_kind(first, second) is EquivalenceKind.PUNCTUATION_ONLY
+
+
+def test_quote_marks_around_a_word_are_not_a_contraction():
+    assert equivalence_kind("'were'", "were") is EquivalenceKind.PUNCTUATION_ONLY
+    assert equivalence_kind("‘we're’", "we're") is EquivalenceKind.PUNCTUATION_ONLY
+
+
+def test_a_phrase_with_a_contraction_does_not_meet_the_ordinary_word():
+    assert normalise("we're going") != normalise("were going")
+    assert not are_equivalent("we're going", "were going")
+
+
 def test_punctuation_on_its_own_has_no_comparison_form():
     assert normalise(",") == ""
     assert is_punctuation_only(".")

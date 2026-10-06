@@ -88,3 +88,27 @@ def test_the_machine_is_held_awake_for_the_run_and_released_after(qapp, monkeypa
 
     awake = transcription_runner.ES_CONTINUOUS | transcription_runner.ES_SYSTEM_REQUIRED
     assert asked == [awake, transcription_runner.ES_CONTINUOUS]
+
+
+def test_closing_the_dialog_after_a_run_leaves_a_transcriptions_request_in_place(
+    qapp, monkeypatch, tmp_path
+):
+    """The run's end and stop() both withdraw, so only one of them may count.
+
+    Without the guard the second withdrawal takes the transcription run's
+    request, and the machine may sleep in the middle of a paid run.
+    """
+    monkeypatch.setattr(transcription_runner, "_awake_requests", 0)
+    monkeypatch.setattr(transcription_runner.sys, "platform", "linux")
+    monkeypatch.setattr(runner_module, "enhance_files", lambda *args, **kwargs: [])
+    transcription_runner.keep_system_awake(True)  # a transcription run in progress
+
+    runner = EnhanceRunner()
+    summaries: list = []
+    runner.runFinished.connect(summaries.append)
+    runner.start([Path(tmp_path / "alpha.m4a")], EnhanceOptions(output_folder=tmp_path / "out"))
+    assert wait_until(qapp, lambda: bool(summaries))
+    runner.stop()
+    runner.stop()
+
+    assert transcription_runner._awake_requests == 1

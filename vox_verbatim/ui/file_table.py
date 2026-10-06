@@ -9,9 +9,8 @@ Two ideas live side by side in this table and must not be confused:
 
 * The **selected** row is the file the audio player is working with. There
   is always exactly one, and moving the highlight changes what plays.
-* The **checked** files are the ones marked for transcription in a later
-  phase. Any number can be checked, and checking one has no effect on
-  playback.
+* The **checked** files are the ones Enhance Audio and Transcribe act on.
+  Any number can be checked, and checking one has no effect on playback.
 """
 
 from __future__ import annotations
@@ -201,7 +200,7 @@ class AudioFileTableModel(QAbstractTableModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
             return COLUMN_TITLES[section]
         if role == Qt.ItemDataRole.ToolTipRole and section == COLUMN_NAME:
-            return "The check box marks a file for transcription in a later phase."
+            return "The check box selects a file for Enhance Audio and Transcribe."
         return None
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):

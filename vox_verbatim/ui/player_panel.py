@@ -243,8 +243,18 @@ class PlayerPanel(QGroupBox):
         if losing_focus:
             self.focusReleased.emit()
 
-    def focus_play_button(self) -> None:
+    def focus_play_button(self) -> bool:
+        """Put the focus on Play, for the F6 panel key. Returns whether it moved.
+
+        With no file loaded every control here is switched off, and a
+        disabled control refuses the focus. Saying the focus moved when it
+        did not would leave the next F6 starting from the same place, so the
+        window is told and moves on to the next panel instead.
+        """
+        if not self._play_button.isEnabled():
+            return False
         self._play_button.setFocus(Qt.FocusReason.TabFocusReason)
+        return True
 
     def _holds_focus(self) -> bool:
         # The window is asked rather than the application, so this is right

@@ -300,10 +300,13 @@ class MainWindow(QMainWindow):
             self.show_review,
         )
         file_menu.addSeparator()
-        self._add_action(
+        # Named outright rather than as StandardKey.Preferences: Qt gives
+        # Preferences no key at all on Windows, so the action had no shortcut
+        # there although the README and the F1 list both name this one.
+        self._settings_action = self._add_action(
             file_menu,
             "&Settings...",
-            QKeySequence.StandardKey.Preferences,
+            QKeySequence("Ctrl+,"),
             self.show_settings,
         )
         self._add_action(file_menu, "Open &Log File", None, self.open_log_file)
@@ -418,6 +421,9 @@ class MainWindow(QMainWindow):
         self._folder_panel.set_folder(folder)
         if not folder.is_dir():
             self._folder = folder
+            # Held for F5 once the drive is back, the same as for a scan.
+            self._pending_checked = list(self._session.checked_files)
+            self._pending_selected = self._session.selected_file
             self._set_status(
                 f"The folder {folder} is not available. It may be on a drive that is "
                 "not connected.",
@@ -471,11 +477,17 @@ class MainWindow(QMainWindow):
         if self._folder is None:
             self._set_status("There is no folder to refresh.", alert=True)
             return
-        self._load_folder(
-            self._folder,
-            checked=self._model.checked_names(),
-            selected=self._selected_file_name(),
-        )
+        if self._file_list_is_current:
+            checked = self._model.checked_names()
+            selected = self._selected_file_name()
+        else:
+            # The list has not been read yet: the folder was unavailable at
+            # start-up, or its first scan has not finished. The empty list
+            # says nothing about what was checked, and passing it on would
+            # let the next save throw the remembered files away.
+            checked = self._pending_checked
+            selected = self._pending_selected
+        self._load_folder(self._folder, checked=checked, selected=selected)
 
     def _load_folder(
         self,
@@ -1684,9 +1696,14 @@ class MainWindow(QMainWindow):
             if focused is not None and (focused is panel or panel.isAncestorOf(focused)):
                 current_index = index
                 break
-        name, _panel, focus = panels[(current_index + 1) % len(panels)]
-        focus()
-        self._set_status(name, alert=True)
+        # A panel whose controls are all switched off answers False, and the
+        # next one along is tried, so the name read out is always the panel
+        # the focus actually reached.
+        for step in range(1, len(panels) + 1):
+            name, _panel, focus = panels[(current_index + step) % len(panels)]
+            if focus() is not False:
+                self._set_status(name, alert=True)
+                return
 
     def _focus_file_table(self) -> None:
         self._table.setFocus(Qt.FocusReason.TabFocusReason)

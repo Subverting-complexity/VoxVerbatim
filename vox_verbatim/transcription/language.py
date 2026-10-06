@@ -157,12 +157,16 @@ _GERMAN_MARKERS = (
     "welt", "möchte", "kein", "mein", "dein", "sein",
 )
 
+# "want", "self", "sommer" and "nie" are Afrikaans too, but they are also
+# common English words, or German ones ("nie" is "never", "sommer" reads as
+# "Sommer"), so they are left out: every English "I want" would otherwise
+# count as evidence of Afrikaans.
 _AFRIKAANS_MARKERS = (
-    "ek", "nie", "baie", "maar", "moet", "julle", "hulle", "ons", "jou",
-    "jy", "dankie", "asseblief", "lekker", "sommer", "nogal", "hierdie",
-    "daardie", "sodat", "want", "omdat", "gaan", "goed", "nou", "altyd",
+    "ek", "baie", "maar", "moet", "julle", "hulle", "ons", "jou",
+    "jy", "dankie", "asseblief", "lekker", "nogal", "hierdie",
+    "daardie", "sodat", "omdat", "gaan", "goed", "nou", "altyd",
     "miskien", "verstaan", "vraag", "tyd", "mense", "iets", "niks",
-    "nog", "wees", "kry", "sien", "praat", "weet", "dink", "self",
+    "nog", "wees", "kry", "sien", "praat", "weet", "dink",
 )
 
 _MARKERS: dict[Language, tuple[str, ...]] = {

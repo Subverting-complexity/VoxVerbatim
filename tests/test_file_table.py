@@ -156,3 +156,13 @@ def test_tab_moves_out_of_the_table_rather_than_across_its_cells(qapp):
     view = AudioFileTableView()
 
     assert not view.tabKeyNavigation()
+
+
+def test_the_check_box_tooltip_names_what_the_checks_drive(qapp):
+    model = AudioFileTableModel()
+    tooltip = model.headerData(
+        COLUMN_NAME, Qt.Orientation.Horizontal, Qt.ItemDataRole.ToolTipRole
+    )
+
+    assert "Enhance Audio" in tooltip and "Transcribe" in tooltip
+    assert "later" not in tooltip

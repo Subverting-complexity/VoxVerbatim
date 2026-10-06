@@ -433,9 +433,11 @@ def _timing_sentence(transcript: Transcript) -> str:
     if started is not None and finished is not None and finished >= started:
         elapsed = (finished - started).total_seconds()
         sentence = f"From start to finish the run took {spoken_duration(elapsed)}"
-        if parts:
+        if parts and elapsed < total:
             # The two figures disagree, and a reader who noticed that without
-            # being told would reasonably wonder which one to believe.
+            # being told would reasonably wonder which one to believe. When
+            # local work takes longer than the services, the run is the larger
+            # figure and the reason below would be false.
             sentence += (
                 ", which is less than the total above because the services were "
                 "called at the same time as each other"

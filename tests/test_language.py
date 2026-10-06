@@ -301,3 +301,14 @@ def test_a_position_outside_the_recording_falls_back_rather_than_raising() -> No
 
     assert reading.for_position(-4).best is Language.ENGLISH
     assert reading.for_position(99).best is Language.ENGLISH
+
+
+def test_no_afrikaans_marker_is_a_common_english_or_german_word() -> None:
+    """A shared word is evidence for Afrikaans every time an English speaker uses it.
+
+    That lowered Microsoft's weight for ordinary English passages whenever
+    Afrikaans was enabled.
+    """
+    every = (Language.ENGLISH, Language.GERMAN, Language.AFRIKAANS)
+    for word in ("want", "self", "sommer", "Sommer", "nie"):
+        assert lexical_language(word, every) is not Language.AFRIKAANS, word

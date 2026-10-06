@@ -583,3 +583,16 @@ def test_an_empty_transcript_still_produces_a_readable_report():
 def test_the_exports_have_names_to_be_saved_under():
     assert TEXT_EXPORT_NAME.endswith(".txt")
     assert REPORT_EXPORT_NAME.endswith(".md")
+
+
+def test_the_run_is_said_to_be_shorter_than_the_services_only_when_it_was():
+    """Local work can outlast the services, and then the reason given is false."""
+    transcript = _contested_transcript()  # 47 seconds of service time
+    transcript.completed_at = "2026-08-17T10:00:30"
+    shorter = render_review_report(transcript)
+    transcript.completed_at = "2026-08-17T10:04:00"
+    longer = render_review_report(transcript)
+
+    assert "less than the total above" in shorter
+    assert "From start to finish the run took 4 minutes." in longer
+    assert "less than the total above" not in longer

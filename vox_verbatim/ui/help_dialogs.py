@@ -156,6 +156,9 @@ def show_about(parent: QWidget | None = None) -> None:
         parent,
         f"About {APPLICATION_NAME}",
         f"{APPLICATION_NAME} version {__version__}.\n\n"
-        "An accessible player for reviewing recordings. Transcription across "
-        "several services is added in a later version.",
+        "An accessible application that turns folders of audio recordings into "
+        "transcripts. It can make quiet recordings louder, transcribes each "
+        "recording with several speech-to-text services at the same time, "
+        "combines their answers, and lets you review the words they were "
+        "unsure of.",
     )

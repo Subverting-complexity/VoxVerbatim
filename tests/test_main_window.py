@@ -157,6 +157,54 @@ def test_a_folder_that_has_gone_away_is_reported_and_does_not_stop_the_window(
         close_window(restored)
 
 
+def test_f5_after_the_folder_comes_back_restores_the_remembered_files(
+    qapp, store, audio_folder
+):
+    """The remembered checks wait for the drive, so F5 must not drop them."""
+    window = open_window(qapp, store)
+    try:
+        window._folder_panel.folderChosen.emit(str(audio_folder))
+        assert wait_until(qapp, lambda: window._model.rowCount() == 3)
+        window._model.set_checked(0, True)
+        window._model.set_checked(2, True)
+        window._table.select_row(1)
+    finally:
+        close_window(window)
+
+    away = audio_folder.with_name("disconnected")
+    audio_folder.rename(away)
+    restored = MainWindow(store)
+    try:
+        assert "not available" in restored._status_label.text()
+        away.rename(audio_folder)
+
+        restored.refresh()
+
+        assert wait_until(qapp, lambda: restored._model.rowCount() == 3)
+        assert restored._model.checked_names() == ["alpha.m4a", "gamma.m4a"]
+        assert restored._selected_file_name() == "beta.m4a"
+    finally:
+        close_window(restored)
+
+
+def test_f5_on_a_loaded_folder_keeps_the_current_checks(qapp, store, audio_folder):
+    window = open_window(qapp, store)
+    try:
+        window._folder_panel.folderChosen.emit(str(audio_folder))
+        assert wait_until(qapp, lambda: window._model.rowCount() == 3)
+        window._model.set_checked(1, True)
+        window._table.select_row(2)
+
+        window.refresh()
+
+        assert wait_until(qapp, lambda: window._model.rowCount() == 3)
+        assert wait_until(qapp, lambda: window._file_list_is_current)
+        assert window._model.checked_names() == ["beta.m4a"]
+        assert window._selected_file_name() == "gamma.m4a"
+    finally:
+        close_window(window)
+
+
 def test_an_empty_folder_says_so(qapp, store, tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -305,6 +353,20 @@ def make_transcript(name: str, needing_review: int = 1) -> Transcript:
             token.review_status = ReviewStatus.PENDING
         transcript.tokens.append(token)
     return transcript
+
+
+def test_settings_opens_on_ctrl_comma_where_the_platform_names_no_preferences_key(qapp, store):
+    """Qt gives StandardKey.Preferences no key on Windows.
+
+    The Settings action used it, so on Windows it had no shortcut at all
+    while the README and the F1 list both said to press Ctrl+comma.
+    """
+    window = open_window(qapp, store)
+    try:
+        assert window._settings_action.shortcut() == QKeySequence("Ctrl+,")
+        assert window._settings_action in window.actions()
+    finally:
+        close_window(window)
 
 
 def test_transcribe_is_offered_as_a_button_a_menu_entry_and_a_shortcut(qapp, store):

@@ -123,6 +123,39 @@ def test_the_panel_key_lands_on_a_control_rather_than_a_container(qapp, tmp_path
         window.close()
 
 
+def test_the_panel_key_passes_a_player_with_nothing_loaded(qapp, tmp_path):
+    """With no file, Play is switched off and refuses the focus.
+
+    F6 used to say "Audio player" and leave the focus on the file list, so
+    the next F6 started from the list again and the details were never
+    reached.
+    """
+    window = open_window(qapp, tmp_path)
+    try:
+        window._table.setFocus()
+        window.focus_next_panel()
+
+        assert window.focusWidget() is window._info_panel._name_edit
+        assert window._status_label.text() == "Selected file"
+    finally:
+        window.close()
+
+
+def test_the_panel_key_still_lands_on_play_with_a_file_loaded(qapp, tmp_path):
+    folder = tmp_path / "recordings"
+    folder.mkdir()
+    write_fake_audio(folder / "one.m4a")
+    window = open_window(qapp, tmp_path, folder, expected_files=1)
+    try:
+        window._table.setFocus()
+        window.focus_next_panel()
+
+        assert window.focusWidget() is window._player_panel._play_button
+        assert window._status_label.text() == "Audio player"
+    finally:
+        window.close()
+
+
 def test_the_space_bar_moves_to_the_cell_that_holds_the_check_box(qapp):
     """The state must change on the cell the user is pointed at.
 

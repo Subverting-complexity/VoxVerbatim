@@ -1,9 +1,9 @@
 """VoxVerbatim.
 
-An accessible Windows desktop application for reviewing and playing audio
-recordings. This first phase provides the user interface, folder and file
-handling, session persistence, and audio playback. Transcription services
-are added in a later phase.
+An accessible Windows desktop application that turns folders of audio
+recordings into transcripts. It plays and enhances recordings, transcribes
+them with several speech-to-text services at once, combines the answers,
+and offers a review of the words the services were unsure of.
 """
 
 from __future__ import annotations

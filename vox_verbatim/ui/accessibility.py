@@ -33,14 +33,22 @@ def describe(
     description is the extra sentence that explains how to work the control,
     which most screen readers read after the name.
 
+    The description also becomes the tooltip, and follows it when it is
+    described again, so a mouse or magnifier user is never shown an old
+    sentence. A tooltip other code set on purpose is left alone: only an
+    empty tooltip, or one that is still the previous description, is
+    replaced.
+
     Never call this on a label that carries a message. A label has no value
     of its own: its accessible name *is* its text, so naming it hides
     whatever it says behind the name instead.
     """
     widget.setAccessibleName(name)
     if description is not None:
+        previous = widget.accessibleDescription()
         widget.setAccessibleDescription(description)
-        if not widget.toolTip():
+        tooltip = widget.toolTip()
+        if not tooltip or tooltip == previous:
             widget.setToolTip(description)
     return widget
 

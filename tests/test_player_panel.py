@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from PySide6.QtWidgets import QPushButton
+
 from vox_verbatim.audio.player import AudioPlayer
+from vox_verbatim.settings import Settings
+from vox_verbatim.ui.accessibility import describe
 from vox_verbatim.ui.player_panel import PlayerPanel
 
 
@@ -57,3 +61,42 @@ def test_the_transport_buttons_ask_rather_than_act(qapp):
 
     assert plays == [True]
     assert skips == [-120_000]
+
+
+def test_the_skip_tooltips_follow_a_new_skip_length(qapp):
+    """Mouse and magnifier users read the tooltip, not the accessible name."""
+    panel = PlayerPanel(AudioPlayer())
+
+    panel.apply_settings(Settings(short_skip_seconds=30))
+
+    back, forward = panel._back_buttons[-1], panel._forward_buttons[0]
+    for button in (back, forward):
+        assert "30 seconds" in button.accessibleName()
+        assert "30 seconds" in button.toolTip()
+        assert "15 seconds" not in button.toolTip()
+        assert button.toolTip() == button.accessibleDescription()
+
+
+def test_the_seek_bar_tooltip_states_the_recording_length(qapp):
+    player = AudioPlayer()
+    panel = PlayerPanel(player)
+    panel.set_media_loaded(True)
+
+    player.durationChanged.emit(300_000)
+
+    assert "The recording is 5 minutes long." in panel._seek_slider.toolTip()
+
+    panel.set_media_loaded(False)
+
+    assert "The recording is" not in panel._seek_slider.toolTip()
+
+
+def test_a_tooltip_set_on_purpose_is_not_overwritten(qapp):
+    button = QPushButton()
+    describe(button, "Save", "Saves the file.")
+    button.setToolTip("Saves the file (Ctrl+S).")
+
+    describe(button, "Save", "Saves the transcript.")
+
+    assert button.toolTip() == "Saves the file (Ctrl+S)."
+    assert button.accessibleDescription() == "Saves the transcript."

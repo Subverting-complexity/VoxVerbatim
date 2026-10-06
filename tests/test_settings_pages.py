@@ -469,6 +469,75 @@ def test_a_model_name_cannot_be_left_empty(all_pages):
     )
 
 
+@pytest.mark.parametrize(
+    ("category", "field"),
+    [
+        (notes.ELEVENLABS, "_model_edit"),
+        (notes.OPENAI_TRANSCRIPTION, "_model_edit"),
+        (notes.OPENAI_ADJUDICATION, "_model_edit"),
+        (notes.MICROSOFT, "_model_edit"),
+        (notes.MICROSOFT, "_version_edit"),
+        (notes.ASSEMBLYAI, "_primary_edit"),
+        (notes.ASSEMBLYAI, "_afrikaans_edit"),
+        (notes.DEEPGRAM, "_model_edit"),
+    ],
+)
+def test_an_empty_name_on_a_service_that_is_switched_off_does_not_stop_saving(
+    all_pages, category, field
+):
+    """A service that is switched off is never called, so its names do not matter.
+
+    Refusing here would leave somebody who cleared a box on a service they
+    do not use unable to save until they typed a name they do not need.
+    """
+    page = _page(all_pages, category)
+    page.show_settings(Settings())
+    page._enabled_box.setChecked(False)
+    getattr(page, field).setText("")
+
+    assert page.problems() == []
+
+
+@pytest.mark.parametrize(
+    ("category", "field"),
+    [
+        (notes.ELEVENLABS, "_model_edit"),
+        (notes.OPENAI_TRANSCRIPTION, "_model_edit"),
+        (notes.OPENAI_ADJUDICATION, "_model_edit"),
+        (notes.MICROSOFT, "_model_edit"),
+        (notes.MICROSOFT, "_version_edit"),
+        (notes.ASSEMBLYAI, "_primary_edit"),
+        (notes.ASSEMBLYAI, "_afrikaans_edit"),
+        (notes.DEEPGRAM, "_model_edit"),
+    ],
+)
+def test_the_same_empty_name_on_a_service_that_is_switched_on_still_stops_saving(
+    all_pages, category, field
+):
+    page = _page(all_pages, category)
+    page.show_settings(Settings())
+    page._enabled_box.setChecked(True)
+    edit = getattr(page, field)
+    edit.setText("")
+
+    problems = page.problems()
+
+    assert [problem.widget for problem in problems] == [edit]
+    assert "empty" in problems[0].message
+
+
+def test_broken_json_on_a_service_that_is_switched_off_is_still_reported(all_pages):
+    """Unlike an empty name, text that is not JSON is lost on saving."""
+    page = _page(all_pages, notes.DEEPGRAM)
+    page.show_settings(Settings())
+    page._enabled_box.setChecked(False)
+    page._parameters.setPlainText("{not json")
+
+    problems = page.problems()
+
+    assert [problem.widget for problem in problems] == [page._parameters]
+
+
 def test_an_empty_reasoning_effort_is_a_real_answer_rather_than_a_mistake(all_pages):
     """Empty means "leave the parameter out", which some models require."""
     page = _page(all_pages, notes.OPENAI_ADJUDICATION)

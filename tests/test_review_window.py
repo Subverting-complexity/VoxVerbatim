@@ -1996,6 +1996,138 @@ def test_confirming_an_occurrence_settles_it_without_changing_a_thing(qapp, tmp_
         window.close()
 
 
+def test_f4_moves_to_the_next_occurrence_of_the_word(qapp, tmp_path):
+    """Confirming is done one occurrence after another, without F3 in between."""
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        assert window._occurrence_model.rowCount() == 3
+        window._occurrences.select_row(0)
+        second = window._occurrence_model.occurrence_at(1)
+
+        assert window.confirm_item() is True
+
+        assert window.current_row().word == "Bosch"
+        assert window.current_occurrence().id == second.id
+    finally:
+        window.close()
+
+
+def test_f4_on_the_last_occurrence_moves_to_the_next_word(qapp, tmp_path, monkeypatch):
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        window.set_show_reviewed(True)
+        select_word(window, "Bosch")
+        window._occurrences.select_row(window._occurrence_model.rowCount() - 1)
+        said.clear()
+
+        window.confirm_item()
+
+        assert window.current_row().word == "15,000"
+        assert window._occurrences.selected_row() == 0
+        assert len(said) == 1
+        assert "Now on 15,000." in said[0]
+    finally:
+        window.close()
+
+
+def test_confirming_every_occurrence_marks_the_word_reviewed(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        group = window.state.group(window.current_row().group_id)
+        window._occurrences.select_row(0)
+        for _ in range(3):
+            assert window.current_row().word == "Bosch"
+            window.confirm_item()
+
+        assert group.reviewed is True
+        assert group.correct_as_detected is True
+        assert "Bosch" not in [row.word for row in window._group_model.rows()]
+    finally:
+        window.close()
+
+
+def test_confirming_a_replaced_occurrence_does_not_call_it_correct_as_detected(
+    qapp, tmp_path
+):
+    """A group replacement changed the word, so it was not right as detected."""
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+        assert window.apply_replacement_to_word() is True
+        window.set_show_reviewed(True)
+        select_word(window, "Bosch")
+        window._occurrences.select_row(1)
+        occurrence = window.current_occurrence()
+
+        assert window.confirm_item() is True
+
+        assert occurrence.reviewed is True
+        assert occurrence.correct_as_detected is False
+        assert review_lists.occurrence_reviewed_text(occurrence) != REVIEWED_AS_DETECTED
+        assert folder.token(occurrence.recording_name, occurrence.token_id).text == "Bosch"
+        assert window.state.group(group_row(window, "Bosch").group_id).replacement == "Bosch"
+    finally:
+        window.close()
+
+
+def test_f4_on_the_very_last_item_stays_and_says_so(qapp, tmp_path):
+    folder = Folder({RECORDING: make_transcript([weak_token("contract", 30.0)])})
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        window.set_show_reviewed(True)
+        select_word(window, "contract")
+
+        assert window.confirm_item() is True
+
+        assert window.current_row().word == "contract"
+        assert "That was the last occurrence of the last word in the list." in (
+            window._status_label.text()
+        )
+    finally:
+        window.close()
+
+
+def test_f4_keeps_the_focus_in_the_occurrence_list(qapp, tmp_path, monkeypatch):
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    folder = Folder(
+        {
+            RECORDING: make_transcript(
+                [weak_token("Bosch", 10.0, 0.42), weak_token("Bosh", 40.0, 0.45)]
+            )
+        }
+    )
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        assert window._occurrence_model.rowCount() == 2
+        window._occurrences.select_row(0)
+        window._occurrences.setFocus(Qt.FocusReason.TabFocusReason)
+        said.clear()
+
+        window.confirm_item()
+
+        assert window.focusWidget() is window._occurrences
+        assert window._occurrences.selected_row() == 1
+        assert len(said) == 1
+    finally:
+        window.close()
+
+
 def test_a_correction_is_announced_along_with_where_the_person_now_is(qapp, tmp_path, monkeypatch):
     """The change happens away from where the focus lands next."""
     said: list[str] = []

@@ -271,6 +271,31 @@ def test_a_service_nobody_asked_for_is_not_a_problem():
     assert transcription.missing_requirements() == []
 
 
+def test_a_switched_off_adjudication_service_needs_no_key():
+    """Switching the service off is how a user without the key opts out.
+
+    Asking for the key anyway would refuse the run, and the switch would
+    then be of no use to anyone who leaves the Transcription page's own
+    adjudication switch on.
+    """
+    transcription = TranscriptionSettings()
+    transcription.elevenlabs.api_key = "el-test"
+    transcription.openai_transcription.api_key = "sk-test"
+    transcription.processing.adjudication_enabled = True
+    transcription.openai_adjudication.enabled = False
+    transcription.openai_adjudication.api_key = ""
+    transcription.microsoft.enabled = False
+    transcription.assemblyai.enabled = False
+
+    assert transcription.missing_requirements() == []
+
+    transcription.openai_adjudication.enabled = True
+    problems = transcription.missing_requirements()
+
+    assert len(problems) == 1
+    assert "Adjudication is switched on but is not set up" in problems[0]
+
+
 # -- The libraries a run would need --------------------------------------
 
 
@@ -328,6 +353,19 @@ def test_adjudication_needs_the_openai_library_even_with_transcription_off():
 
     assert len(problems) == 1
     assert "openai" in problems[0]
+
+
+def test_a_switched_off_adjudication_service_does_not_want_the_openai_library():
+    transcription = TranscriptionSettings()
+    transcription.openai_transcription.enabled = False
+    transcription.processing.adjudication_enabled = True
+    transcription.openai_adjudication.enabled = False
+    transcription.microsoft.enabled = False
+    transcription.assemblyai.enabled = False
+    probe = _probe_that_fails("openai")
+
+    assert transcription.missing_libraries(probe) == []
+    assert "openai" not in [module for module, _attribute in probe.tried]
 
 
 def test_the_real_probe_reports_any_failure_rather_than_only_a_missing_module():

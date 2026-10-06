@@ -204,6 +204,7 @@ def test_the_elevenlabs_settings_reach_its_adapter(settings, monkeypatch):
     settings.elevenlabs.transcription_model = "scribe-test"
     settings.elevenlabs.transcription_parameters = {"diarize": True}
     settings.elevenlabs.tag_audio_events = False
+    settings.elevenlabs.diarise = False
     settings.processing.provider_timeout_seconds = 123.0
     settings.processing.provider_retry_attempts = 4
     record(monkeypatch, elevenlabs_module, "ElevenLabsProvider")
@@ -215,6 +216,7 @@ def test_the_elevenlabs_settings_reach_its_adapter(settings, monkeypatch):
         "model": "scribe-test",
         "parameters": {"diarize": True},
         "tag_audio_events": False,
+        "diarise": False,
         "timeout_seconds": 123.0,
         "maximum_retries": 4,
     }
@@ -223,6 +225,7 @@ def test_the_elevenlabs_settings_reach_its_adapter(settings, monkeypatch):
 def test_the_openai_settings_reach_its_adapter(settings, monkeypatch):
     settings.openai_transcription.model = "openai-test"
     settings.openai_transcription.parameters = {"temperature": 0}
+    settings.openai_transcription.chunk_target_bytes = 5_000_000
     record(monkeypatch, openai_module, "OpenAiTranscriptionProvider")
 
     built = registry.build_provider(Provider.OPENAI, settings)
@@ -230,6 +233,7 @@ def test_the_openai_settings_reach_its_adapter(settings, monkeypatch):
     assert built.arguments["api_key"] == "openai-key"
     assert built.arguments["model"] == "openai-test"
     assert built.arguments["parameters"] == {"temperature": 0}
+    assert built.arguments["chunk_target_bytes"] == 5_000_000
 
 
 def test_the_microsoft_settings_reach_its_adapter_including_its_own_endpoint(

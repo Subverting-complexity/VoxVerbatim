@@ -232,6 +232,7 @@ class ElevenLabsProvider(TranscriptionProvider):
         parameters: dict[str, Any] | None = None,
         *,
         tag_audio_events: bool = True,
+        diarise: bool = True,
         diarisation_threshold: float | None = None,
         timestamps_granularity: str = "word",
         maximum_keyterms: int = DEFAULT_MAXIMUM_KEYTERMS,
@@ -246,6 +247,10 @@ class ElevenLabsProvider(TranscriptionProvider):
         library's pass-through mechanism. The request wins where both name
         the same thing, because it is the more specific of the two.
 
+        ``diarise`` is the "Tell the speakers apart" switch from Settings.
+        Switched off, no request asks ElevenLabs for speakers, whatever the
+        run itself would have asked for.
+
         ``client`` exists so that a test, or a future caller that wants to
         share one connection pool, can hand in a ready-made client. Left as
         ``None`` it means "build a real one when first needed", which is
@@ -255,6 +260,7 @@ class ElevenLabsProvider(TranscriptionProvider):
         self._model = model or DEFAULT_MODEL
         self._parameters = dict(parameters or {})
         self._tag_audio_events = tag_audio_events
+        self._diarise = diarise
         self._diarisation_threshold = diarisation_threshold
         self._timestamps_granularity = timestamps_granularity
         self._maximum_keyterms = max(0, maximum_keyterms)
@@ -555,16 +561,17 @@ class ElevenLabsProvider(TranscriptionProvider):
     ) -> tuple[bool, float | None]:
         """Whether to diarise, and at what threshold, from wherever those were set.
 
-        Both can only be set through the free-form extras at present. Nothing
-        passes a threshold to this adapter's constructor, and the ``diarise``
-        setting that the settings dialog writes is not read by the code that
-        builds this adapter, so ``diarize`` in the extras is the only thing
-        that has ever turned diarisation off for ElevenLabs. Reading them here
-        keeps that working while still taking them out of the body, where the
-        client library would otherwise spread them over what this adapter
-        decided and produce a combination the service refuses.
+        Diarisation is on when the run asks for it and the ``diarise`` setting,
+        passed to this adapter's constructor, allows it. A boolean ``diarize``
+        in the free-form extras is the more specific instruction, so it wins
+        over both, in either direction. Nothing passes a threshold to the
+        constructor yet, so the extras are the only place one can be set.
+        Reading both here, rather than letting them through, takes them out of
+        the body, where the client library would otherwise spread them over
+        what this adapter decided and produce a combination the service
+        refuses.
         """
-        diarise = request.diarise
+        diarise = request.diarise and self._diarise
         if "diarize" in extras:
             written = extras["diarize"]
             if isinstance(written, bool):

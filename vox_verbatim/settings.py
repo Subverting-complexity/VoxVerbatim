@@ -824,7 +824,13 @@ class TranscriptionSettings:
                     f"{name} is switched on but is not set up. It needs "
                     f"{section.requirements} in Settings."
                 )
-        if self.processing.adjudication_enabled and not self.openai_adjudication.is_configured:
+        # A switched-off adjudication service needs no key. The run goes
+        # ahead without it and says so in the transcript's warnings.
+        if (
+            self.processing.adjudication_enabled
+            and self.openai_adjudication.enabled
+            and not self.openai_adjudication.is_configured
+        ):
             problems.append(
                 "Adjudication is switched on but is not set up. It needs "
                 f"{self.openai_adjudication.requirements} in Settings, or it can be "
@@ -865,7 +871,8 @@ class TranscriptionSettings:
         wanted: list[tuple[str, str, str | None]] = []
         if self.elevenlabs.enabled:
             wanted.append(("ElevenLabs Scribe", "elevenlabs", "ElevenLabs"))
-        if self.openai_transcription.enabled or self.processing.adjudication_enabled:
+        adjudicating = self.processing.adjudication_enabled and self.openai_adjudication.enabled
+        if self.openai_transcription.enabled or adjudicating:
             wanted.append(("OpenAI", "openai", "OpenAI"))
         if self.microsoft.enabled:
             wanted.append(("Microsoft MAI", "httpx", None))

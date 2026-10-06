@@ -1187,22 +1187,23 @@ rises much faster than the saving does.""",
         category=OPENAI_ADJUDICATION,
         title="Use OpenAI for adjudication",
         summary=(
-            "Whether this service is available to settle disputes. The Transcription "
-            "page decides whether adjudication is used at all."
+            "Whether this service is available to settle disputes. Switched off, no "
+            "adjudication request is sent to OpenAI."
         ),
         note="""\
 This switches the adjudication service on and off.
 
 There are two switches for adjudication and they mean different things. The
 one on the Transcription page decides whether disputes are adjudicated at all.
-This one decides whether this particular service is available to do it. In
-practice you want both on or the feature off, and switching this one off while
-the other stays on is what produces the warning that adjudication is switched
-on but not set up.
+This one decides whether this particular service is available to do it.
+Adjudication happens only when both are on.
 
-Nothing in a transcript fails when adjudication is unavailable. The disputes
-that would have been settled go to the review queue instead, marked as
-unsettled, and a person decides. Every decision made there is remembered.
+When this one is off, no adjudication request is sent to OpenAI, and no key is
+needed for it. The run still goes ahead. The disputes that would have been
+settled go to the review queue instead, marked as unsettled, and a person
+decides. The transcript carries a warning that says adjudication was not used,
+so you know why more words are waiting for you. Every decision made in the
+review queue is remembered.
 
 The specification allows no other company's model in this role, so there is no
 alternative service to point this at.""",

@@ -940,6 +940,63 @@ def test_disputes_go_to_the_language_model_in_batches(monkeypatch):
     assert built[0].batches == [30, 30, 15]
 
 
+class _NoContext:
+    recording_context = ""
+    term_texts = ()
+    languages = ()
+
+
+def _adjudication_switched_off(monkeypatch) -> tuple[list, TranscriptionSettings]:
+    """Settings with the service off but everything else ready to send."""
+    from vox_verbatim.transcription import adjudication
+
+    built: list[BatchCountingAdjudicator] = []
+
+    def build(*args, **kwargs):
+        adjudicator = BatchCountingAdjudicator()
+        built.append(adjudicator)
+        return adjudicator
+
+    monkeypatch.setattr(adjudication, "Adjudicator", build)
+    settings = TranscriptionSettings()
+    settings.processing.adjudication_enabled = True
+    settings.openai_adjudication.api_key = "key"
+    settings.openai_adjudication.enabled = False
+    return built, settings
+
+
+def test_switching_openai_adjudication_off_sends_no_request(monkeypatch):
+    """The Settings switch must stop the requests, not just look as if it does."""
+    built, settings = _adjudication_switched_off(monkeypatch)
+    disputed = FinalToken(
+        text="w", start=0.0, end=0.5, text_confidence=Confidence.REVIEW_REQUIRED,
+        candidates=[Candidate("w"), Candidate("v")],
+    )
+    disputed.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+    tokens = [disputed, FinalToken(text="and", text_confidence=Confidence.HIGH)]
+    transcript = Transcript(recording_name="a", tokens=tokens)
+
+    result = pipeline._adjudicate(
+        tokens, transcript, settings, _NoContext(), pipeline._Reporter(None), None
+    )
+
+    assert built == [], "no adjudicator may be built while the service is off"
+    assert result is tokens
+    assert transcript.requests == []
+    assert any("Adjudication was not used" in warning for warning in transcript.warnings)
+
+
+def test_a_recording_with_nothing_to_adjudicate_gets_no_warning(monkeypatch):
+    built, settings = _adjudication_switched_off(monkeypatch)
+    tokens = [FinalToken(text="and", text_confidence=Confidence.HIGH)]
+    transcript = Transcript(recording_name="a", tokens=tokens)
+
+    pipeline._adjudicate(tokens, transcript, settings, _NoContext(), pipeline._Reporter(None), None)
+
+    assert built == []
+    assert transcript.warnings == []
+
+
 # -- Timing is measured phrase by phrase, against a clip -----------------
 
 

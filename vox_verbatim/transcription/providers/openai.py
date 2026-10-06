@@ -52,12 +52,15 @@ start.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import math
 import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from vox_verbatim.transcription.chunking import DEFAULT_CHUNKING_OPTIONS
 from vox_verbatim.transcription.model import (
     ChunkRecord,
     Language,
@@ -127,6 +130,26 @@ OPENAI_CAPABILITIES = ProviderCapabilities(
     maximum_duration_seconds=None,
     accepted_containers=frozenset({"wav", "mp3", "m4a", "flac", "ogg", "webm", "mp4", "mpga"}),
 )
+
+
+
+def planning_limit_for(chunk_target_bytes: int) -> int:
+    """The file limit to plan chunks against, so they come out near the target.
+
+    The chunk size setting is a target, not a limit. Chunking aims every
+    chunk at a safety fraction of the limit it is given, so handing it the
+    target itself would make every chunk a fifth smaller than asked for, and
+    a long recording would need a quarter more requests. The target is
+    therefore divided by that fraction first, which puts the planned chunks
+    at the target.
+
+    The result never goes above OpenAI's own limit, so a target close to it
+    still cannot produce a chunk the service refuses. A lower target gives a
+    lower limit, and so shorter and smaller chunks.
+    """
+    fraction = DEFAULT_CHUNKING_OPTIONS.safety_fraction
+    return min(MAXIMUM_FILE_BYTES, math.ceil(max(1, chunk_target_bytes) / fraction))
+
 
 #: Settings keys that could hold a credential. Anything named like one of
 #: these is dropped before a request is written into provenance, because a
@@ -234,6 +257,7 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
         *,
         temperature: float | None = None,
         chunking_strategy: str | None = None,
+        chunk_target_bytes: int | None = None,
         timeout_seconds: float = 600.0,
         maximum_retries: int = 2,
         client: Any | None = None,
@@ -245,6 +269,12 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
         ``extra_body``. The request wins where both name the same thing,
         because it is the more specific of the two.
 
+        ``chunk_target_bytes`` is the chunk size from Settings. Given, it
+        lowers the file limit this adapter declares, by way of
+        :func:`planning_limit_for`, so that a long recording is cut into
+        pieces of about that size. Left as ``None``, the adapter declares
+        OpenAI's own limit, as it always has.
+
         ``client`` exists so a test, or a caller that wants to share one
         connection pool, can hand in a ready-made client. Left as ``None`` it
         means "build a real one when first needed", which is what keeps the
@@ -255,6 +285,13 @@ class OpenAiTranscriptionProvider(TranscriptionProvider):
         self._parameters = dict(parameters or {})
         self._temperature = temperature
         self._chunking_strategy = chunking_strategy
+        if chunk_target_bytes is not None:
+            # An instance attribute, so the shared class constant, and every
+            # other adapter, keeps OpenAI's own limit.
+            self.capabilities = dataclasses.replace(
+                OPENAI_CAPABILITIES,
+                maximum_file_bytes=planning_limit_for(chunk_target_bytes),
+            )
         self._timeout_seconds = timeout_seconds
         # Read by the retry loop in the base class. The library's own retry
         # is switched off in ``_build_client`` so that nothing is retried

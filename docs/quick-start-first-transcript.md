@@ -141,8 +141,9 @@ To decide, use the review window:
 2. Go to the **Occurrences** list (`Alt+O`). Select an occurrence.
    VoxVerbatim plays that part of the recording. Press `F5` to hear it
    again.
-3. Go to **What was said**. It shows what each service heard. The
-   **Chosen** column shows the word that VoxVerbatim keeps if you
+3. Go to **What was said**. It shows what each service heard. In the
+   **Chosen** column, one row says "The current choice". The
+   **Candidate** on that row is the word that VoxVerbatim keeps if you
    confirm it.
 4. Do one of these:
    - If the chosen word is correct, press `F4`. VoxVerbatim goes to the

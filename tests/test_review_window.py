@@ -4193,3 +4193,24 @@ def test_a_window_with_nowhere_to_save_still_makes_the_change(qapp, tmp_path):
         assert occurrence.replacement == "Bosche"
     finally:
         window.close()
+
+
+def test_every_mnemonic_in_the_item_menu_is_its_own(qapp, tmp_path):
+    """No two items in the Item menu answer to the same letter.
+
+    Isolate This Occurrence and Confirm the Timing both took I, so the letter
+    moved between them instead of choosing either.
+    """
+    window = open_window(tmp_path)
+    try:
+        menu = window._isolate_action.associatedObjects()[0]
+        keys = []
+        for action in menu.actions():
+            text = action.text().replace("&&", "")
+            if "&" in text:
+                keys.append(text[text.index("&") + 1].lower())
+
+        assert len(keys) == len(set(keys)), keys
+        assert window._confirm_timing_action.text() == "Confirm the &Timing"
+    finally:
+        window.close()

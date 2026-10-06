@@ -2205,7 +2205,7 @@ class ReviewWindow(QMainWindow):
         )
         item_menu.addSeparator()
         self._confirm_timing_action = self._add_action(
-            item_menu, "Confirm the T&iming", None, lambda: self.decide_timing(True)
+            item_menu, "Confirm the &Timing", None, lambda: self.decide_timing(True)
         )
         self._reject_timing_action = self._add_action(
             item_menu, "&Reject the Timing", None, lambda: self.decide_timing(False)

@@ -41,7 +41,7 @@ class FileInfoPanel(QGroupBox):
         # system font is large, instead of squeezing the values.
         layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
-        self._name_edit = self._add_field(layout, "File &name", "File name")
+        self._name_edit = self._add_field(layout, "File na&me", "File name")
         self._duration_edit = self._add_field(layout, "&Duration", "Duration")
         self._size_edit = self._add_field(layout, "File si&ze", "File size")
         self._position_edit = self._add_field(layout, "Pos&ition", "Playback position")

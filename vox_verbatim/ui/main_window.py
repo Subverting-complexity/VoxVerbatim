@@ -205,8 +205,8 @@ class MainWindow(QMainWindow):
 
         # Alt+N has just gone to Enhance Audio and Alt+E is part of it, so
         # Transcribe answers to Alt+T. Nothing else in this window uses it:
-        # the folder box has Alt+O, the file list Alt+S, the player Alt+L and
-        # Alt+U, and the details panel Alt+N, Alt+D, Alt+Z and Alt+I.
+        # the folder box has Alt+O and Alt+B, the file list Alt+S, the player
+        # Alt+L and Alt+U, and the details panel Alt+M, Alt+D, Alt+Z and Alt+I.
         self._transcribe_button = QPushButton("&Transcribe...", self)
         describe(
             self._transcribe_button,

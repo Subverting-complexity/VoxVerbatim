@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import shutil
 
 import pytest
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QApplication, QDialog, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QDialog, QLabel, QWidget
 
 from vox_verbatim.audio.player import AudioPlayer
 from vox_verbatim.session import SessionStore
@@ -68,6 +69,12 @@ def open_window(qapp, store, expected_files: int | None = None) -> MainWindow:
 def close_window(window: MainWindow) -> None:
     window.close()
     window.deleteLater()
+
+
+def mnemonic_of(text: str) -> str | None:
+    """The letter after a single ``&`` in a label, or None; ``&&`` is a literal."""
+    match = re.search(r"(?<!&)&([^&])", text.replace("&&", ""))
+    return match.group(1).lower() if match else None
 
 
 def test_choosing_a_folder_lists_its_audio_files(qapp, store, audio_folder):
@@ -1900,5 +1907,25 @@ def test_the_vocabulary_survives_a_trip_through_the_real_settings_dialog(
         saved = window._vocabulary_store.load()
         assert [profile.id for profile in saved.profiles] == ["acme"]
         assert saved.profiles[0].name == "Acme"
+    finally:
+        close_window(window)
+
+
+def test_every_mnemonic_in_the_main_window_is_its_own(qapp, store):
+    """No two controls in the main window answer to the same Alt key.
+
+    Enhance Audio and the details panel's File name label both took Alt+N,
+    so the key moved between them and never reliably started Enhance.
+    """
+    window = open_window(qapp, store)
+    try:
+        texts = [action.text() for action in window.menuBar().actions()]
+        texts += [label.text() for label in window.findChildren(QLabel)]
+        texts += [button.text() for button in window.findChildren(QAbstractButton)]
+        keys = [key for key in map(mnemonic_of, texts) if key]
+
+        duplicates = sorted({key for key in keys if keys.count(key) > 1})
+        assert duplicates == []
+        assert "n" in keys and "m" in keys
     finally:
         close_window(window)

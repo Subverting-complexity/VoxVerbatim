@@ -705,6 +705,58 @@ def test_the_note_for_the_offending_control_comes_back_afterwards(qapp):
         dialog.close()
 
 
+def test_the_problem_stays_on_screen_when_the_focus_reaches_its_box(qapp):
+    """OK moves the focus to the box, and that move must not hide the problem.
+
+    An offscreen test does not always see the application report the focus
+    change, so the dialog is told about it directly, as Qt tells it on a
+    real screen. Without the hold, the box's own note would replace the
+    problem at once and a sighted or ZoomText user would see OK do nothing.
+    """
+    dialog = SettingsDialog(Settings())
+    try:
+        dialog.show()
+        page = dialog.page(notes.DEEPGRAM)
+        box = page._parameters
+        box.setPlainText('{"smart_format": true,}')
+        dialog.show_category(notes.GENERAL)
+
+        dialog.accept()
+        problem = dialog._notes_text.toPlainText()
+        dialog._on_focus_changed(dialog._ok_button, box)
+        qapp.processEvents()
+
+        assert "not valid JSON" in problem
+        assert dialog._notes_text.toPlainText() == problem
+        assert dialog._notes_group.title() == "About: this could not be saved"
+
+        # A part of the box taking the focus is still the box.
+        dialog._on_focus_changed(box, box.viewport())
+        assert dialog._notes_text.toPlainText() == problem
+    finally:
+        dialog.close()
+
+
+def test_moving_away_and_back_shows_the_boxs_note_after_a_problem(qapp):
+    """The hold lasts only until the focus leaves the box."""
+    dialog = SettingsDialog(Settings())
+    try:
+        dialog.show()
+        page = dialog.page(notes.DEEPGRAM)
+        box = page._parameters
+        box.setPlainText("rubbish")
+        dialog.accept()
+        dialog._on_focus_changed(dialog._ok_button, box)
+
+        dialog._on_focus_changed(box, page._model_edit)
+        dialog._on_focus_changed(page._model_edit, box)
+
+        assert dialog._notes_text.toPlainText() == notes.note_text("deepgram.parameters")
+        assert notes.note_for("deepgram.parameters").title in dialog._notes_group.title()
+    finally:
+        dialog.close()
+
+
 # -- Working on a copy -----------------------------------------------------
 
 

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from vox_verbatim.settings import MAXIMUM_PROVIDER_RETRY_BACKOFF_SECONDS
+
 from vox_verbatim.transcription.model import (
     Provider,
     ProviderRequestRecord,
@@ -96,6 +98,31 @@ def test_the_waits_double_and_the_final_sentence_counts_the_attempts(tmp_path, s
     # One second, then two. The waits are slept in pieces of at most a
     # second, so the pieces are summed per wait.
     assert sum(sleeps) == pytest.approx(3.0)
+
+
+def test_a_first_wait_longer_than_the_cap_is_honoured(tmp_path, sleeps):
+    adapter = Flaky([retryable(), retryable()], retries=2)
+    adapter.retry_backoff_seconds = 120.0
+
+    adapter.transcribe(request(tmp_path))
+
+    # Two minutes, then two minutes again: the doubling stops at the
+    # longer of the cap and the wait the person asked for.
+    assert sum(sleeps) == pytest.approx(240.0)
+
+
+def test_every_wait_the_setting_allows_is_honoured():
+    adapter = Flaky([])
+    adapter.retry_backoff_seconds = MAXIMUM_PROVIDER_RETRY_BACKOFF_SECONDS
+
+    assert adapter._wait_before_attempt(1, None) == MAXIMUM_PROVIDER_RETRY_BACKOFF_SECONDS
+
+
+def test_short_waits_still_stop_doubling_at_the_cap():
+    adapter = Flaky([])
+    adapter.retry_backoff_seconds = 2.0
+
+    assert adapter._wait_before_attempt(10, None) == adapter.maximum_backoff_seconds
 
 
 def test_a_failure_the_adapter_called_final_is_not_tried_again(tmp_path, sleeps):

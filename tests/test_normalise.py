@@ -19,6 +19,7 @@ from vox_verbatim.transcription.normalise import (
     EquivalenceKind,
     are_equivalent,
     equivalence_kind,
+    is_number_word,
     is_punctuation_only,
     normalise,
     normalise_phrase,
@@ -592,3 +593,19 @@ def test_a_number_written_in_blocks_is_still_one_number(spaced: str, plain: str)
 @pytest.mark.parametrize("pair", [("1 2", "12"), ("20 5", "205"), ("2024 05", "202405")])
 def test_two_numbers_beside_each_other_stay_two(pair: tuple[str, str]) -> None:
     assert not are_equivalent(*pair)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "two", "hundred", "and", "fifty", "twenty-five", "250", "150,000",
+        "einundzwanzig", "honderd", "en", "und", "tausend", "ein",
+    ],
+)
+def test_a_word_that_can_belong_to_a_spoken_number_is_a_number_word(text):
+    assert is_number_word(text)
+
+
+@pytest.mark.parametrize("text", ["cost", "rand", "", "data", "often"])
+def test_an_ordinary_word_is_not_a_number_word(text):
+    assert not is_number_word(text)

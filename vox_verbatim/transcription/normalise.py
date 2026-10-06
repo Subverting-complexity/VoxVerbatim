@@ -926,6 +926,35 @@ def read_number(text: str) -> int | None:
     return None
 
 
+@lru_cache(maxsize=100_000)
+def is_number_word(text: str) -> bool:
+    """Whether every part of this text could belong to a spoken number.
+
+    True for numeral words in English, German and Afrikaans ("fifty",
+    "hundred", "einundzwanzig"), for the joiners that sit inside a number
+    ("and", "und", "en"), for hyphenated numerals ("twenty-five") and for
+    digits, grouped or not ("250", "150,000"). False for an empty text and
+    for any ordinary word.
+
+    Alignment uses this to decide where a longer run of words may be tried
+    as one number. It says only that a word *could* be part of a number:
+    "and" on its own is no number, and whether a whole run reads as one is
+    still for :func:`normalise` to decide.
+    """
+    parts = _spelling_form(text, False).split()
+    if not parts:
+        return False
+    # "ein" and "eine" are the article on their own, but they open a number
+    # in "ein hundert und fünfzig", so they may belong to a run.
+    return all(
+        part in _GERMAN_ONE_WORDS
+        or _word_atom(part, False) is not None
+        or _word_atom(part, True) is not None
+        or _digit_group(part) is not None
+        for part in parts
+    )
+
+
 def _same_form(
     first: str,
     second: str,

@@ -895,6 +895,17 @@ def _join_on_text(
     own entry, and anything that normalises away to nothing, is skipped for
     the comparison and then carried along with whichever side its words end
     up on.
+
+    The earlier chunk's last words are looked for anywhere among the later
+    chunk's first words, not only at its very start. The later chunk begins
+    one overlap before the hand-over, so its first word is often clipped or
+    misheard; requiring the runs to line up from the first word would let
+    that one word rule out every match. The longest run wins, and among runs
+    of the same length the one nearest the start of the later chunk. Words in
+    the later chunk before the matched run are dropped with it, because they
+    are its own, poorer copy of speech the earlier chunk already has. The
+    search goes no further into the later chunk than the overlap could hold,
+    so a common phrase said again later on cannot be mistaken for the seam.
     """
     overlap_seconds = max(0.0, overlap_end - overlap_start)
     most = max(minimum_matched_words, int(math.ceil(overlap_seconds * _FASTEST_WORDS_PER_SECOND)))
@@ -902,11 +913,14 @@ def _join_on_text(
     earlier_words = _comparable_words(earlier, normalise)
     later_words = _comparable_words(later, normalise)
     reach = min(most, len(earlier_words), len(later_words))
+    window = min(most, len(later_words))
 
     for length in range(reach, minimum_matched_words - 1, -1):
         tail = earlier_words[-length:]
-        head = later_words[:length]
-        if all(are_equivalent(a.text, b.text) for a, b in zip(tail, head)):
+        for offset in range(0, window - length + 1):
+            head = later_words[offset : offset + length]
+            if not all(are_equivalent(a.text, b.text) for a, b in zip(tail, head)):
+                continue
             # Everything in the later chunk up to and including the last
             # matched word is the same speech the earlier chunk already has.
             cut = head[-1].position + 1

@@ -3458,6 +3458,28 @@ def test_the_divider_can_be_moved_from_the_keyboard(qapp, tmp_path):
         window.close()
 
 
+def test_each_widen_action_widens_the_side_it_names(qapp, tmp_path):
+    """Widen the Lists gives the lists more room, and Widen the Details less.
+
+    The two actions were wired the wrong way round, so the menu item a
+    magnifier user reached for did the opposite of what it said, and the
+    spoken share then went down. Triggering the actions themselves, not only
+    adjust_divider, is what catches the wiring.
+    """
+    window = open_window(tmp_path)
+    try:
+        before = window._splitter.sizes()[0]
+
+        window._widen_lists_action.trigger()
+        widened = window._splitter.sizes()[0]
+        assert widened > before
+
+        window._widen_details_action.trigger()
+        assert window._splitter.sizes()[0] < widened
+    finally:
+        window.close()
+
+
 # -- Asking about occurrences and being answered about occurrences ----------
 
 

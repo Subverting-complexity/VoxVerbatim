@@ -2256,13 +2256,13 @@ class ReviewWindow(QMainWindow):
             view_menu,
             "Widen the &Lists",
             QKeySequence("Ctrl+Shift+Left"),
-            lambda: self.adjust_divider(-1),
+            lambda: self.adjust_divider(1),
         )
         self._widen_details_action = self._add_action(
             view_menu,
             "Widen the &Details",
             QKeySequence("Ctrl+Shift+Right"),
-            lambda: self.adjust_divider(1),
+            lambda: self.adjust_divider(-1),
         )
         view_menu.addSeparator()
         self._show_reviewed_action = self._add_toggle(
@@ -2542,7 +2542,9 @@ class ReviewWindow(QMainWindow):
         could not be done without a mouse at all.
 
         The step is a tenth of the window, which is big enough to be worth a
-        keystroke and small enough to be steered by.
+        keystroke and small enough to be steered by. A positive direction
+        widens the lists, which sit on the left; a negative one widens the
+        detail panel.
         """
         sizes = self._splitter.sizes()
         if len(sizes) != 2 or sum(sizes) <= 0:

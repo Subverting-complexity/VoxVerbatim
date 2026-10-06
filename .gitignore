@@ -238,8 +238,10 @@ graphify-out/cost.json
 graphify-out/.graphify_python
 graphify-out/.graphify_root
 graphify-out/GRAPH_REPORT.md
-# Path/mtime indexes: embed absolute worktree paths + timestamps, so they
-# churn on every run in every worktree. The content-addressed cache stays
-# committed; these rebuild locally for free.
+# Path/mtime index: embeds absolute worktree paths + timestamps, so it
+# churns on every run in every worktree.
 graphify-out/manifest.json
-graphify-out/cache/stat-index.json
+# The analysis cache. It rebuilds in the same ~10s run, gains files on most
+# code changes, and keeps a folder per graphify version, so committing it
+# only left untracked files behind and stale versions in history.
+graphify-out/cache/

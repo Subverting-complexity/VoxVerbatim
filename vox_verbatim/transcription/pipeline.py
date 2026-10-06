@@ -242,8 +242,8 @@ def transcribe_recording(
         _log.exception("Comparing the services' answers failed for %s.", recording.name)
         transcript.warnings.append(
             "The services answered, but their answers could not be compared and "
-            f"reconciled: {error}. Each service's words are kept in the transcript "
-            "file and in the raw-responses folder."
+            f"reconciled: {error}. Each service's words are kept in the raw-responses "
+            "folder, and in the transcript file when this run saves one."
         )
         return _finish(transcript, store, started, stopped=False)
     reporter.stage("reconciling", 1.0, _reconciled_sentence(tokens))
@@ -837,13 +837,29 @@ def _finish(
     started: float,
     stopped: bool,
 ) -> Transcript:
-    """Save the transcript and its exports, and say how it went."""
+    """Save the transcript and its exports, and say how it went.
+
+    A run that produced no words never replaces an earlier transcript that
+    may hold them. That earlier file is where the user's review corrections
+    live, and a run that failed or was stopped has nothing to put in its
+    place.
+    """
     transcript.completed_at = _now()
     if stopped:
         transcript.warnings.append(
             "The run was stopped before it finished, so this transcript is "
             "incomplete."
         )
+    if _keeps_earlier_transcript(transcript, store):
+        transcript.warnings.append(
+            "This recording already had a transcript, and this run produced no "
+            "words, so the earlier transcript and its exports were kept unchanged."
+        )
+        _log.info(
+            "Kept the earlier transcript of %s, because this run produced no words.",
+            transcript.recording_name,
+        )
+        return transcript
     if not store.save(transcript):
         transcript.warnings.append(
             f"The transcript could not be saved to {store.transcript_path}. If another "
@@ -859,6 +875,21 @@ def _finish(
         len(transcript.review_tokens),
     )
     return transcript
+
+
+def _keeps_earlier_transcript(transcript: Transcript, store: TranscriptStore) -> bool:
+    """Whether an earlier transcript must be left alone rather than replaced.
+
+    Only a new transcript with no words is held back. An earlier file that
+    cannot be read is kept too: it may be locked or damaged rather than
+    empty, and replacing it would lose whatever it still holds. An earlier
+    transcript that itself has no words has nothing to lose, so it is
+    replaced as before.
+    """
+    if transcript.tokens or not store.has_transcript:
+        return False
+    earlier = store.load()
+    return earlier is None or bool(earlier.tokens)
 
 
 def _write_exports(transcript: Transcript, store: TranscriptStore) -> None:

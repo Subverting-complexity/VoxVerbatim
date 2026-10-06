@@ -663,6 +663,42 @@ def test_a_word_spelt_differently_on_each_side_still_joins():
     assert merged.joins[0].matched_words == 3
 
 
+def test_a_misheard_first_word_in_the_later_chunk_still_joins():
+    """The later chunk starts in the middle of speech, so its first word is
+    often clipped. "nine" heard as "mine" must not cost the seam its match,
+    or the join falls back to a guess and "morning" comes out twice."""
+    chunks = [chunk_record(0, 0.0, 6.0), chunk_record(1, 4.0, 10.0, overlap=2.0)]
+    first = words("the meeting began at nine on Tuesday morning", 0)
+    second = words("mine on Tuesday morning and ran for an hour", 1)
+
+    merged = merge_overlapping_tokens(first + second, chunks)
+
+    assert texts_of(merged) == (
+        "the meeting began at nine on Tuesday morning and ran for an hour".split()
+    )
+    assert texts_of(merged).count("morning") == 1
+    assert merged.joins[0].method == "text"
+    assert merged.joins[0].matched_words == 3
+    assert not merged.uncertain_joins
+
+
+def test_a_missing_first_word_in_the_later_chunk_still_joins():
+    """A first word clipped away entirely leaves the rest of the overlap to
+    match, and the join is made on that."""
+    chunks = [chunk_record(0, 0.0, 6.0), chunk_record(1, 4.0, 10.0, overlap=2.0)]
+    first = words("the meeting began at nine on Tuesday morning", 0)
+    second = words("on Tuesday morning and ran for an hour", 1)
+
+    merged = merge_overlapping_tokens(first + second, chunks)
+
+    assert texts_of(merged) == (
+        "the meeting began at nine on Tuesday morning and ran for an hour".split()
+    )
+    assert merged.joins[0].method == "text"
+    assert merged.joins[0].matched_words == 3
+    assert not merged.uncertain_joins
+
+
 def test_a_single_common_word_is_not_enough_to_join_on():
     """"The" matches almost anywhere, and joining on it would join in the
     wrong place, which loses real speech without anybody noticing."""

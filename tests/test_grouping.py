@@ -372,6 +372,43 @@ def test_short_words_are_not_guessed_at():
     assert len(groups) == 2
 
 
+def test_two_numbers_one_digit_apart_are_never_grouped():
+    """A near spelling of a number is a different value, not a misspelling.
+
+    Settling a group rewrites every occurrence in it, so grouping these
+    would turn one amount or telephone number into another across files.
+    """
+    for pair in (["150000", "160000"], ["0821234567", "0821234568"], ["R150,000", "R160,000"]):
+        occurrences = occurrences_from(pair)
+
+        groups = group_occurrences(occurrences, 0.05)
+
+        assert group_texts(groups, occurrences) == [{pair[0]}, {pair[1]}], pair
+
+
+def test_the_same_number_in_two_recordings_still_groups():
+    first = occurrences_from(["150000"])
+    second = [
+        replace(
+            occurrences_from(["150000"])[0],
+            id="occurrence-other",
+            recording_name="other.wav",
+        )
+    ]
+
+    groups = group_occurrences(first + second, 0.05)
+
+    assert len(groups) == 1
+
+
+def test_a_number_is_never_similar_to_another_number():
+    from vox_verbatim.transcription.grouping import _similar
+
+    assert not _similar("150000", "160000")
+    assert not _similar("0821234567", "0821234568")
+    assert _similar("bosch", "bosh")
+
+
 def test_a_form_reached_only_through_a_grown_cluster_still_joins():
     """The tolerance is measured against a cluster's whole range, as it grows.
 
@@ -435,6 +472,7 @@ def test_the_similarity_index_agrees_with_the_measure_it_stands_in_for():
         forms.add(root)
         forms.add(root[:-1] + rng.choice("xyz"))
         forms.add(root + rng.choice("en"))
+    forms.update(["150000", "160000", "1500000", "r150000", "r160000", "bosch1"])
     ordered = sorted(forms)
 
     forward, reverse = _similarity_partners(ordered)
@@ -467,6 +505,8 @@ def _group_occurrences_the_slow_way(
 
     def similar(first: str, second: str) -> bool:
         if not first or not second:
+            return False
+        if any(character.isdigit() for character in first + second):
             return False
         if min(len(first), len(second)) < SIMILARITY_MINIMUM_LENGTH:
             return False
@@ -547,7 +587,7 @@ def test_the_fast_clustering_gives_exactly_the_slow_answer():
     vocabulary = [
         "Bosch", "Bosh", "Bosche", "bosch", "Bösch", "Boesch", "bosc", "Boschen",
         "ledger", "ledgers", "ledge", "Jürgen", "Jurgen", "Juergen", "the", "they",
-        "form", "from", "forms", "Straße", "Strasse",
+        "form", "from", "forms", "Straße", "Strasse", "150000", "160000", "R150,000",
     ]
     for seed in range(60):
         rng = random.Random(seed)

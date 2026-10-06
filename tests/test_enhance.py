@@ -235,6 +235,61 @@ def test_a_run_that_would_overwrite_the_recording_itself_is_refused(tmp_path):
     assert "replace the recording itself" in result.message
 
 
+def test_another_recording_with_the_output_name_is_never_written_over(tmp_path):
+    """The output folder is the recordings folder, and replacing is on.
+
+    meeting.m4a would be written as meeting.wav, which is a different
+    recording that happens to share the name.
+    """
+    source = tmp_path / "meeting.m4a"
+    write_real_audio(source, level_db=-30.0)
+    other_recording = tmp_path / "meeting.wav"
+    write_real_audio(other_recording, level_db=-30.0, codec="pcm_s16le")
+    original_bytes = other_recording.read_bytes()
+    options = EnhanceOptions(output_folder=tmp_path, replace_existing=True)
+
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.SKIPPED
+    assert "meeting.m4a" in result.message
+    assert "meeting.wav is a recording in the same folder" in result.message
+    assert other_recording.read_bytes() == original_bytes
+
+
+def test_sources_that_share_an_output_name_are_all_skipped(tmp_path, options):
+    """talk.m4a and talk.mp3 would both become talk.wav, the second over the first."""
+    first = tmp_path / "talk.m4a"
+    second = tmp_path / "talk.mp3"
+    unrelated = tmp_path / "quiet.m4a"
+    # Neither clashing file is ever decoded, so they need not hold audio.
+    write_fake_audio(first)
+    write_fake_audio(second)
+    write_real_audio(unrelated, level_db=-30.0)
+    reported: list = []
+    seen: list[float] = []
+
+    results = enhance_files(
+        [first, unrelated, second],
+        EnhanceOptions(output_folder=options.output_folder, replace_existing=True),
+        progress=seen.append,
+        on_result=reported.append,
+    )
+
+    by_source = {result.source: result for result in results}
+    assert by_source[first].outcome == Outcome.SKIPPED
+    assert by_source[second].outcome == Outcome.SKIPPED
+    assert "talk.mp3" in by_source[first].message
+    assert "talk.m4a" in by_source[second].message
+    assert "talk.wav" in by_source[first].message
+    assert not (options.output_folder / "talk.wav").exists()
+    # The clashes are reported before anything is written.
+    assert [result.source for result in reported[:2]] == [first, second]
+    assert by_source[unrelated].outcome == Outcome.ENHANCED
+    assert (options.output_folder / "quiet.wav").is_file()
+    assert seen == sorted(seen), "progress must never go backwards"
+    assert seen[-1] == pytest.approx(1.0)
+
+
 def test_the_output_folder_is_created_when_it_is_not_there(tmp_path):
     source = tmp_path / "quiet.m4a"
     write_real_audio(source, level_db=-30.0)

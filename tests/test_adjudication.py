@@ -33,6 +33,7 @@ from vox_verbatim.transcription.adjudication import (
     RefusalReason,
     build_prompt,
 )
+from vox_verbatim.transcription.exports import render_token_text
 from vox_verbatim.transcription.model import (
     AlignmentStatus,
     Candidate,
@@ -480,6 +481,21 @@ def test_a_high_risk_span_may_still_be_confirmed_as_it_stands(money_dispute):
 
     assert money_dispute.tokens[0].text == "15,000"
     assert outcome.applied[0].action is EditAction.KEEP
+
+
+def test_keeping_a_high_risk_span_leaves_it_uncertain_in_the_export(money_dispute):
+    """A keep confirms nothing about an amount. It stays an open question,
+    and the export still shows both readings rather than one plain number."""
+    client = FakeClient(answer(decision("tok-500", "keep", "15,000", "15,000")))
+    build_adjudicator(client).adjudicate([money_dispute])
+
+    token = money_dispute.tokens[0]
+    assert token.text == "15,000"
+    assert token.text_confidence is Confidence.UNRESOLVED
+    assert token.is_uncertain_between() == ("15,000", "50,000")
+    assert ReviewReason.HIGH_RISK_ENTITY in token.review_reasons
+    assert token.llm_decision
+    assert render_token_text(token) == "[UNCERTAIN: 15,000 / 50,000]"
 
 
 # -- Refusal 5: declining, which is a good answer ------------------------

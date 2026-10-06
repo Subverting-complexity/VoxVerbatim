@@ -665,7 +665,13 @@ def _similarity_partners(
     """
     forward: dict[str, set[str]] = {}
     reverse: dict[str, set[str]] = {}
-    eligible = [form for form in forms if len(form) >= SIMILARITY_MINIMUM_LENGTH]
+    # A form with a digit is never similar to anything, so it is left out
+    # of the measuring altogether rather than measured and turned down.
+    eligible = [
+        form
+        for form in forms
+        if len(form) >= SIMILARITY_MINIMUM_LENGTH and not _has_digit(form)
+    ]
     by_length: dict[int, list[str]] = {}
     for form in eligible:
         by_length.setdefault(len(form), []).append(form)
@@ -757,12 +763,27 @@ def _similar(first: str, second: str) -> bool:
     from. It is only ever asked about a pair in one particular order -- the
     earlier cluster's form first -- because the matcher's answer is not
     guaranteed to be the same with the two strings swapped.
+
+    A form with a digit in it is never similar to anything. For a number, a
+    near spelling is a different value: "150000" and "160000" score well
+    above the threshold, and settling them as one group would rewrite one
+    amount as another in every file. Number words are already digits by the
+    time a form reaches here, so "one hundred and fifty thousand" is covered
+    too. The same number written the same way still groups, because an exact
+    match and an equivalence never come through this measure.
     """
     if not first or not second:
+        return False
+    if _has_digit(first) or _has_digit(second):
         return False
     if min(len(first), len(second)) < SIMILARITY_MINIMUM_LENGTH:
         return False
     return SequenceMatcher(None, first, second).ratio() >= SIMILARITY_THRESHOLD
+
+
+def _has_digit(form: str) -> bool:
+    """Whether a normalised form contains a digit, and so names a number."""
+    return any(character.isdigit() for character in form)
 
 
 def _representative_text(members: list[Occurrence]) -> str:

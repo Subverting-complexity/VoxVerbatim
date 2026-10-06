@@ -54,7 +54,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from vox_verbatim.transcription.model import RiskCategory
-from vox_verbatim.transcription.normalise import read_number
+from vox_verbatim.transcription.normalise import MINUS_SIGNS, read_number
 
 #: How far a keyword may reach to claim a number, in words. Three covers
 #: "fifteen thousand five hundred rand" from either end, and stops short of
@@ -387,11 +387,17 @@ def _clean(text: str) -> str:
 
     Only punctuation at the edges is removed, and nothing inside the word is
     touched. A comma inside "1,500" is the whole question this module is
-    careful about, so it must survive to be looked at.
+    careful about, so it must survive to be looked at. A minus sign in front
+    of a digit survives too, written as a plain "-", because "-5" and "5"
+    are different numbers.
     """
     stripped = unicodedata.normalize("NFKC", text).strip().casefold()
     while stripped and _is_trimmable(stripped[0]):
+        if stripped[0] in MINUS_SIGNS and stripped[1:2].isdigit():
+            break
         stripped = stripped[1:]
+    if stripped[:1] in MINUS_SIGNS and stripped[1:2].isdigit():
+        stripped = "-" + stripped[1:]
     while stripped and _is_trimmable(stripped[-1]):
         stripped = stripped[:-1]
     return stripped

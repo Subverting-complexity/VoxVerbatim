@@ -235,6 +235,13 @@ def test_different_numbers_disagree() -> None:
     assert numbers_disagree("15000", "50000")
 
 
+def test_a_dropped_minus_or_per_cent_sign_is_a_disagreement() -> None:
+    assert numbers_disagree("-5", "5")
+    assert numbers_disagree("50%", "50")
+    assert not numbers_disagree("-5", "-5")
+    assert not numbers_disagree("−5", "-5")
+
+
 def test_two_readings_of_an_ambiguous_separator_disagree() -> None:
     # "15,000" and "15.000" are the same characters read under two
     # conventions and are a thousand-fold apart. Nothing here may decide

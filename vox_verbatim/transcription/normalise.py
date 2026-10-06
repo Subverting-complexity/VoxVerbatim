@@ -148,6 +148,12 @@ _APOSTROPHES = frozenset("'’‘ʼʹ‛′`´")
 #: neither is the number the digits spell when run together.
 _DASHES = frozenset("-‐‑‒–—―−/_")
 
+#: Every shape a minus sign arrives in. A dash at the start of a word with a
+#: digit straight after it is a minus, not a hyphen, and turning it into a
+#: space would make "-5" and "5" the same evidence. All of these are written
+#: as the one plain "-" so that "−5" and "-5" still meet.
+MINUS_SIGNS = frozenset("-‐‑‒–—―−")
+
 #: The German letters and what they are also written as. Note that
 #: ``str.casefold`` already turns "ß" into "ss", so by the time this table
 #: is used the eszett has usually gone; it is listed anyway so that the
@@ -386,6 +392,30 @@ def _case_form(text: str) -> str:
     return " ".join(folded.split())
 
 
+def _is_minus(text: str, index: int) -> bool:
+    """Whether the dash at ``index`` is a minus sign rather than a hyphen.
+
+    It is a minus when a digit follows it and it starts a word: it begins the
+    text, or follows a space, an opening bracket or a quote mark, as in
+    "(-5)". A dash after anything else joins two things, as in "well-known",
+    "10-20" or "10%-20%", and stays a hyphen.
+    """
+    return (
+        text[index] in MINUS_SIGNS
+        and (index == 0 or _opens_a_word(text[index - 1]))
+        and index + 1 < len(text)
+        and text[index + 1].isdigit()
+    )
+
+
+def _opens_a_word(character: str) -> bool:
+    """Whether a word can start straight after ``character``."""
+    return (
+        character.isspace()
+        or character in "\"'"
+        or unicodedata.category(character) in ("Ps", "Pi")
+    )
+
 def _between_digits(text: str, index: int) -> bool:
     return (
         index > 0
@@ -402,6 +432,12 @@ def _plain_form(text: str) -> str:
     A comma or a full stop between two digits survives this stage. They are
     not punctuation there, they are part of a number, and the number stage
     below is the only place that has any business deciding what they mean.
+
+    Three more marks survive because they change the value: a minus sign in
+    front of a digit, a per-cent sign after one, and a colon between two, as
+    in a time of day. Dropping them would make "-5" and "5", "50%" and
+    "50", and "10:30" and "1030" the same evidence, and those are exactly
+    the differences a person has to see.
     """
     source = _case_form(text)
     characters: list[str] = []
@@ -413,6 +449,12 @@ def _plain_form(text: str) -> str:
             # digits one and two read out separately. This test comes
             # before the dash test because the slash is also a dash.
             characters.append(character)
+        elif character == ":" and _between_digits(source, index):
+            characters.append(character)
+        elif character == "%" and index > 0 and source[index - 1].isdigit():
+            characters.append(character)
+        elif _is_minus(source, index):
+            characters.append("-")
         elif character in _DASHES:
             characters.append(" ")
         elif character in _APOSTROPHES:
@@ -623,6 +665,11 @@ def _digit_group(word: str) -> str | None:
     English and the opposite in German, and a wrong guess produces a number
     that looks entirely reasonable and is out by a factor of a thousand.
     """
+    if word.startswith("-") and len(word) > 1:
+        # A minus sign stays in front of the number it belongs to, so that
+        # "-1,200" and "-1200" meet and neither meets "1200".
+        digits = _digit_group(word[1:])
+        return None if digits is None else "-" + digits
     if word.isdigit():
         return word
     if "," not in word:

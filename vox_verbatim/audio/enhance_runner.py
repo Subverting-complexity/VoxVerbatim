@@ -163,7 +163,11 @@ class EnhanceRunner(QObject):
             )
         except Exception as error:  # the dialog must be told, whatever happened
             _log.exception("The enhancement run stopped unexpectedly.")
-            results = reported + _failed_results(files[len(reported):], error)
+            # Results do not arrive in file order: files whose outputs clash
+            # are reported before any other file starts.
+            answered = {result.source for result in reported}
+            unanswered = [source for source in files if source not in answered]
+            results = reported + _failed_results(unanswered, error)
         # The summary goes out even when the run was cancelled, because the
         # dialog has to switch its controls back on and say what was done
         # before the user stopped it.

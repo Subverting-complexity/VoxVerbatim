@@ -1111,7 +1111,17 @@ def _write_text(dispute: Dispute, action: EditAction, to_text: str, reason: str)
         # person's own reading. So the word improves as far as "review
         # suggested" and no further, and stays visible in the review queue
         # rather than being marked settled on a model's say-so.
-        token.text_confidence = Confidence.REVIEW_SUGGESTED
+        #
+        # A high-risk word - an amount, a date, an account number - is never
+        # raised by the model at all, not even when it only confirms the
+        # reading. Raising an unresolved amount to "review suggested" would
+        # drop its [UNCERTAIN: a / b] marker from the export and show one
+        # plain number, which settles it in effect. So its confidence stays
+        # what the evidence gave it, and it is flagged for a person.
+        if dispute.is_high_risk:
+            token.flag(ReviewReason.HIGH_RISK_ENTITY)
+        else:
+            token.text_confidence = Confidence.REVIEW_SUGGESTED
         token.llm_decision = f"{note} {reason}".strip()
 
     after = [_identity_of(token) for token in dispute.tokens]

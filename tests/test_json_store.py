@@ -44,6 +44,19 @@ def test_a_save_lands_and_reads_back(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == [path]
 
 
+def test_a_file_saved_with_a_byte_order_mark_reads_back(tmp_path: Path) -> None:
+    """Notepad and PowerShell can put a UTF-8 byte order mark at the start."""
+    path = tmp_path / "settings.json"
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"a": 1}).encode("utf-8"))
+    assert read_json_object(path) == {"a": 1}
+
+
+def test_a_file_that_is_not_utf8_is_still_treated_as_damaged(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_bytes('{"a": 1}'.encode("utf-16"))
+    assert read_json_object(path) is None
+
+
 def test_a_file_held_open_for_a_moment_is_tried_again(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "settings.json"
     path.write_text('{"a": 0}', encoding="utf-8")

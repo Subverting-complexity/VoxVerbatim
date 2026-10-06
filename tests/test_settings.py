@@ -37,6 +37,19 @@ def test_a_damaged_settings_file_gives_the_defaults(tmp_path):
     assert SettingsStore(path).load() == Settings()
 
 
+def test_a_settings_file_with_a_byte_order_mark_keeps_its_values(tmp_path):
+    """A hand edit in Notepad or PowerShell can add a byte order mark."""
+    path = tmp_path / "settings.json"
+    store = SettingsStore(path)
+    assert store.save(Settings(reopen_last_folder=False, short_skip_seconds=10))
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+
+    loaded = SettingsStore(path).load()
+
+    assert loaded.reopen_last_folder is False
+    assert loaded.short_skip_seconds == 10
+
+
 def test_a_settings_file_that_is_not_text_gives_the_defaults(tmp_path):
     path = tmp_path / "settings.json"
     path.write_bytes(b'{"reopen_last_folder": \xff\xfe}')

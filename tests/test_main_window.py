@@ -307,6 +307,20 @@ def make_transcript(name: str, needing_review: int = 1) -> Transcript:
     return transcript
 
 
+def test_settings_opens_on_ctrl_comma_where_the_platform_names_no_preferences_key(qapp, store):
+    """Qt gives StandardKey.Preferences no key on Windows.
+
+    The Settings action used it, so on Windows it had no shortcut at all
+    while the README and the F1 list both said to press Ctrl+comma.
+    """
+    window = open_window(qapp, store)
+    try:
+        assert window._settings_action.shortcut() == QKeySequence("Ctrl+,")
+        assert window._settings_action in window.actions()
+    finally:
+        close_window(window)
+
+
 def test_transcribe_is_offered_as_a_button_a_menu_entry_and_a_shortcut(qapp, store):
     window = open_window(qapp, store)
     try:

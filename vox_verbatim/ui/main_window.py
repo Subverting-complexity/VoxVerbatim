@@ -300,10 +300,13 @@ class MainWindow(QMainWindow):
             self.show_review,
         )
         file_menu.addSeparator()
-        self._add_action(
+        # Named outright rather than as StandardKey.Preferences: Qt gives
+        # Preferences no key at all on Windows, so the action had no shortcut
+        # there although the README and the F1 list both name this one.
+        self._settings_action = self._add_action(
             file_menu,
             "&Settings...",
-            QKeySequence.StandardKey.Preferences,
+            QKeySequence("Ctrl+,"),
             self.show_settings,
         )
         self._add_action(file_menu, "Open &Log File", None, self.open_log_file)

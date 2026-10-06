@@ -56,8 +56,8 @@ The site shows the key only one time. If you lose it, make a new key.
 ## Step 3: Open the Settings dialog
 
 1. Start VoxVerbatim.
-2. Select **File**, then **Settings...**. With the keyboard, press
-   `Alt+F`, then `S`.
+2. Press `Ctrl+,` (Ctrl and comma). Or select **File**, then
+   **Settings...**. With the keyboard, you can also press `Alt+F`, then `S`.
 
 The Settings dialog opens. The focus is on the category list at the
 left. Use the `Up` and `Down` arrow keys to move between categories. The

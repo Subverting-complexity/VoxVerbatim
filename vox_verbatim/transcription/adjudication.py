@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -103,6 +104,9 @@ SCHEMA_NAME = "transcript_adjudication"
 #: these is dropped before a request is written into provenance, because a
 #: transcript folder is copied around and read by people.
 _CREDENTIAL_NAMES = ("api_key", "apikey", "key", "token", "secret", "password", "authorization")
+"""Matched against a parameter name and against each word in it, never as a
+substring: ``max_output_tokens`` contains "token" but is a length, and a
+provenance record without it cannot say what was sent."""
 
 
 class AdjudicationUnavailable(Exception):
@@ -1106,6 +1110,10 @@ def _write_text(dispute: Dispute, action: EditAction, to_text: str, reason: str)
         if action is EditAction.REPLACE and word != token.text:
             token.text = word
             token.normalised_text = normalise(word)
+            # The transcript says which service each answer came from, and
+            # the service that read the word before has just lost. A reading
+            # only the vocabulary offered came from no service at all.
+            token.text_source = _service_that_offered(word, token, dispute)
         # Adjudicated, not proven. The model weighed evidence a rule could
         # not, which is worth more than an unresolved word and less than a
         # person's own reading. So the word improves as far as "review
@@ -1131,6 +1139,17 @@ def _write_text(dispute: Dispute, action: EditAction, to_text: str, reason: str)
             token.normalised_text = normalise(original)
         return False
     return True
+
+
+def _service_that_offered(word: str, token: FinalToken, dispute: Dispute) -> Provider | None:
+    """The first service that heard this word here, or None if none did."""
+    for candidate in token.candidates:
+        if candidate.providers and are_equivalent(candidate.text, word):
+            return candidate.providers[0]
+    for heard in dispute.escalation_tokens:
+        if are_equivalent(heard.text, word):
+            return heard.provider
+    return None
 
 
 def _identity_of(token: FinalToken) -> tuple[Any, ...]:
@@ -1255,7 +1274,8 @@ def without_credentials(parameters: dict[str, Any]) -> dict[str, Any]:
     cleaned: dict[str, Any] = {}
     for key, value in parameters.items():
         lowered = str(key).lower()
-        if any(name in lowered for name in _CREDENTIAL_NAMES):
+        words = re.split(r"[^a-z0-9]+", lowered)
+        if lowered in _CREDENTIAL_NAMES or any(word in _CREDENTIAL_NAMES for word in words):
             continue
         cleaned[key] = without_credentials(value) if isinstance(value, dict) else value
     return cleaned

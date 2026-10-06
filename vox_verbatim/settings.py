@@ -51,7 +51,16 @@ from vox_verbatim.transcription.model import Provider
 SETTINGS_FILE_NAME = "settings.json"
 
 #: Bumped only if the shape on disk changes in a way that needs migrating.
-SETTINGS_FORMAT_VERSION = 1
+#: Version 2 moved files that saved the old default adjudication model on
+#: to the new one; see ``_migrate_adjudication_model``.
+SETTINGS_FORMAT_VERSION = 2
+
+#: The default adjudication model before version 2 of the file.
+_RETIRED_ADJUDICATION_MODEL = "gpt-5.6"
+
+#: Efforts GPT-6.1 Sol refuses. A file that saved one of these beside the
+#: old model would fail every request once the model is moved on.
+_EFFORTS_THE_NEW_MODEL_REFUSES = ("none", "minimal")
 
 #: A skip of less than a second is no use, and more than an hour is beyond
 #: what these buttons are for.
@@ -78,14 +87,15 @@ DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-transcribe"
 #: because adjudication is a reasoning task rather than a listening one.
 #: This is the model family that moves fastest of everything named here,
 #: which is exactly why the setting is free text.
-DEFAULT_OPENAI_ADJUDICATION_MODEL = "gpt-5.6"
+DEFAULT_OPENAI_ADJUDICATION_MODEL = "gpt-6.1-sol"
 
 #: How hard the adjudicating model should think. Which words a model
 #: accepts here is its own business, and they have changed more than once,
 #: so this is free text rather than a list. Empty is meaningful: it means
 #: the parameter is left out of the request altogether, which is what a
-#: model that does not accept it at all needs.
-DEFAULT_OPENAI_REASONING_EFFORT = "medium"
+#: model that does not accept it at all needs. Low is the least effort
+#: GPT-6.1 Sol accepts: it takes neither none nor minimal.
+DEFAULT_OPENAI_REASONING_EFFORT = "low"
 
 #: ElevenLabs Scribe v2, the structural backbone: word timings, speaker
 #: labels and log probabilities all come from it.
@@ -988,7 +998,29 @@ class Settings:
         transcription = data.get("transcription")
         if isinstance(transcription, dict):
             settings.transcription = TranscriptionSettings.from_dict(transcription)
+        version = data.get("version")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 2:
+            _migrate_adjudication_model(settings.transcription.openai_adjudication)
         return settings
+
+
+def _migrate_adjudication_model(section: OpenAiAdjudicationSettings) -> None:
+    """Move a file that saved the old default model on to the new default.
+
+    Saving writes every field, so anyone who ever pressed Save has the old
+    default stored as if they had chosen it, and a changed default alone
+    would never reach them. This runs only for files written before
+    version 2. A file saved since then carries version 2, so someone who
+    deliberately picks the old model again keeps it.
+
+    A saved effort is kept, because the new model accepts it too, except
+    for the two the new model refuses, which become its default.
+    """
+    if section.model != _RETIRED_ADJUDICATION_MODEL:
+        return
+    section.model = DEFAULT_OPENAI_ADJUDICATION_MODEL
+    if section.reasoning_effort in _EFFORTS_THE_NEW_MODEL_REFUSES:
+        section.reasoning_effort = DEFAULT_OPENAI_REASONING_EFFORT
 
 
 def _clean_skip(value: Any, default: int) -> int:

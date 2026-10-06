@@ -514,6 +514,72 @@ def test_a_file_written_by_the_current_application_still_loads(tmp_path):
     assert loaded.transcription.openai_transcription.model == DEFAULT_OPENAI_TRANSCRIPTION_MODEL
 
 
+def _adjudication_from_file(version: Any, model: str, effort: str) -> OpenAiAdjudicationSettings:
+    data: dict[str, Any] = {
+        "transcription": {"openai_adjudication": {"model": model, "reasoning_effort": effort}}
+    }
+    if version is not None:
+        data["version"] = version
+    return Settings.from_dict(data).transcription.openai_adjudication
+
+
+def test_an_older_file_holding_the_retired_default_model_moves_to_the_new_one():
+    """Saving writes every field, so the old default sits in the file as if
+    it had been chosen, and only a migration can move these people on."""
+    for version in (None, 1):
+        section = _adjudication_from_file(version, "gpt-5.6", "medium")
+
+        assert section.model == DEFAULT_OPENAI_ADJUDICATION_MODEL
+        assert section.reasoning_effort == "medium"
+
+
+def test_a_migrated_effort_the_new_model_refuses_becomes_its_default():
+    for refused in ("none", "minimal"):
+        section = _adjudication_from_file(1, "gpt-5.6", refused)
+
+        assert section.reasoning_effort == "low"
+
+
+def test_a_migrated_empty_effort_still_means_do_not_send_it():
+    assert _adjudication_from_file(1, "gpt-5.6", "").reasoning_effort == ""
+
+
+def test_an_older_file_holding_another_model_is_left_alone():
+    section = _adjudication_from_file(1, "gpt-6-astra", "minimal")
+
+    assert section.model == "gpt-6-astra"
+    assert section.reasoning_effort == "minimal"
+
+
+def test_a_current_file_keeps_the_retired_model_because_someone_chose_it():
+    """The migration runs once. After that the old model is a choice."""
+    section = _adjudication_from_file(SETTINGS_FORMAT_VERSION, "gpt-5.6", "none")
+
+    assert section.model == "gpt-5.6"
+    assert section.reasoning_effort == "none"
+
+
+def test_a_migrated_file_is_saved_as_the_current_version(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "transcription": {"openai_adjudication": {"model": "gpt-5.6"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SettingsStore(path)
+    store.save(store.load())
+
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["version"] == SETTINGS_FORMAT_VERSION
+    assert written["transcription"]["openai_adjudication"]["model"] == (
+        DEFAULT_OPENAI_ADJUDICATION_MODEL
+    )
+
+
 def test_a_file_holding_only_some_of_the_new_settings_keeps_the_rest(tmp_path):
     """Settings arrive one release at a time, and a file written between two
     of them has some sections and not others."""
@@ -598,10 +664,8 @@ def test_an_empty_reasoning_effort_is_kept_because_it_means_do_not_send_it():
     """Models differ in which parameters they accept, and clearing this is
     how the user says the parameter must be left out."""
     assert OpenAiAdjudicationSettings.from_dict({"reasoning_effort": ""}).reasoning_effort == ""
-    assert OpenAiAdjudicationSettings.from_dict({}).reasoning_effort == "medium"
-    assert OpenAiAdjudicationSettings.from_dict({"reasoning_effort": 7}).reasoning_effort == (
-        "medium"
-    )
+    assert OpenAiAdjudicationSettings.from_dict({}).reasoning_effort == "low"
+    assert OpenAiAdjudicationSettings.from_dict({"reasoning_effort": 7}).reasoning_effort == "low"
 
 
 def test_a_switch_that_is_not_a_switch_falls_back():

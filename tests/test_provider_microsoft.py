@@ -24,7 +24,8 @@ from typing import Any
 
 import pytest
 
-from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription.context import adapt_for, build_context_package
+from vox_verbatim.transcription.model import Language, Provider, RecordingConfiguration
 from vox_verbatim.transcription.providers import microsoft
 from vox_verbatim.transcription.providers.base import (
     ProviderNotConfigured,
@@ -32,6 +33,7 @@ from vox_verbatim.transcription.providers.base import (
     TranscriptionRequest,
 )
 from vox_verbatim.transcription.providers.microsoft import MicrosoftProvider
+from vox_verbatim.transcription.vocabulary import VocabularyTerm
 
 API_KEY = "microsoft-secret-key-9f2a"
 ENDPOINT = "https://my-resource.cognitiveservices.azure.com"
@@ -697,6 +699,94 @@ def test_the_record_names_the_phrases_a_setting_added(tmp_path: Path) -> None:
     record = result.request
     assert record is not None
     assert record.vocabulary_terms == ("Contoso", "Fabrikam")
+
+
+# -- The vocabulary goes in the phrase list and nowhere else --------------
+
+
+def test_a_stray_phrases_extra_is_not_sent_beside_the_phrase_list(tmp_path: Path) -> None:
+    """A top-level ``phrases`` field is not part of the definition.
+
+    The vocabulary has one home, ``phraseList.phrases``. A second copy at the
+    top level is at best ignored and at worst refused.
+    """
+    client = FakeHttpClient()
+    provider = make_provider(client)
+    provider.transcribe(
+        make_request(
+            tmp_path,
+            vocabulary_terms=("Contoso",),
+            extra_parameters={"phrases": ["Contoso"]},
+        )
+    )
+
+    definition = client.posts[0]["definition"]
+    assert "phrases" not in definition
+    assert definition["phraseList"] == {"phrases": ["Contoso"]}
+
+
+def test_a_stray_phrases_extra_does_not_reach_the_older_model(tmp_path: Path) -> None:
+    """The model that takes no phrase list is sent no vocabulary in any field."""
+    client = FakeHttpClient()
+    provider = make_provider(client, model="mai-transcribe-1")
+    result = provider.transcribe(
+        make_request(
+            tmp_path,
+            vocabulary_terms=("Contoso",),
+            extra_parameters={"phrases": ["Contoso"]},
+        )
+    )
+
+    definition = client.posts[0]["definition"]
+    assert "phrases" not in definition
+    assert "phraseList" not in definition
+    assert not contains_text(definition, "Contoso")
+    record = result.request
+    assert record is not None
+    assert record.vocabulary_terms == ()
+    assert not contains_text(record.request_parameters, "Contoso")
+
+
+def test_a_phrases_setting_is_not_sent_as_a_top_level_field(tmp_path: Path) -> None:
+    """A hand-edited Settings extra cannot bring the stray field back."""
+    client = FakeHttpClient()
+    provider = make_provider(client, parameters={"phrases": ["Fabrikam"]})
+    provider.transcribe(make_request(tmp_path, vocabulary_terms=("Contoso",)))
+
+    definition = client.posts[0]["definition"]
+    assert "phrases" not in definition
+    assert definition["phraseList"] == {"phrases": ["Contoso"]}
+
+
+@pytest.mark.parametrize(
+    ("model", "phrase_list"),
+    [
+        ("mai-transcribe-1.5", {"phrases": ["Vermeulen"]}),
+        ("mai-transcribe-1", None),
+    ],
+)
+def test_the_context_for_microsoft_sends_no_top_level_phrases(
+    tmp_path: Path, model: str, phrase_list: dict[str, list[str]] | None
+) -> None:
+    """From the context package to the posted definition, the way a pass does it."""
+    package = build_context_package(RecordingConfiguration(), [VocabularyTerm(text="Vermeulen")])
+    prepared = adapt_for(package, Provider.MICROSOFT)
+    client = FakeHttpClient()
+    provider = make_provider(client, model=model)
+    provider.transcribe(
+        make_request(
+            tmp_path,
+            vocabulary_terms=prepared.terms,
+            context_prompt=prepared.prompt,
+            extra_parameters=dict(prepared.parameters),
+        )
+    )
+
+    definition = client.posts[0]["definition"]
+    assert "phrases" not in definition
+    assert definition.get("phraseList") == phrase_list
+    if phrase_list is None:
+        assert not contains_text(definition, "Vermeulen")
 
 
 def test_the_record_names_the_locale_that_was_actually_sent(tmp_path: Path) -> None:

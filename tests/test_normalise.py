@@ -67,6 +67,49 @@ def test_punctuation_and_apostrophes_are_set_aside(first, second):
     assert equivalence_kind(first, second) is EquivalenceKind.PUNCTUATION_ONLY
 
 
+@pytest.mark.parametrize(
+    ("contraction", "word"),
+    [
+        ("we're", "were"),
+        ("we'll", "well"),
+        ("I'll", "ill"),
+        ("she'd", "shed"),
+        ("he'll", "hell"),
+        ("I'd", "id"),
+        ("she'll", "shell"),
+    ],
+)
+def test_a_contraction_that_spells_another_word_stays_apart(contraction, word):
+    assert equivalence_kind(contraction, word) is EquivalenceKind.DIFFERENT
+    assert not are_equivalent(contraction, word)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("we're", "we’re"), ("I'll", "I’ll"), ("we’ll", "weʼll")],
+)
+def test_the_shape_of_the_apostrophe_in_a_contraction_does_not_matter(first, second):
+    assert equivalence_kind(first, second) is EquivalenceKind.PUNCTUATION_ONLY
+
+
+def test_quote_marks_around_a_word_are_not_a_contraction():
+    assert equivalence_kind("'were'", "were") is EquivalenceKind.PUNCTUATION_ONLY
+    assert equivalence_kind("‘we're’", "we're") is EquivalenceKind.PUNCTUATION_ONLY
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("a ' b", "a b"), ("so ’ then", "so then"), ("the ` word", "the word")],
+)
+def test_an_apostrophe_standing_alone_is_only_punctuation(first, second):
+    assert equivalence_kind(first, second) is EquivalenceKind.PUNCTUATION_ONLY
+
+
+def test_a_phrase_with_a_contraction_does_not_meet_the_ordinary_word():
+    assert normalise("we're going") != normalise("were going")
+    assert not are_equivalent("we're going", "were going")
+
+
 def test_punctuation_on_its_own_has_no_comparison_form():
     assert normalise(",") == ""
     assert is_punctuation_only(".")
@@ -230,6 +273,32 @@ def test_a_thousands_comma_does_not_change_the_number():
     assert equivalence_kind("1,000", "1000") is EquivalenceKind.NUMBER_FORMAT
     assert are_equivalent("15,000", "fifteen thousand")
 
+
+
+class TestAmountsWithPrefixesAndDecimals:
+    """A currency prefix or a decimal tail does not hide a thousands comma.
+
+    "R15,000" and "R15 000" are the same amount written two ways, so they
+    must not be shown to the user as a disagreement. The comma grouping
+    stays strict, so a different amount still reads as different.
+    """
+
+    def test_a_currency_prefix_does_not_stop_the_comma_being_a_separator(self):
+        assert equivalence_kind("R15,000", "R15 000").is_equivalent
+        assert equivalence_kind("$1,000", "$1000") is EquivalenceKind.NUMBER_FORMAT
+
+    def test_a_decimal_tail_after_a_comma_grouping_is_kept(self):
+        assert equivalence_kind("1,000.50", "1000.50") is EquivalenceKind.NUMBER_FORMAT
+        assert are_equivalent("R1,000.50", "R1000.50")
+
+    def test_a_different_amount_with_the_same_prefix_stays_different(self):
+        assert equivalence_kind("R15,000", "R50,000") is EquivalenceKind.DIFFERENT
+
+    def test_the_fraction_is_kept_exactly_as_written(self):
+        assert not are_equivalent("1,000.50", "1000.5")
+
+    def test_german_decimal_order_is_still_not_guessed(self):
+        assert not are_equivalent("1.000,50", "1000.50")
 
 def test_a_full_stop_between_digits_is_left_exactly_where_it_is():
     """A full stop means one thing in English and the opposite in German.

@@ -37,9 +37,13 @@ def read_json_object(path: Path) -> dict[str, Any] | None:
 
     # The bytes are decoded here rather than on the way in, so that a file
     # holding something other than UTF-8 text is treated as damaged like any
-    # other unreadable file instead of raising.
+    # other unreadable file instead of raising. ``utf-8-sig`` drops a leading
+    # byte order mark, which Notepad and PowerShell add when a person edits
+    # the file by hand as the README invites; plain ``utf-8`` keeps the mark
+    # and ``json.loads`` then refuses the file, so every setting is lost.
+    # Otherwise it decodes exactly like ``utf-8``, so bad bytes still raise.
     try:
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, ValueError):
         _log.warning("%s could not be read as JSON; ignoring it.", path)
         return None

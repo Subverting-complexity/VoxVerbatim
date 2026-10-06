@@ -61,7 +61,7 @@ class RecordingOutcome:
 
     path: Path
     transcribed: bool = False
-    """Whether a transcript was made for this recording."""
+    """Whether a transcript with at least one word was made for this recording."""
     word_count: int = 0
     review_count: int = 0
     """How many words this recording is waiting for a person to settle."""
@@ -70,6 +70,8 @@ class RecordingOutcome:
     """Where the transcript and everything that explains it were written."""
     error: str = ""
     """Why there is no transcript, where there is none."""
+    incomplete: bool = False
+    """Whether the run was stopped while this recording was in hand."""
 
     @classmethod
     def of_transcript(
@@ -78,14 +80,30 @@ class RecordingOutcome:
         transcript: Transcript,
         transcript_folder: Path | None = None,
     ) -> "RecordingOutcome":
-        """What there is to say about a finished transcript, without keeping it."""
+        """What there is to say about a finished transcript, without keeping it.
+
+        A transcript with no words counts as a failure, not a success. The
+        pipeline does not raise when every service fails; it hands back an
+        empty transcript with a warning for each one. Counting that as
+        transcribed would have the run announce "Finished" with nothing to
+        show for it, and offer to open a transcript that holds no words.
+        """
+        has_words = bool(transcript.tokens)
+        error = ""
+        if not has_words:
+            if transcript.stopped:
+                error = "The run was stopped before any words were transcribed."
+            else:
+                error = " ".join(transcript.warnings) or "No service returned any words."
         return cls(
             path=path,
-            transcribed=True,
+            transcribed=has_words,
             word_count=len(transcript.tokens),
             review_count=len(transcript.review_tokens),
             warnings=tuple(transcript.warnings),
             transcript_folder=transcript_folder,
+            error=error,
+            incomplete=transcript.stopped,
         )
 
     @property
@@ -106,6 +124,10 @@ class RecordingOutcome:
         them behind a count would leave the user trusting a transcript they
         would have questioned.
         """
+        # Where there are no words, the error already says why, and the
+        # warnings it was built from are not repeated after it.
+        if not self.transcribed and self.incomplete:
+            return f"{self.name} was stopped before it was transcribed."
         if not self.transcribed:
             return f"{self.name} could not be transcribed. {self.error}".strip()
         words = _count(self.word_count, "word")
@@ -113,7 +135,14 @@ class RecordingOutcome:
             waiting = f"{_count(self.review_count, 'word')} waiting for review"
         else:
             waiting = "nothing waiting for review"
-        lines = [f"{self.name}: {words}, with {waiting}."]
+        if self.incomplete:
+            first = (
+                f"{self.name}: {words}, with {waiting}, but the run was stopped part "
+                "way, so the transcript is incomplete."
+            )
+        else:
+            first = f"{self.name}: {words}, with {waiting}."
+        lines = [first]
         lines.extend(self.warnings)
         return "\n".join(lines)
 
@@ -127,11 +156,20 @@ class RunSummary:
 
     @property
     def transcribed(self) -> int:
-        return sum(1 for result in self.results if result.succeeded)
+        """Recordings that ran to the end and produced words."""
+        return sum(1 for result in self.results if result.succeeded and not result.incomplete)
 
     @property
     def failed(self) -> int:
-        return sum(1 for result in self.results if not result.succeeded)
+        """Recordings that ran to the end without producing any words."""
+        return sum(
+            1 for result in self.results if not result.succeeded and not result.incomplete
+        )
+
+    @property
+    def incomplete(self) -> int:
+        """Recordings the run was stopped part way through, with or without words."""
+        return sum(1 for result in self.results if result.incomplete)
 
     @property
     def review_count(self) -> int:
@@ -417,6 +455,8 @@ def summarise(summary: RunSummary) -> str:
     parts = [f"{summary.transcribed} of {total} recordings transcribed"]
     if summary.failed:
         parts.append(f"{summary.failed} could not be transcribed")
+    if summary.incomplete:
+        parts.append(f"{summary.incomplete} stopped part way")
     counts = ", ".join(parts) + "."
     review = summary.review_count
     waiting = (
@@ -424,7 +464,7 @@ def summarise(summary: RunSummary) -> str:
     )
     if summary.cancelled:
         return f"The run was stopped. {counts} {waiting}"
-    if total and summary.failed == 0:
+    if total and summary.failed == 0 and summary.incomplete == 0:
         return f"Finished. {counts} {waiting}"
     return (
         f"Finished, with something to report. {counts} {waiting} See the list below for "

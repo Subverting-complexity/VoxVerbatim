@@ -564,6 +564,7 @@ def reconcile(
     tokens: list[FinalToken] = []
     rejected: list[TokenReference] = []
     consumed: set[int] = set()
+    word_rows = {row.position: row for row in table.rows if not row.is_insertion_row}
 
     for row in table.rows:
         if row.is_insertion_row:
@@ -602,15 +603,80 @@ def reconcile(
             escalated=escalated,
             adjudications=adjudications or {},
         )
+        before, after = _audio_events(scope, word_rows)
+        tokens.extend(before)
         if not produced:
             rejected.extend(_backbone_references(table, scope))
+            tokens.extend(after)
             continue
         _attach_rejected(produced[0], rejected)
         tokens.extend(produced)
+        tokens.extend(after)
 
     if rejected and tokens:
         tokens[-1].rejected_tokens.extend(rejected)
     return tokens
+
+
+def _audio_events(
+    scope: tuple[int, ...], word_rows: Mapping[int, AlignedRow]
+) -> tuple[list[FinalToken], list[FinalToken]]:
+    """The backbone's audio events in this scope, split by side of its words.
+
+    Alignment keeps audio events such as "(laughter)" out of the words it
+    matches and hangs them on a neighbouring word, the way it does with
+    punctuation. Nothing downstream reads that attached punctuation, so
+    without this the laughter would silently vanish from the transcript.
+    It happened in the room, so it is put back where it occurred, settled
+    and unflagged: no other service writes events down, and their silence
+    about one is not a disagreement.
+
+    An event whose index is below its word's came before that word, which
+    only happens before the first word of the recording; every other event
+    follows the word it hangs on. Where a scope covers several words (a
+    merge), an event between two of them comes out after the whole scope,
+    because the merged words are emitted together.
+
+    Only the backbone's events are kept. Another service's events hang on
+    its own columns and are dropped, which is accepted because ElevenLabs
+    is the one service that reports events and it is the preferred
+    backbone.
+    """
+    before: list[FinalToken] = []
+    after: list[FinalToken] = []
+    for position in scope:
+        row = word_rows.get(position)
+        if row is None or row.backbone_token is None:
+            continue
+        word_index = row.backbone_token.index
+        for token in row.punctuation:
+            if not token.is_audio_event:
+                continue
+            target = before if token.index < word_index else after
+            target.append(_audio_event_token(token))
+    return before, after
+
+
+def _audio_event_token(token: ProviderToken) -> FinalToken:
+    """A transcript entry for an audio event, exactly as the service gave it."""
+    final = FinalToken(
+        text=token.text,
+        normalised_text=normalise(token.text),
+        text_source=token.provider,
+        text_confidence=Confidence.HIGH,
+        speaker=token.speaker,
+        speaker_source=token.provider if token.speaker is not None else None,
+        language=token.language,
+        source_tokens=[TokenReference(token.provider, token.index)],
+        alignment_status=AlignmentStatus.UNALIGNED,
+    )
+    if token.has_timing:
+        final.start = token.start
+        final.end = token.end
+        final.timing_source = token.provider
+        final.timing_status = TimingStatus.EXACT_PROVIDER_TIME
+        final.timing_confidence = Confidence.HIGH
+    return final
 
 
 def _attach_rejected(token: FinalToken, rejected: list[TokenReference]) -> None:

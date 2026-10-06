@@ -195,7 +195,8 @@ def test_microsoft_is_sent_a_phrase_list_and_never_any_prose():
 
     written = adapt_for(package, Provider.MICROSOFT)
 
-    assert written.parameters == {"phrases": ["Vermeulen"]}
+    assert written.terms == ("Vermeulen",)
+    assert written.parameters == {}
     assert written.prompt == ""
 
 
@@ -387,7 +388,8 @@ def test_microsoft_stops_at_its_phrase_limit():
 
     written = adapt_for(package, Provider.MICROSOFT)
 
-    assert len(written.parameters["phrases"]) == MICROSOFT_MAXIMUM_PHRASES
+    assert len(written.terms) == MICROSOFT_MAXIMUM_PHRASES
+    assert written.parameters == {}
     assert written.dropped_term_count == 10
 
 

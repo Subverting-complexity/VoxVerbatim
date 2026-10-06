@@ -674,6 +674,8 @@ class _Stream:
     the word in front of it instead. Services disagree about punctuation
     far more than they disagree about words, and leaving it in would mean
     aligning a full stop against a comma and calling it a substitution.
+    Audio events such as "(laughter)" are treated the same way and end up
+    in ``punctuation`` too, for the same reason.
     """
 
     words: tuple[ProviderToken, ...] = ()
@@ -694,7 +696,12 @@ def _build_stream(tokens: Sequence[ProviderToken], options: AlignmentOptions) ->
     punctuation: list[list[ProviderToken]] = []
     pending: list[ProviderToken] = []
     for token in tokens:
-        if token.is_punctuation or is_punctuation_only(token.text):
+        # Audio events such as "(laughter)" are not words either: no other
+        # service writes them down, so aligning one would show every other
+        # service as having missed it and flag a disagreement nobody has.
+        # They ride along with the word before them, as punctuation does,
+        # and reconciliation puts them back into the transcript.
+        if not token.is_spoken_word or is_punctuation_only(token.text):
             pending.append(token)
             continue
         words.append(token)

@@ -14,6 +14,7 @@ as one sequence would pass every other test in this file.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 import pytest
@@ -832,3 +833,31 @@ def test_the_single_word_index_finds_exactly_the_words_the_keys_agree_with():
             position + 1 for position, key in enumerate(keys) if _keys_agree(phrase_key, key)
         )
         assert index.agreeing_with(phrase_key) == expected, phrase
+
+
+# -- Audio events ----------------------------------------------------------
+
+
+def _with_laughter(text: str) -> list[ProviderToken]:
+    """ElevenLabs words where "(laughter)" is marked as an audio event."""
+    return [
+        dataclasses.replace(token, is_audio_event=True) if token.text == "(laughter)" else token
+        for token in words(Provider.ELEVENLABS, text, timed=True)
+    ]
+
+
+def test_an_audio_event_is_not_a_word_to_align():
+    stream = _build_stream(_with_laughter("so then (laughter) we left"), AlignmentOptions())
+
+    assert [token.text for token in stream.words] == ["so", "then", "we", "left"]
+    assert [token.text for token in stream.punctuation[1]] == ["(laughter)"]
+
+
+def test_an_audio_event_causes_no_deletion_in_the_other_services():
+    alignment = align_sequences(
+        _with_laughter("so then (laughter) we left"),
+        words(Provider.OPENAI, "so then we left"),
+    )
+
+    assert statuses(alignment) == [AlignmentStatus.EXACT] * 4
+    assert AlignmentStatus.DELETION not in statuses(alignment)

@@ -403,12 +403,18 @@ def _for_microsoft(package: ContextPackage) -> ProviderContext:
     Prompt tuning is unsupported on this model, so everything worth saying has
     to be said as phrases. There is deliberately no prompt here to be removed
     later: sending one would be rejected rather than ignored.
+
+    The phrases travel as ``terms`` and nowhere else. The adapter puts them in
+    the definition's ``phraseList``, and only for a model that accepts one.
+    They are deliberately not repeated in ``parameters``: those are copied
+    into the definition as they stand, so a ``phrases`` entry there would go
+    out as a stray top-level field on every model, including the one the
+    adapter withholds the vocabulary from.
     """
     terms, dropped = _fit_terms(package.term_texts, MICROSOFT_MAXIMUM_PHRASES)
     return ProviderContext(
         provider=Provider.MICROSOFT,
         terms=terms,
-        parameters={"phrases": list(terms)},
         dropped_term_count=dropped,
     )
 

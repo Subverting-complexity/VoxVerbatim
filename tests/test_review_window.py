@@ -2129,6 +2129,83 @@ def test_a_word_a_rule_settled_says_so_rather_than_looking_like_your_own_work(
         second.close()
 
 
+def test_a_group_replacement_reaches_a_word_a_rule_answered(qapp, tmp_path):
+    """Correcting a rule's answer changes the file and leaves one rule saying so."""
+    folder = two_file_folder()
+    store = ProjectStore(tmp_path)
+    window = open_window(tmp_path, folder, store=store, process=True)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+        window.apply_replacement_to_word()
+    finally:
+        window.close()
+
+    folder.transcripts["late.m4a"] = make_transcript(
+        [weak_token("Bosh", 5.0)], name="late.m4a"
+    )
+    second = open_window(tmp_path, folder, store=store)
+    try:
+        second.process_low_confidence_words()
+        second.set_show_reviewed(True)
+        late = next(
+            occurrence
+            for occurrence in second.state.occurrences
+            if occurrence.recording_name == "late.m4a"
+        )
+        assert late.auto_applied is True
+        row = next(
+            row
+            for row in second._group_model.rows()
+            if any(item.id == late.id for item in row.occurrences)
+        )
+        second._groups.select_row(second._group_model.row_for_key(row.key))
+        second._replacement_edit.setText("Bosche")
+
+        assert second.apply_replacement_to_word() is True
+
+        assert folder.texts("late.m4a") == ["Bosche"]
+        assert late.auto_applied is False
+        assert late.applied_rule_id is None
+        assert late.replacement is None
+        rules = [rule for rule in second.state.rules if rule.normalised_text == "bosh"]
+        assert len(rules) == 1
+        assert rules[0].replacement == "Bosche"
+    finally:
+        second.close()
+
+
+def test_a_group_replacement_reaches_a_rule_answer_but_not_a_persons_own(
+    qapp, tmp_path
+):
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        members = list(window.current_row().occurrences)
+        assert len(members) >= 2
+        own, answered = members[0], members[1]
+        answered.replacement = "Bosch"
+        answered.auto_applied = True
+        answered.applied_rule_id = "an-earlier-rule"
+        window._occurrences.select_row(window._occurrence_model.row_for_id(own.id))
+        assert window.current_occurrence().id == own.id
+        window._replacement_edit.setText("Bosche")
+        assert window.apply_replacement_to_occurrence() is True
+
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosk")
+        assert window.apply_replacement_to_word() is True
+
+        assert folder.token(own.recording_name, own.token_id).text == "Bosche"
+        assert own.replacement == "Bosche"
+        assert folder.token(answered.recording_name, answered.token_id).text == "Bosk"
+        assert answered.auto_applied is False
+        assert answered.replacement is None
+    finally:
+        window.close()
+
+
 def test_the_count_says_how_many_reviewed_words_are_being_kept_back(qapp, tmp_path):
     window = open_window(tmp_path, two_file_folder(), process=True)
     try:

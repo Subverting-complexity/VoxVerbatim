@@ -136,8 +136,11 @@ _EQUIVALENCE_DISPLAY_NAMES: dict[EquivalenceKind, str] = {
 # -- The characters that get unified -------------------------------------
 
 #: Every shape an apostrophe arrives in. Services differ, and so do the
-#: keyboards of the people who wrote the vocabulary lists. They are all
-#: dropped rather than replaced, so "don't" and "dont" meet.
+#: keyboards of the people who wrote the vocabulary lists. They are
+#: dropped rather than replaced, so "don't" and "dont" meet. The exception
+#: is a contraction whose apostrophe-free spelling is an ordinary word (see
+#: ``_LEFT_ALONE``): it keeps one straight apostrophe, so "we're" never
+#: meets "were".
 _APOSTROPHES = frozenset("'’‘ʼʹ‛′`´")
 
 #: Every shape a hyphen or a joining slash arrives in. These become spaces
@@ -372,7 +375,9 @@ _DROPPED_COMPOUND_ATOMS = _atom_table(dropped=True, compound=True)
 #
 # The apostrophe has already gone by the time these are used, so the keys
 # are the apostrophe-free spellings. That also means "dont" written without
-# its apostrophe is handled by the same entry, which is the point.
+# its apostrophe is handled by the same entry, which is the point. The
+# forms in ``_LEFT_ALONE`` keep their apostrophe, so they never reach this
+# table.
 
 _CONTRACTIONS: dict[str, str] = {
     "cannot": "can not",
@@ -415,8 +420,11 @@ _CONTRACTIONS: dict[str, str] = {
 #: are ordinary English words and expanding them would make two genuinely
 #: different words compare equal: "were" and "we're", "well" and "we'll",
 #: "shed" and "she'd", "ill" and "I'll", "hell" and "he'll", "id" and
-#: "I'd". The list is here so that nobody adds them back by accident.
-_LEFT_ALONE = ("were", "well", "shed", "hed", "wed", "id", "ill", "hell", "shell")
+#: "I'd". ``_plain_form`` keeps the apostrophe in these words, so they stay
+#: apart from the ordinary word, and nobody should add them to the table.
+_LEFT_ALONE = frozenset(
+    ("were", "well", "shed", "hed", "wed", "id", "ill", "hell", "shell")
+)
 
 #: "its" is in the table above even though it is also the possessive. That
 #: is on purpose: "its" and "it's" sound identical, so as *acoustic
@@ -500,12 +508,32 @@ def _plain_form(text: str) -> str:
         elif character in _DASHES:
             characters.append(" ")
         elif character in _APOSTROPHES:
-            continue
+            characters.append("'")
         elif unicodedata.category(character).startswith("P"):
             continue
         else:
             characters.append(character)
-    return " ".join("".join(characters).split())
+    # A word that was only apostrophes settles to nothing, and is left out
+    # so that it does not leave a double space behind.
+    words = (_settle_apostrophes(word) for word in "".join(characters).split())
+    return " ".join(word for word in words if word)
+
+
+def _settle_apostrophes(word: str) -> str:
+    """Drop a word's apostrophes, unless dropping them makes another word.
+
+    Apostrophes at either end are quote marks and always go, so "'were'"
+    still meets "were". An apostrophe inside the word goes too, so "don't"
+    meets "dont", except where the word without it is in ``_LEFT_ALONE``:
+    "we're" keeps its apostrophe, because "were" is a different word.
+    """
+    if "'" not in word:
+        return word
+    inner = word.strip("'")
+    joined = inner.replace("'", "")
+    if "'" in inner and joined in _LEFT_ALONE:
+        return inner
+    return joined
 
 
 @lru_cache(maxsize=100_000)
@@ -709,9 +737,15 @@ def _digit_group(word: str) -> str | None:
     """Return a digit string with its thousands separators taken out.
 
     Only commas are treated as separators, and only where they group three
-    digits. A full stop is left where it is, because it means one thing in
-    English and the opposite in German, and a wrong guess produces a number
-    that looks entirely reasonable and is out by a factor of a thousand.
+    digits. A currency symbol or letters in front, as in "R15,000" or
+    "$1,000", stay in front of the plain digits.
+
+    A full stop is read as a decimal point only after a comma grouping, as
+    in "1,000.50": that is English order and cannot be read any other way.
+    A full stop on its own is left where it is, because it means one thing
+    in English and the opposite in German, and a wrong guess produces a
+    number that looks entirely reasonable and is out by a factor of a
+    thousand. German "1.000,50" is left alone for the same reason.
     """
     if word.startswith("-") and len(word) > 1:
         # A minus sign stays in front of the number it belongs to, so that
@@ -722,12 +756,35 @@ def _digit_group(word: str) -> str | None:
         return word
     if "," not in word:
         return None
+    prefix_length = 0
+    while prefix_length < len(word) and not word[prefix_length].isdigit():
+        prefix_length += 1
+    if prefix_length:
+        # Only letters and currency symbols count as a prefix, so "r15,000"
+        # and "$1,000" are amounts and "(1,000" or "#1,000" are not.
+        prefix, rest = word[:prefix_length], word[prefix_length:]
+        if not all(
+            character.isalpha() or unicodedata.category(character) == "Sc"
+            for character in prefix
+        ):
+            return None
+        digits = _digit_group(rest)
+        if digits is None or digits.startswith("-"):
+            return None
+        return prefix + digits
     parts = word.split(",")
+    fraction = None
+    if "." in parts[-1]:
+        whole, fraction = parts[-1].split(".", 1)
+        if not (len(whole) == 3 and whole.isdigit() and fraction.isdigit()):
+            return None
+        parts[-1] = whole
     if len(parts) < 2 or not parts[0].isdigit() or not 1 <= len(parts[0]) <= 3:
         return None
     if not all(part.isdigit() and len(part) == 3 for part in parts[1:]):
         return None
-    return "".join(parts)
+    joined = "".join(parts)
+    return joined if fraction is None else joined + "." + fraction
 
 
 def _read_numbers(form: str, dropped: bool) -> str:

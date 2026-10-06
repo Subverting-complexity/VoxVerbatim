@@ -465,3 +465,33 @@ def test_the_measurement_of_a_quiet_tone_is_the_level_it_was_written_at(tmp_path
     assert result.input_lufs == pytest.approx(-30.69, abs=_TOLERANCE_DB)
     assert math.isfinite(result.input_dbtp)
     assert result.input_dbtp == pytest.approx(-30.0, abs=_TOLERANCE_DB)
+
+
+def test_a_very_quiet_recording_with_a_measurable_loudness_is_enhanced(tmp_path, options):
+    """The meter rounds a peak this quiet to zero, which is not silence."""
+    source = tmp_path / "whisper.wav"
+    write_real_audio(source, level_db=-68.0, codec="pcm_s16le")
+
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.ENHANCED, result.message
+    assert math.isfinite(result.input_dbtp)
+    assert result.input_dbtp == pytest.approx(-68.0, abs=0.2)
+
+
+def test_a_quiet_true_peak_is_measured_to_better_than_a_twentieth_of_a_decibel(
+    tmp_path, options
+):
+    """Read straight off the meter, this peak would be up to 0.6 dB out.
+
+    The samples are written as whole numbers, so the tone's peak sample is
+    200 rather than the 200.5 it was asked for. Its true peak lies between
+    the two, which is within 0.022 dB of the level asked for.
+    """
+    level_db = 20.0 * math.log10(200.5 / 32767.0)
+    source = tmp_path / "quiet.wav"
+    write_real_audio(source, level_db=level_db, codec="pcm_s16le")
+
+    result = enhance_file(source, options)
+
+    assert result.input_dbtp == pytest.approx(level_db, abs=0.05)

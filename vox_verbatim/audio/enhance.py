@@ -80,6 +80,19 @@ DEFAULT_MAXIMUM_GAIN_DB = 30.0
 #: it is left alone rather than being amplified by an absurd amount.
 _SILENCE_LUFS = -70.0
 
+#: The meter writes the true peak as a plain amplitude to three decimal
+#: places. Below this level that rounding costs more than 0.05 dB, and a
+#: peak under about -66 dBTP reads as nothing at all, so a quiet peak is
+#: measured again with a known boost in front of the meter.
+_PRECISE_PEAK_DBTP = -20.0
+
+#: Where that boost puts the peak, or the loudness when the peak read as
+#: nothing. A true peak is never far below the loudness, so either way the
+#: peak lands where the meter reads it to well within 0.05 dB. The boost is
+#: applied in floating point, so a peak it lifts above full scale is
+#: measured rather than clipped.
+_REMEASURE_LEVEL_DB = -6.0
+
 
 @dataclass(frozen=True)
 class OutputFormat:
@@ -314,6 +327,21 @@ def enhance_file(
         return _cancelled_result(source)
     except (OSError, IndexError, av.FFmpegError) as error:
         return _failed_result(source, "could not be read", error)
+
+    if (
+        measured.lufs is not None
+        and measured.lufs > _SILENCE_LUFS
+        and measured.dbtp is not None
+        and measured.dbtp < _PRECISE_PEAK_DBTP
+    ):
+        try:
+            measured.dbtp = _remeasure_quiet_peak(
+                source, measured.lufs, measured.dbtp, stop_requested
+            )
+        except _Cancelled:
+            return _cancelled_result(source)
+        except (OSError, IndexError, av.FFmpegError) as error:
+            return _failed_result(source, "could not be read", error)
 
     if measured.lufs is None or measured.dbtp is None:
         return FileResult(
@@ -675,6 +703,31 @@ def _run_pass(
         sink.close()
     progress(1.0)
     return readings
+
+
+def _remeasure_quiet_peak(
+    source: Path, lufs: float, dbtp: float, cancelled: CancelledCallback
+) -> float:
+    """Measure a quiet true peak again, accurately, and return it in dBTP.
+
+    The meter rounds the peak to three decimal places of full scale, which
+    is coarse for a quiet peak and zero for a very quiet one. A recording
+    whose loudness is measurable is not silent, so it is read again with a
+    known boost in front of the meter, and the boost is taken off the
+    reading. The boost comes from the peak where one was read, and from the
+    loudness where the peak read as zero.
+    """
+    boost_db = _REMEASURE_LEVEL_DB - (dbtp if math.isfinite(dbtp) else lufs)
+    boosted = _run_pass(
+        source,
+        filters=(("volume", f"volume={boost_db:.4f}dB:precision=double"),),
+        sink=None,
+        progress=lambda _fraction: None,
+        cancelled=cancelled,
+    )
+    if boosted.dbtp is None:
+        return dbtp
+    return boosted.dbtp - boost_db
 
 
 def _duration_seconds(container, stream) -> float | None:

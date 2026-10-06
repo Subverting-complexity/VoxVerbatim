@@ -1324,9 +1324,7 @@ class ReviewWindow(QMainWindow):
         self._build_menus()
         self._connect_signals()
         self.refresh(
-            word_key=None
-            if self._state.last_group_id is None
-            else group_key(self._state.last_group_id),
+            word_key=self._remembered_word_key(),
             occurrence_id=self._state.last_occurrence_id,
         )
         self._size_to_fit_the_screen()
@@ -2945,6 +2943,19 @@ class ReviewWindow(QMainWindow):
             else None
         )
 
+    def _remembered_word_key(self) -> str | None:
+        """The row the person was last on, from the place remembered for them.
+
+        An isolated or loose occurrence has no group, so its row is found by
+        the occurrence itself. Without that, the window opened on the first
+        word and the remembered occurrence, which is in no other row, was lost.
+        """
+        if self._state.last_group_id is not None:
+            return group_key(self._state.last_group_id)
+        if self._state.last_occurrence_id is not None:
+            return loose_key(self._state.last_occurrence_id)
+        return None
+
     def select_recording(self, recording_name: str, announce_arrival: bool = True) -> bool:
         """Move to the first occurrence belonging to one recording.
 
@@ -3378,9 +3389,7 @@ class ReviewWindow(QMainWindow):
         self._state.flagged = previous.flagged
         applied = self._write_rule_answers()
         self.refresh(
-            word_key=None
-            if self._state.last_group_id is None
-            else group_key(self._state.last_group_id),
+            word_key=self._remembered_word_key(),
             occurrence_id=self._state.last_occurrence_id,
         )
         recordings = len(self._recording_names)

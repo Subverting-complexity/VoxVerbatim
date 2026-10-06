@@ -69,6 +69,7 @@ from vox_verbatim.ui.review_lists import (
     OCCURRENCE_COLUMN_WHEN,
     REVIEWED_AS_DETECTED,
     REVIEWED_AUTOMATICALLY,
+    loose_key,
 )
 from vox_verbatim.ui.review_window import (
     AUDIO_EVENT,
@@ -2673,6 +2674,26 @@ def test_where_the_person_had_got_to_is_remembered_for_next_time(qapp, tmp_path)
     again = open_window(tmp_path, folder, store=store)
     try:
         assert again.current_occurrence() is not None
+        assert again.current_occurrence().id == wanted
+    finally:
+        again.close()
+
+
+def test_an_isolated_occurrence_is_remembered_for_next_time(qapp, tmp_path):
+    """It has no group, so the place is found by the occurrence itself."""
+    store = ProjectStore(tmp_path)
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, store=store, process=True)
+    select_word(window, "Bosch")
+    window.go_to_next_item()
+    wanted = window.current_occurrence().id
+    assert window.isolate_occurrence() is True
+    assert window.current_occurrence().id == wanted
+    window.close()
+
+    again = open_window(tmp_path, folder, store=store)
+    try:
+        assert again.current_row().key == loose_key(wanted)
         assert again.current_occurrence().id == wanted
     finally:
         again.close()

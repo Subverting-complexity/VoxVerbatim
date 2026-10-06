@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from vox_verbatim.transcription import passes
+from vox_verbatim.transcription import chunking, passes
 from vox_verbatim.transcription.canonical import CanonicalAudioError, prepare_canonical_audio
 from vox_verbatim.transcription.context import build_context_package
 from vox_verbatim.transcription.model import (
@@ -685,6 +685,37 @@ def test_the_warning_for_a_failed_piece_names_the_time_it_covered(canonical, sto
     assert "part 2 of" in warning
     assert passes._clock(failed.canonical_offset) in warning
     assert "–" in warning
+
+
+def test_an_uncertain_join_is_warned_about_in_a_sentence(canonical, store, monkeypatch):
+    """The warning is read aloud, so it ends with the join's own sentence.
+
+    Interpolating the join itself would read out its class and field names.
+    """
+    original = passes.chunking.merge_overlapping_tokens
+    seen: list[chunking.ChunkJoin] = []
+
+    def merge(tokens, plans):
+        merged = original(tokens, plans)
+        join = chunking.ChunkJoin(
+            earlier_chunk_index=0,
+            later_chunk_index=1,
+            canonical_time=75.0,
+            method="nominal",
+            certain=False,
+        )
+        seen.append(join)
+        return replace(merged, joins=(join,))
+
+    monkeypatch.setattr(passes.chunking, "merge_overlapping_tokens", merge)
+
+    outcome = run(canonical, store, {Provider.OPENAI: chunked_service(failing_chunk=-1)})
+
+    warning = next(warning for warning in outcome.warnings if "join" in warning)
+    assert warning.endswith(seen[0].description)
+    assert "ChunkJoin" not in warning
+    assert "canonical_time" not in warning
+    assert "earlier_chunk_index" not in warning
 
 
 def test_clock_times_read_as_minutes_and_seconds():

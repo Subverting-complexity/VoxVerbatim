@@ -283,7 +283,10 @@ class TranscriptionProvider(ABC):
     maximum_retries: int = 2
 
     #: The wait before the first retry, in seconds. Each later wait is twice
-    #: the one before, up to :attr:`maximum_backoff_seconds`.
+    #: the one before, up to :attr:`maximum_backoff_seconds` or the first wait,
+    #: whichever is longer. The first wait is the user's setting, which allows
+    #: more than the cap, and a person who asked for two minutes because a
+    #: service is rate-limiting them must get two minutes, not one.
     retry_backoff_seconds: float = 2.0
     maximum_backoff_seconds: float = 60.0
 
@@ -362,8 +365,9 @@ class TranscriptionProvider(ABC):
 
     def _wait_before_attempt(self, attempts_so_far: int, retry_after: float | None) -> float:
         """How long to wait before the next attempt, in seconds."""
-        backoff = max(0.0, float(self.retry_backoff_seconds)) * (2 ** (attempts_so_far - 1))
-        backoff = min(backoff, max(0.0, float(self.maximum_backoff_seconds)))
+        first = max(0.0, float(self.retry_backoff_seconds))
+        backoff = first * (2 ** (attempts_so_far - 1))
+        backoff = min(backoff, max(first, float(self.maximum_backoff_seconds)))
         if retry_after is not None and retry_after > 0:
             # A service that names a wait is not bargained with: calling it
             # sooner gets the same refusal. The cap is a guard against a

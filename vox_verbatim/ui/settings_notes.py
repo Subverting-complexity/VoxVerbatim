@@ -554,8 +554,9 @@ times.""",
         ),
         note="""\
 This is how long the application waits before trying a failed request again.
-The wait grows for each further attempt, so a second retry waits longer than
-the first.
+The wait doubles for each further attempt until it reaches one minute, so a
+second retry waits longer than the first. A wait set above one minute is
+used in full for every retry and does not grow.
 
 Waiting is the point. The commonest reason for a request to fail is that the
 service asked you to slow down, and retrying immediately is the one response

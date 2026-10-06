@@ -69,6 +69,7 @@ from vox_verbatim.ui.review_lists import (
     OCCURRENCE_COLUMN_WHEN,
     REVIEWED_AS_DETECTED,
     REVIEWED_AUTOMATICALLY,
+    loose_key,
 )
 from vox_verbatim.ui.review_window import (
     AUDIO_EVENT,
@@ -2678,6 +2679,26 @@ def test_where_the_person_had_got_to_is_remembered_for_next_time(qapp, tmp_path)
         again.close()
 
 
+def test_an_isolated_occurrence_is_remembered_for_next_time(qapp, tmp_path):
+    """It has no group, so the place is found by the occurrence itself."""
+    store = ProjectStore(tmp_path)
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, store=store, process=True)
+    select_word(window, "Bosch")
+    window.go_to_next_item()
+    wanted = window.current_occurrence().id
+    assert window.isolate_occurrence() is True
+    assert window.current_occurrence().id == wanted
+    window.close()
+
+    again = open_window(tmp_path, folder, store=store)
+    try:
+        assert again.current_row().key == loose_key(wanted)
+        assert again.current_occurrence().id == wanted
+    finally:
+        again.close()
+
+
 def test_the_window_can_be_put_on_the_work_from_one_recording(qapp, tmp_path):
     """What the main window calls after transcribing a file."""
     window = open_window(tmp_path, two_file_folder(), process=True)
@@ -3378,6 +3399,57 @@ def test_landing_silently_leaves_the_announcement_to_the_caller(qapp, tmp_path, 
 
         assert said == []
         assert window.current_occurrence().recording_name == OTHER_RECORDING
+    finally:
+        window.close()
+
+
+def test_landing_silently_on_another_word_says_nothing_and_plays_nothing(
+    qapp, tmp_path, monkeypatch
+):
+    """Moving word is what announced the row and started its audio before."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "15,000")
+        window._play_timer.stop()
+        said.clear()
+
+        assert window.select_recording(OTHER_RECORDING, announce_arrival=False) is True
+
+        assert window.current_row().key == group_row(window, "Bosch").key
+        assert said == []
+        assert not window._play_timer.isActive()
+    finally:
+        window.close()
+
+
+def test_a_correction_that_moves_to_another_word_names_that_word(
+    qapp, tmp_path, monkeypatch
+):
+    """Somebody still in the Replacement box must hear which word they are on."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        corrected = window.current_row().key
+        said.clear()
+
+        window.correct_word_as_detected()
+
+        row = window.current_row()
+        assert row is not None and row.key != corrected
+        assert len(said) == 1
+        assert f"Now on {review_window_module.spoken_group_summary(row)}" in said[0]
     finally:
         window.close()
 

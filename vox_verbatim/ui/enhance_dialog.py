@@ -754,9 +754,6 @@ class EnhanceAudioDialog(QDialog):
             text, name = "&Cancel", "Cancel"
             description = "Closes this dialog without enhancing anything."
         self._close_button.setText(text)
-        # The tooltip is cleared first, because describe only fills an empty
-        # one in and this button is described more than once.
-        self._close_button.setToolTip("")
         describe(self._close_button, name, description)
 
     # -- What the run reports ---------------------------------------------

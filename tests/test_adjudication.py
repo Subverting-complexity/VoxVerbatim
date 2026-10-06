@@ -32,6 +32,7 @@ from vox_verbatim.transcription.adjudication import (
     EditAction,
     RefusalReason,
     build_prompt,
+    without_credentials,
 )
 from vox_verbatim.transcription.exports import render_token_text
 from vox_verbatim.transcription.model import (
@@ -273,6 +274,81 @@ def test_a_chosen_word_is_never_marked_as_settled(plain_dispute):
     assert token.text_confidence is Confidence.REVIEW_SUGGESTED
     assert token.text_confidence is not Confidence.HIGH
     assert "effect" in (token.llm_decision or "")
+
+
+def test_a_replaced_word_credits_the_service_that_offered_it(plain_dispute):
+    """The transcript records which service each answer came from, and the
+    service that read the word before lost the argument."""
+    client = FakeClient(answer(decision("tok-200", "replace", "affect", "effect")))
+    build_adjudicator(client).adjudicate([plain_dispute])
+
+    assert plain_dispute.tokens[0].text_source is Provider.OPENAI
+
+
+def test_a_kept_word_keeps_its_service(plain_dispute):
+    client = FakeClient(answer(decision("tok-200", "keep", "affect", "affect")))
+    build_adjudicator(client).adjudicate([plain_dispute])
+
+    assert plain_dispute.tokens[0].text_source is Provider.ELEVENLABS
+
+
+def test_a_reading_re_spelled_from_the_vocabulary_credits_the_service_that_heard_it(
+    name_dispute,
+):
+    """"Müller" is the vocabulary's spelling of what one service heard as
+    "Muller", so that service offered the reading."""
+    client = FakeClient(
+        answer(decision("tok-101", "replace", "Jurgen Miller", "Jürgen Müller"))
+    )
+    build_adjudicator(client).adjudicate([name_dispute], vocabulary_terms=("Jürgen", "Müller"))
+
+    assert [token.text_source for token in name_dispute.tokens] == [
+        Provider.ELEVENLABS,
+        Provider.OPENAI,
+    ]
+
+
+def test_a_reading_offered_as_a_phrase_credits_the_service_that_offered_it():
+    """A reading of several words is often one candidate on each of its words."""
+    offered = (("ice cream", Provider.ELEVENLABS), ("I scream", Provider.OPENAI))
+    dispute = Dispute(
+        tokens=(
+            word("ice", identifier="tok-300", start=5.0, end=5.3, candidates=offered),
+            word("cream", identifier="tok-301", start=5.3, end=5.7, candidates=offered),
+        ),
+        preceding_text="we all",
+        following_text="for dessert",
+    )
+    client = FakeClient(answer(decision("tok-300", "replace", "ice cream", "I scream")))
+    outcome = build_adjudicator(client).adjudicate([dispute])
+
+    assert outcome.refused == ()
+    assert [token.text for token in dispute.tokens] == ["I", "scream"]
+    assert [token.text_source for token in dispute.tokens] == [
+        Provider.OPENAI,
+        Provider.OPENAI,
+    ]
+
+
+def test_an_edit_that_is_put_back_restores_the_service_too(plain_dispute, monkeypatch):
+    """The identity check puts the words back, and their credit goes back with them."""
+    identities = iter([("before",), ("after",)])
+    monkeypatch.setattr(adjudication_module, "_identity_of", lambda token: next(identities))
+    client = FakeClient(answer(decision("tok-200", "replace", "affect", "effect")))
+    build_adjudicator(client).adjudicate([plain_dispute])
+
+    assert plain_dispute.tokens[0].text == "affect"
+    assert plain_dispute.tokens[0].text_source is Provider.ELEVENLABS
+
+
+def test_a_reading_only_the_vocabulary_offered_credits_no_service(name_dispute):
+    client = FakeClient(
+        answer(decision("tok-101", "replace", "Jurgen Miller", "Jurgen Smit"))
+    )
+    build_adjudicator(client).adjudicate([name_dispute], vocabulary_terms=("Smit",))
+
+    assert name_dispute.tokens[1].text == "Smit"
+    assert name_dispute.tokens[1].text_source is None
 
 
 def test_keeping_the_current_reading_is_a_decision_too(plain_dispute):
@@ -681,6 +757,49 @@ def test_no_credential_and_no_recording_content_ever_reaches_the_record(plain_di
     assert "input" not in parameters
     assert "instructions" not in parameters
     assert "affect" not in written
+
+
+def test_the_output_length_sent_is_in_the_record(plain_dispute):
+    client = FakeClient(answer(decision("tok-200", "keep", "affect", "affect")))
+    outcome = build_adjudicator(
+        client, parameters={"max_output_tokens": 2000}
+    ).adjudicate([plain_dispute])
+
+    assert outcome.request.request_parameters["max_output_tokens"] == 2000
+
+
+def test_a_parameter_with_token_in_its_name_is_not_taken_for_a_secret():
+    cleaned = without_credentials(
+        {
+            "max_output_tokens": 2000,
+            "keywords": ["a"],
+            "api_key": API_KEY,
+            "apikey": API_KEY,
+            "key": API_KEY,
+            "token": API_KEY,
+            "access_token": API_KEY,
+            "x-api-key": API_KEY,
+            "secret": API_KEY,
+            "client_secret": API_KEY,
+            "password": API_KEY,
+            "Authorization": API_KEY,
+            "accessToken": API_KEY,
+            "authToken": API_KEY,
+            "clientSecret": API_KEY,
+            "openaiApiKey": API_KEY,
+            "secretKey": API_KEY,
+            "sessiontoken": API_KEY,
+            "maxOutputTokens": 500,
+            "nested": {"token": API_KEY, "max_output_tokens": 10},
+        }
+    )
+
+    assert cleaned == {
+        "max_output_tokens": 2000,
+        "keywords": ["a"],
+        "maxOutputTokens": 500,
+        "nested": {"max_output_tokens": 10},
+    }
 
 
 def test_a_failed_request_is_still_recorded(plain_dispute):

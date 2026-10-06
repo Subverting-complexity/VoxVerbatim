@@ -1324,9 +1324,7 @@ class ReviewWindow(QMainWindow):
         self._build_menus()
         self._connect_signals()
         self.refresh(
-            word_key=None
-            if self._state.last_group_id is None
-            else group_key(self._state.last_group_id),
+            word_key=self._remembered_word_key(),
             occurrence_id=self._state.last_occurrence_id,
         )
         self._size_to_fit_the_screen()
@@ -2945,6 +2943,19 @@ class ReviewWindow(QMainWindow):
             else None
         )
 
+    def _remembered_word_key(self) -> str | None:
+        """The row the person was last on, from the place remembered for them.
+
+        An isolated or loose occurrence has no group, so its row is found by
+        the occurrence itself. Without that, the window opened on the first
+        word and the remembered occurrence, which is in no other row, was lost.
+        """
+        if self._state.last_group_id is not None:
+            return group_key(self._state.last_group_id)
+        if self._state.last_occurrence_id is not None:
+            return loose_key(self._state.last_occurrence_id)
+        return None
+
     def select_recording(self, recording_name: str, announce_arrival: bool = True) -> bool:
         """Move to the first occurrence belonging to one recording.
 
@@ -2973,8 +2984,16 @@ class ReviewWindow(QMainWindow):
                 if occurrence.recording_name != recording_name:
                     continue
                 position = self._group_model.row_for_key(row.key)
-                self._groups.select_row(position)
-                self._show_group(row, occurrence.id)
+                # Moving to another word announces it and can start its audio,
+                # which would talk over the caller's own sentence, so a silent
+                # landing is made quietly.
+                quiet = self._quiet
+                self._quiet = quiet or not announce_arrival
+                try:
+                    self._groups.select_row(position)
+                    self._show_group(row, occurrence.id)
+                finally:
+                    self._quiet = quiet
                 note = self._take_focus_note()
                 if announce_arrival:
                     announce(self._groups, f"{spoken_group_summary(row)}{note}")
@@ -3378,9 +3397,7 @@ class ReviewWindow(QMainWindow):
         self._state.flagged = previous.flagged
         applied = self._write_rule_answers()
         self.refresh(
-            word_key=None
-            if self._state.last_group_id is None
-            else group_key(self._state.last_group_id),
+            word_key=self._remembered_word_key(),
             occurrence_id=self._state.last_occurrence_id,
         )
         recordings = len(self._recording_names)
@@ -4797,10 +4814,14 @@ class ReviewWindow(QMainWindow):
 
         ``word_key`` and ``occurrence_id`` move the selection somewhere other
         than where it was. ``from_word_key`` is the word the change was made
-        on: when the selection has ended up on a different word, that word is
-        named before its occurrence, because the occurrence alone does not
-        tell a screen reader user that they have moved to another word.
+        on, and is the selected word when the caller does not name one: when
+        the selection has ended up on a different word, that word is named
+        before its occurrence, because the occurrence alone does not tell a
+        screen reader user, still in the Replacement box, that they have moved
+        to another word.
         """
+        if from_word_key is None:
+            from_word_key = self._selected_group_key
         saved = self._save_project(quiet=True)
         self.refresh(word_key, occurrence_id)
         occurrence = self.current_occurrence()

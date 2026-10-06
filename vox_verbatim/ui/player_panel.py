@@ -235,6 +235,7 @@ class PlayerPanel(QGroupBox):
             self._duration_ms = 0
             self._set_slider_value(0)
             self._set_slider_range(0)
+            self._update_seek_description()
             self._update_time_label(0)
             self._set_status(STATUS_NO_FILE)
         else:

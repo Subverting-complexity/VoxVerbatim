@@ -91,6 +91,21 @@ def test_consecutive_words_by_one_person_become_one_turn():
     ]
 
 
+def test_a_reply_that_ends_before_the_last_turn_did_keeps_its_own_end():
+    """The previous turn's end must not carry over into the next turn."""
+    words = [
+        said("speaker_0", "right", 9.0, 10.0, 0),
+        said("speaker_1", "yes", 9.4, 9.7, 1),
+    ]
+
+    turns = speaker_turns(words)
+
+    assert [(one.speaker, one.span.start, one.span.end) for one in turns] == [
+        ("speaker_0", 9.0, 10.0),
+        ("speaker_1", 9.4, 9.7),
+    ]
+
+
 def test_a_word_with_no_time_behind_it_is_not_part_of_any_turn():
     """A turn is a stretch of audio, and that word is not anywhere."""
     words = [

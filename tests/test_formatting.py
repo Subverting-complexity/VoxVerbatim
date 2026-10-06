@@ -65,6 +65,10 @@ def test_spoken_duration_without_a_value():
         (1536, "1.5 KB"),
         (4 * 1024 * 1024, "4.0 MB"),
         (3 * 1024**3, "3.0 GB"),
+        # Just under a unit rounds up to it, so it is shown in that unit.
+        (1024**2 - 1, "1.0 MB"),
+        (1024**3 - 1, "1.0 GB"),
+        (1024**2 - 52, "1023.9 KB"),
     ],
 )
 def test_format_size(num_bytes, expected):
@@ -76,6 +80,11 @@ def test_spoken_size_uses_whole_words():
     assert spoken_size(2048) == "2.0 kilobytes"
     assert spoken_size(12) == "12 bytes"
     assert spoken_size(None) == UNKNOWN_TEXT
+
+
+def test_spoken_size_moves_up_a_unit_when_the_rounding_reaches_it():
+    assert spoken_size(1024**2 - 1) == "1.0 megabytes"
+    assert spoken_size(1024**3 - 1) == "1.0 gigabytes"
 
 
 def test_positions_are_read_from_milliseconds():

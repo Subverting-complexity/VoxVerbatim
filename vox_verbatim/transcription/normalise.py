@@ -395,18 +395,26 @@ def _case_form(text: str) -> str:
 def _is_minus(text: str, index: int) -> bool:
     """Whether the dash at ``index`` is a minus sign rather than a hyphen.
 
-    It is a minus when a digit follows it and no letter or digit comes before
-    it, as at the start of a word or after a bracket or quote mark. A dash
-    after a letter or a digit joins two things, as in "well-known" or
-    "10-20", and stays a hyphen.
+    It is a minus when a digit follows it and it starts a word: it begins the
+    text, or follows a space, an opening bracket or a quote mark, as in
+    "(-5)". A dash after anything else joins two things, as in "well-known",
+    "10-20" or "10%-20%", and stays a hyphen.
     """
     return (
         text[index] in MINUS_SIGNS
-        and (index == 0 or not text[index - 1].isalnum())
+        and (index == 0 or _opens_a_word(text[index - 1]))
         and index + 1 < len(text)
         and text[index + 1].isdigit()
     )
 
+
+def _opens_a_word(character: str) -> bool:
+    """Whether a word can start straight after ``character``."""
+    return (
+        character.isspace()
+        or character in "\"'"
+        or unicodedata.category(character) in ("Ps", "Pi")
+    )
 
 def _between_digits(text: str, index: int) -> bool:
     return (

@@ -185,6 +185,17 @@ def test_a_minus_a_per_cent_sign_or_a_time_colon_changes_the_value(first, second
     assert not are_equivalent(first, second)
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("10%-20%", "10% 20%"),
+        ("(10)-20", "10 20"),
+    ],
+)
+def test_a_dash_after_a_closing_mark_is_still_a_hyphen(first, second):
+    assert are_equivalent(first, second)
+
+
 def test_every_shape_of_minus_sign_is_the_same_minus():
     assert are_equivalent("−5", "-5")
     assert are_equivalent("–5", "-5")

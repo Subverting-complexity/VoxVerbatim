@@ -42,7 +42,7 @@ configured in `pyproject.toml`:
 - Target: Python 3.11
 
 Run `ruff check .` before opening a pull request. CI runs the same
-check.
+check. `bash scripts/quality-gate.sh` runs Ruff and the tests together.
 
 ## Code of conduct
 

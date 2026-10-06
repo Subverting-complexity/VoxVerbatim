@@ -45,9 +45,12 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
+
+from vox_verbatim.audio.library import is_supported_audio_file
 
 _log = logging.getLogger(__name__)
 
@@ -265,6 +268,25 @@ def enhance_file(
                 "itself. Choose a different output folder or format."
             ),
         )
+    # With the output folder set to the recordings folder, the enhanced
+    # copy of meeting.m4a is meeting.wav, which may be another recording
+    # rather than an earlier enhanced copy. Nothing on disk tells the two
+    # apart, so a recording is never written over, even when replacing
+    # existing files is switched on.
+    if (
+        output.exists()
+        and _same_folder(output.parent, source.parent)
+        and is_supported_audio_file(output)
+    ):
+        return FileResult(
+            source=source,
+            outcome=Outcome.SKIPPED,
+            output=output,
+            message=(
+                f"{source.name} was skipped, because {output.name} is a recording in "
+                "the same folder. Choose a different output folder."
+            ),
+        )
     if output.exists() and not options.replace_existing:
         return FileResult(
             source=source,
@@ -374,13 +396,32 @@ def enhance_files(
     are, before each one begins. ``on_result`` is called with each result
     as it arrives, so a caller can report on the way rather than at the
     end.
+
+    Two sources whose names differ only in extension, such as ``talk.m4a``
+    and ``talk.mp3``, would both be written as ``talk.wav``, the second
+    over the first. Those are found before anything is written, and every
+    file in such a group is skipped and reported first. Skipping them all,
+    rather than inventing a new name for one, keeps each enhanced copy
+    named after its recording.
     """
     files = list(sources)
     results: list[FileResult] = []
     report = progress or (lambda _fraction: None)
     stop_requested = cancelled or (lambda: False)
     total = len(files) or 1
-    for index, source in enumerate(files):
+
+    clashes = _find_output_clashes(files, options)
+    for source in files:
+        if source in clashes:
+            result = clashes[source]
+            results.append(result)
+            if on_result is not None:
+                on_result(result)
+    remaining = [source for source in files if source not in clashes]
+    if clashes:
+        report(len(clashes) / total)
+
+    for index, source in enumerate(remaining, start=len(clashes)):
         if stop_requested():
             break
         if on_start is not None:
@@ -398,6 +439,54 @@ def enhance_files(
             break
         report((index + 1) / total)
     return results
+
+
+def _find_output_clashes(files: list[Path], options: EnhanceOptions) -> dict[Path, FileResult]:
+    """Find the sources that would be written to the same output file.
+
+    Returns a skipped result for every source that shares its output with
+    at least one other source in the run, each naming the other files.
+    """
+    by_output: dict[str, list[Path]] = {}
+    for source in files:
+        key = _path_key(options.output_path_for(source))
+        sharing = by_output.setdefault(key, [])
+        if source not in sharing:
+            sharing.append(source)
+
+    clashes: dict[Path, FileResult] = {}
+    for sharing in by_output.values():
+        if len(sharing) < 2:
+            continue
+        output_name = options.output_path_for(sharing[0]).name
+        for source in sharing:
+            others = _join_names([other.name for other in sharing if other != source])
+            clashes[source] = FileResult(
+                source=source,
+                outcome=Outcome.SKIPPED,
+                message=(
+                    f"{source.name} was skipped, because {others} in this run "
+                    f"would also be written as {output_name}. Enhance them in "
+                    "separate runs or choose a different format."
+                ),
+            )
+    return clashes
+
+
+def _join_names(names: list[str]) -> str:
+    """Join file names into a phrase that reads naturally aloud."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _path_key(path: Path) -> str:
+    """A form of ``path`` that is equal for every spelling of the same file."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _same_folder(first: Path, second: Path) -> bool:
+    return _path_key(first) == _path_key(second)
 
 
 # -- Reporting -----------------------------------------------------------

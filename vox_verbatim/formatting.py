@@ -90,6 +90,22 @@ def spoken_position(milliseconds: int | None) -> str:
     return spoken_duration(milliseconds / 1000.0)
 
 
+def _size_unit(num_bytes: int) -> tuple[str, str, int] | None:
+    """Return the unit a size is shown in, or ``None`` for plain bytes.
+
+    The unit is chosen from the value as it will be shown, rounded to one
+    decimal place, not from the raw count. Otherwise 1,048,575 bytes, which
+    is just under a megabyte, would round up to "1024.0 KB".
+    """
+    for index, unit in enumerate(_SIZE_UNITS):
+        factor = unit[2]
+        if num_bytes >= factor:
+            if index > 0 and round(num_bytes / factor, 1) >= 1024:
+                return _SIZE_UNITS[index - 1]
+            return unit
+    return None
+
+
 def format_size(num_bytes: int | None) -> str:
     """Return a compact file size such as ``4.2 MB``.
 
@@ -99,10 +115,11 @@ def format_size(num_bytes: int | None) -> str:
     if num_bytes is None:
         return UNKNOWN_TEXT
     num_bytes = max(0, int(num_bytes))
-    for short_unit, _spoken_unit, factor in _SIZE_UNITS:
-        if num_bytes >= factor:
-            return f"{num_bytes / factor:.1f} {short_unit}"
-    return _plural(num_bytes, "byte")
+    unit = _size_unit(num_bytes)
+    if unit is None:
+        return _plural(num_bytes, "byte")
+    short_unit, _spoken_unit, factor = unit
+    return f"{num_bytes / factor:.1f} {short_unit}"
 
 
 def spoken_size(num_bytes: int | None) -> str:
@@ -110,7 +127,8 @@ def spoken_size(num_bytes: int | None) -> str:
     if num_bytes is None:
         return UNKNOWN_TEXT
     num_bytes = max(0, int(num_bytes))
-    for _short_unit, spoken_unit, factor in _SIZE_UNITS:
-        if num_bytes >= factor:
-            return f"{num_bytes / factor:.1f} {spoken_unit}"
-    return _plural(num_bytes, "byte")
+    unit = _size_unit(num_bytes)
+    if unit is None:
+        return _plural(num_bytes, "byte")
+    _short_unit, spoken_unit, factor = unit
+    return f"{num_bytes / factor:.1f} {spoken_unit}"

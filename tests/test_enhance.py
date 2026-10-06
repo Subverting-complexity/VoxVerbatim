@@ -495,3 +495,45 @@ def test_a_quiet_true_peak_is_measured_to_better_than_a_twentieth_of_a_decibel(
     result = enhance_file(source, options)
 
     assert result.input_dbtp == pytest.approx(level_db, abs=0.05)
+
+
+def _fail_the_second_pass(monkeypatch, failure: BaseException) -> None:
+    """Let the first measuring pass run, and make the next one raise."""
+    from vox_verbatim.audio import enhance
+
+    real_pass = enhance._run_pass
+    calls = []
+
+    def run_pass(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise failure
+        return real_pass(*args, **kwargs)
+
+    monkeypatch.setattr(enhance, "_run_pass", run_pass)
+
+
+def test_cancelling_while_a_quiet_peak_is_measured_again_stops_the_file(
+    tmp_path, options, monkeypatch
+):
+    from vox_verbatim.audio.enhance import _Cancelled
+
+    source = tmp_path / "whisper.wav"
+    write_real_audio(source, level_db=-68.0, codec="pcm_s16le")
+    _fail_the_second_pass(monkeypatch, _Cancelled())
+
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.CANCELLED
+    assert not (options.output_folder / "whisper.wav").exists()
+
+
+def test_a_quiet_peak_that_cannot_be_read_again_is_reported(tmp_path, options, monkeypatch):
+    source = tmp_path / "whisper.wav"
+    write_real_audio(source, level_db=-68.0, codec="pcm_s16le")
+    _fail_the_second_pass(monkeypatch, OSError("The file went away"))
+
+    result = enhance_file(source, options)
+
+    assert result.outcome == Outcome.FAILED
+    assert "could not be read" in result.message

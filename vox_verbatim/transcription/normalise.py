@@ -513,7 +513,10 @@ def _plain_form(text: str) -> str:
             continue
         else:
             characters.append(character)
-    return " ".join(_settle_apostrophes(word) for word in "".join(characters).split())
+    # A word that was only apostrophes settles to nothing, and is left out
+    # so that it does not leave a double space behind.
+    words = (_settle_apostrophes(word) for word in "".join(characters).split())
+    return " ".join(word for word in words if word)
 
 
 def _settle_apostrophes(word: str) -> str:

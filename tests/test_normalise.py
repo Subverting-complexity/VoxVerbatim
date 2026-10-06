@@ -97,6 +97,14 @@ def test_quote_marks_around_a_word_are_not_a_contraction():
     assert equivalence_kind("‘we're’", "we're") is EquivalenceKind.PUNCTUATION_ONLY
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("a ' b", "a b"), ("so ’ then", "so then"), ("the ` word", "the word")],
+)
+def test_an_apostrophe_standing_alone_is_only_punctuation(first, second):
+    assert equivalence_kind(first, second) is EquivalenceKind.PUNCTUATION_ONLY
+
+
 def test_a_phrase_with_a_contraction_does_not_meet_the_ordinary_word():
     assert normalise("we're going") != normalise("were going")
     assert not are_equivalent("we're going", "were going")

@@ -4028,8 +4028,14 @@ class ReviewWindow(QMainWindow):
             for occurrence in occurrences:
                 # An occurrence with a replacement of its own has been decided
                 # separately and keeps its own answer, which is the whole
-                # point of having asked for this occurrence only.
-                if occurrence.replacement and group is not None:
+                # point of having asked for this occurrence only. One a rule
+                # answered was decided by nobody, so the group's answer
+                # reaches it like any other.
+                if (
+                    occurrence.replacement
+                    and not occurrence.auto_applied
+                    and group is not None
+                ):
                     continue
                 token = transcript.token_by_id(occurrence.token_id)
                 if token is None:
@@ -4073,6 +4079,12 @@ class ReviewWindow(QMainWindow):
             return False
 
         for occurrence in touched:
+            # The rule's text is not this occurrence's own answer. Kept, it
+            # would be offered back in the box, and once _mark_replaced clears
+            # auto_applied the next group replacement would skip it as a
+            # person's separate decision. Read before _mark_replaced clears it.
+            if group is not None and occurrence.auto_applied:
+                occurrence.replacement = None
             self._mark_replaced(occurrence, None if group is not None else text)
         # The word as a whole is settled, and its rules learned, only when
         # every file it is in took the change. Settling it after a partial
@@ -4188,18 +4200,28 @@ class ReviewWindow(QMainWindow):
         person changes their mind, and one whose form is no longer in the
         group is dropped. Left behind, it would go on applying a replacement
         that has been withdrawn, in files nobody has opened yet.
+
+        A rule another group made for one of these forms is dropped too: the
+        later decision wins, as in :meth:`_update_loose_rules`. A word a rule
+        answered in a new recording usually lands in a new group, and left in
+        place the older rule could go on answering that form with the text the
+        person has just corrected. Files the older group already rewrote keep
+        what they say; only recordings transcribed from now on follow the new
+        rule.
         """
         wanted: dict[tuple[str, str], str] = {}
         for occurrence in self._state.occurrences_of(group.id):
             form = occurrence.normalised_text or occurrence.detected_text.casefold()
             wanted.setdefault((form, occurrence.language), occurrence.detected_text)
+        forms = set(wanted)
 
         kept: list[ReplacementRule] = []
         for rule in self._state.rules:
-            if rule.group_id != group.id:
-                kept.append(rule)
-                continue
             key = (rule.normalised_text, rule.language)
+            if rule.group_id != group.id:
+                if key not in forms:
+                    kept.append(rule)
+                continue
             if key in wanted:
                 rule.replacement = replacement
                 rule.matched_text = wanted.pop(key)

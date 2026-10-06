@@ -20,6 +20,7 @@ import time
 import pytest
 
 from vox_verbatim.transcription.alignment import (
+    DEFAULT_OPTIONS,
     AlignedTable,
     AlignmentOptions,
     ProviderAlignment,
@@ -39,6 +40,7 @@ from vox_verbatim.transcription.model import (
     ProviderResult,
     ProviderToken,
 )
+from vox_verbatim.transcription.normalise import EquivalenceKind
 
 
 def words(
@@ -233,6 +235,96 @@ def test_costs_that_would_lose_a_correspondence_are_refused():
         AlignmentOptions(maximum_substitution_cost=2.5)
     with pytest.raises(ValueError, match="equivalent match"):
         AlignmentOptions(minimum_substitution_cost=0.01)
+
+
+def test_a_number_merge_span_shorter_than_the_ordinary_one_is_refused():
+    with pytest.raises(ValueError, match="Number words"):
+        AlignmentOptions(maximum_number_merge_span=2)
+
+
+# -- Long spoken numbers -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("spoken", "digits"),
+    [
+        ("two hundred and fifty", "250"),
+        ("one hundred and fifty thousand", "150,000"),
+    ],
+)
+def test_a_long_spoken_number_against_its_digits_is_one_number_match(spoken, digits):
+    """Four or more number words fold into one, past the ordinary limit of three.
+
+    Before this, "two hundred and" stayed apart and "fifty" was set against
+    "250" as a disagreement, which put "[UNCERTAIN: fifty / 250]" in the
+    export.
+    """
+    backbone = words(Provider.ELEVENLABS, f"it cost {spoken} rand", timed=True)
+    other = words(Provider.OPENAI, f"it cost {digits} rand")
+
+    alignment = align_sequences(backbone, other)
+
+    merged = [column for column in alignment.columns if column.status is AlignmentStatus.MERGE]
+    assert len(merged) == 1
+    assert merged[0].backbone_text == spoken
+    assert merged[0].text == digits
+    assert merged[0].equivalence is EquivalenceKind.NUMBER_FORMAT
+    assert not any(column.is_insertion or column.is_deletion for column in alignment.columns)
+    assert statuses(alignment) == [
+        AlignmentStatus.EXACT,
+        AlignmentStatus.EXACT,
+        AlignmentStatus.MERGE,
+        AlignmentStatus.EXACT,
+    ]
+
+
+def test_digits_on_the_backbone_against_a_long_spoken_number_are_one_split():
+    backbone = words(Provider.ELEVENLABS, "it cost 250 rand", timed=True)
+    other = words(Provider.OPENAI, "it cost two hundred and fifty rand")
+
+    alignment = align_sequences(backbone, other)
+
+    split = [column for column in alignment.columns if column.status is AlignmentStatus.SPLIT]
+    assert len(split) == 1
+    assert split[0].backbone_text == "250"
+    assert split[0].text == "two hundred and fifty"
+    assert split[0].equivalence is EquivalenceKind.NUMBER_FORMAT
+    assert not any(column.is_insertion or column.is_deletion for column in alignment.columns)
+
+
+def test_ordinary_words_are_never_tried_as_long_phrases(monkeypatch):
+    """The wider merge step costs ordinary text nothing.
+
+    Only runs of number words are joined into phrases longer than the
+    ordinary merge span, so an anchor-poor stretch of ordinary words is
+    aligned with exactly the work it took before. This is the "not
+    noticeably slower" promise, checked by what is tried rather than by a
+    clock, so that it cannot fail on a slow machine.
+    """
+    from vox_verbatim.transcription import alignment as module
+
+    tried: list[str] = []
+    original = module._key_of
+
+    def recording(text: str):
+        tried.append(text)
+        return original(text)
+
+    monkeypatch.setattr(module, "_key_of", recording)
+
+    sentence = "the report said that the team would meet again on the day after"
+    base = " ".join([sentence] * 12).split()
+    other_words = list(base)
+    for position in range(5, len(other_words), 17):
+        other_words[position] = "something"
+    backbone = words(Provider.ELEVENLABS, " ".join(base), timed=True)
+    other = words(Provider.OPENAI, " ".join(other_words))
+
+    align_sequences(backbone, other)
+
+    limit = DEFAULT_OPTIONS.maximum_merge_span
+    assert tried
+    assert max(len(text.split()) for text in tried) <= limit
 
 
 # -- Punctuation ---------------------------------------------------------
@@ -634,7 +726,7 @@ def test_a_silence_and_a_change_of_speaker_are_natural_places_to_cut():
 def _align_window_cell_by_cell(backbone, other, window, provider, options):
     """The matrix as it was first written, one question per cell."""
     from vox_verbatim.transcription.alignment import _columns_from_moves, _similarity
-    from vox_verbatim.transcription.normalise import are_equivalent
+    from vox_verbatim.transcription.normalise import are_equivalent, is_number_word
 
     backbone_words = backbone.words[window.backbone_start : window.backbone_end]
     other_words = other.words[window.aligned_start : window.aligned_end]
@@ -694,6 +786,26 @@ def _align_window_cell_by_cell(backbone, other, window, provider, options):
                         candidate = cost[row - 1][column - span] + options.merge_cost
                         if candidate < best:
                             best, taken = candidate, (1, span)
+            # Longer phrases, but only where every word is a number word.
+            for span in range(
+                options.maximum_merge_span + 1, options.maximum_number_merge_span + 1
+            ):
+                if row >= span and column:
+                    phrase = backbone_words[row - span : row]
+                    if all(is_number_word(token.text) for token in phrase) and phrases_agree(
+                        phrase, other_words[column - 1]
+                    ):
+                        candidate = cost[row - span][column - 1] + options.merge_cost
+                        if candidate < best:
+                            best, taken = candidate, (span, 1)
+                if column >= span and row:
+                    phrase = other_words[column - span : column]
+                    if all(is_number_word(token.text) for token in phrase) and phrases_agree(
+                        phrase, backbone_words[row - 1]
+                    ):
+                        candidate = cost[row - 1][column - span] + options.merge_cost
+                        if candidate < best:
+                            best, taken = candidate, (1, span)
             cost[row][column] = best
             step[row][column] = taken
 
@@ -715,6 +827,7 @@ _AWKWARD_VOCABULARY = [
     "twenty", "five", "25", "twenty-five", "Jürgen", "Jurgen", "Juergen", "fünf",
     "funf", "Straße", "Strasse", "up", "to", "date", "up-to-date", "I'm", "I", "am",
     "Bosch", "bosch,", "BOSCH", "Bosh", "meeting.", "then", "and", "honderd", "en", "vyf",
+    "two", "hundred", "fifty", "250", "thousand", "150,000",
 ]
 
 
@@ -731,6 +844,8 @@ _REWRITTEN = {
     "up-to-date": ["up to date"],
     "I'm": ["I am"],
     "Bosch": ["bosch,", "BOSCH", "Bosh"],
+    "250": ["two hundred and fifty"],
+    "150,000": ["one hundred and fifty thousand"],
 }
 
 

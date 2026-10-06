@@ -23,7 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription import chunking
+from vox_verbatim.transcription.model import CanonicalAudio, Language, Provider
 from vox_verbatim.transcription.providers import openai as openai_module
 from vox_verbatim.transcription.providers.base import (
     ProviderNotConfigured,
@@ -31,9 +32,12 @@ from vox_verbatim.transcription.providers.base import (
     TranscriptionRequest,
 )
 from vox_verbatim.transcription.providers.openai import (
+    MAXIMUM_FILE_BYTES,
     MODEL_FAMILY,
+    OPENAI_CAPABILITIES,
     OpenAiTranscriptionProvider,
     is_permitted_model,
+    planning_limit_for,
 )
 
 #: Obviously not real, but distinctive, so a test can prove it appears
@@ -224,6 +228,67 @@ def test_the_declared_capabilities_match_what_the_model_actually_does():
     assert capabilities.vocabulary_biasing is True
     assert capabilities.context_prompt is True
     assert capabilities.maximum_file_bytes == 25 * 1024 * 1024
+
+
+# -- The chunk size setting ------------------------------------------------
+
+#: A long recording that is never opened. Planning reads only these numbers;
+#: the level measurement finds no file and falls back to even spacing.
+THREE_HOURS = CanonicalAudio(
+    path="missing-three-hour-recording.m4a",
+    original_path="missing-three-hour-recording.m4a",
+    duration=3 * 3600.0,
+    sample_rate=48000,
+    channels=2,
+    size_bytes=200 * 1024 * 1024,
+    container="m4a",
+)
+
+
+def plan_for(adapter: OpenAiTranscriptionProvider) -> list:
+    return chunking.plan_chunks(THREE_HOURS, Provider.OPENAI, adapter.capabilities)
+
+
+def test_a_chunk_target_lowers_the_limit_only_for_that_adapter():
+    """The setting changes one adapter. The shared constant keeps OpenAI's limit."""
+    lowered = build_provider(chunk_target_bytes=5_000_000)
+
+    assert lowered.capabilities.maximum_file_bytes < MAXIMUM_FILE_BYTES
+    assert OPENAI_CAPABILITIES.maximum_file_bytes == MAXIMUM_FILE_BYTES
+    assert build_provider().capabilities.maximum_file_bytes == MAXIMUM_FILE_BYTES
+    # Everything else the adapter declares is untouched.
+    assert lowered.capabilities.word_timings is False
+    assert lowered.capabilities.accepted_containers == OPENAI_CAPABILITIES.accepted_containers
+
+
+def test_a_chunk_target_never_lifts_the_limit_past_what_openai_accepts():
+    for target in (20_000_000, 25_000_000, 100_000_000):
+        assert planning_limit_for(target) <= MAXIMUM_FILE_BYTES
+
+
+def test_the_default_chunk_target_plans_as_many_chunks_as_before():
+    """The default setting must not quietly cost more requests.
+
+    Chunking aims at a safety fraction of the limit it is given, so a target
+    passed straight through as the limit would make every chunk a fifth
+    smaller than the setting says.
+    """
+    before = plan_for(build_provider())
+    with_default = plan_for(build_provider(chunk_target_bytes=20_000_000))
+
+    assert len(with_default) == len(before)
+    assert all(chunk.encoded_size_bytes <= 20_000_000 for chunk in with_default)
+
+
+def test_a_lower_chunk_target_plans_smaller_chunks():
+    default = plan_for(build_provider(chunk_target_bytes=20_000_000))
+    smaller = plan_for(build_provider(chunk_target_bytes=5_000_000))
+
+    assert len(smaller) > len(default)
+    assert all(chunk.encoded_size_bytes <= 5_000_000 for chunk in smaller)
+    assert max(chunk.encoded_size_bytes for chunk in smaller) < max(
+        chunk.encoded_size_bytes for chunk in default
+    )
 
 
 # -- Only one model family -----------------------------------------------

@@ -143,6 +143,7 @@ def _build_elevenlabs(settings: TranscriptionSettings) -> TranscriptionProvider 
         model=settings.elevenlabs.transcription_model,
         parameters=dict(settings.elevenlabs.transcription_parameters),
         tag_audio_events=settings.elevenlabs.tag_audio_events,
+        diarise=settings.elevenlabs.diarise,
         timeout_seconds=settings.processing.provider_timeout_seconds,
         maximum_retries=settings.processing.provider_retry_attempts,
     )
@@ -159,6 +160,7 @@ def _build_openai(settings: TranscriptionSettings) -> TranscriptionProvider | No
         api_key=settings.openai_transcription.api_key,
         model=settings.openai_transcription.model,
         parameters=dict(settings.openai_transcription.parameters),
+        chunk_target_bytes=settings.openai_transcription.chunk_target_bytes,
         timeout_seconds=settings.processing.provider_timeout_seconds,
         maximum_retries=settings.processing.provider_retry_attempts,
     )

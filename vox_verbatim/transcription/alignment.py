@@ -31,7 +31,14 @@ The matrix also has steps that consume several words on one side at once,
 because "data base" against "database" is one word written two ways, not a
 match followed by a stray insertion. Those steps are only allowed when the
 words either side really do say the same thing, which the normalisation
-module decides.
+module decides. Ordinary words fold at most three at a time. Number words
+may fold further, because a spoken number is often long: "two hundred and
+fifty" is four words against "250", and "one hundred and fifty thousand" is
+six against "150,000". The wider step is tried only where every word of
+the phrase is a number word. Trying it for every phrase would multiply the
+work in every cell of an anchor-poor region and invite whole ordinary
+phrases to match by accident; number runs are rare, so limiting it to them
+costs almost nothing.
 
 **Windowing is the most important decision in this module.** Sequence
 alignment costs time and memory proportional to the product of the two
@@ -90,6 +97,7 @@ from vox_verbatim.transcription.normalise import (
     _compound_form,
     _has_german_letter,
     equivalence_kind,
+    is_number_word,
     is_punctuation_only,
     normalise,
 )
@@ -147,6 +155,12 @@ class AlignmentOptions:
     against "up-to-date" and stops well short of matching whole phrases by
     accident."""
 
+    maximum_number_merge_span: int = 10
+    """How many words may be folded into one when every one of them is a
+    number word. Spoken numbers run long: "two hundred and fifty thousand
+    three hundred and twelve" is ten words against "250312". It may not be
+    less than :attr:`maximum_merge_span`."""
+
     maximum_window_words: int = 200
     """The largest region aligned in one matrix, on either side."""
 
@@ -173,6 +187,10 @@ class AlignmentOptions:
             )
         if self.maximum_merge_span < 2:
             raise ValueError("Merging fewer than two words is not merging.")
+        if self.maximum_number_merge_span < self.maximum_merge_span:
+            raise ValueError(
+                "Number words may not merge over fewer words than ordinary words do."
+            )
 
 
 DEFAULT_OPTIONS = AlignmentOptions()
@@ -684,6 +702,9 @@ class _Stream:
     keys: tuple[_Key, ...] = ()
     """The :class:`_Key` of each word, worked out once for the whole stream."""
 
+    number_words: tuple[bool, ...] = ()
+    """Whether each word could be part of a spoken number."""
+
     boundary_after: tuple[bool, ...] = ()
     """Whether a sentence, a speaker or a silence ends at this word."""
 
@@ -725,6 +746,7 @@ def _build_stream(tokens: Sequence[ProviderToken], options: AlignmentOptions) ->
         punctuation=tuple(tuple(group) for group in punctuation),
         forms=tuple(key[1] for key in keys),
         keys=keys,
+        number_words=tuple(is_number_word(token.text) for token in words),
         boundary_after=boundaries,
     )
 
@@ -928,7 +950,11 @@ def _align_window(
     The matrix has a row for every backbone word and a column for every
     word of the other service, and each cell asks four questions of the
     words around it: do these two words correspond, and do two or three
-    words on either side say the same as one word on the other. The
+    words on either side say the same as one word on the other. A longer run
+    of number words, up to :attr:`AlignmentOptions.maximum_number_merge_span`,
+    is asked the same question, but only at the few rows and columns where
+    such a run ends, so a cell with no number run pays one dictionary lookup
+    for it. The
     questions are the same ones whatever the cell, so everything they need
     is worked out once per row and once per column before the matrix is
     filled, and the cell itself only compares tuples and looks up lists.
@@ -966,6 +992,22 @@ def _align_window(
     other_merges = {
         span: _merge_partners(other_words, backbone_singles, span) for span in spans
     }
+    shortest_number_span = options.maximum_merge_span + 1
+    longest_number_span = options.maximum_number_merge_span
+    backbone_number_merges = _number_merge_partners(
+        backbone_words,
+        backbone.number_words[window.backbone_start : window.backbone_end],
+        other_singles,
+        shortest_number_span,
+        longest_number_span,
+    )
+    other_number_merges = _number_merge_partners(
+        other_words,
+        other.number_words[window.aligned_start : window.aligned_end],
+        backbone_singles,
+        shortest_number_span,
+        longest_number_span,
+    )
     pair_costs = [
         [
             _pair_cost(backbone_keys[row], other_keys[column], options)
@@ -1013,6 +1055,18 @@ def _align_window(
                             best, taken = candidate, (span, 1)
                 if column >= span and row:
                     if row in other_merges[span][column]:
+                        candidate = above[column - span] + merge_cost
+                        if candidate < best:
+                            best, taken = candidate, (1, span)
+            if column:
+                for span, partners in backbone_number_merges.get(row, ()):
+                    if column in partners:
+                        candidate = cost[row - span][column - 1] + merge_cost
+                        if candidate < best:
+                            best, taken = candidate, (span, 1)
+            if row:
+                for span, partners in other_number_merges.get(column, ()):
+                    if row in partners:
                         candidate = above[column - span] + merge_cost
                         if candidate < best:
                             best, taken = candidate, (1, span)
@@ -1084,6 +1138,35 @@ def _merge_partners(
         phrase = _key_of(" ".join(token.text for token in several[end - span : end]))
         partners.append(singles.agreeing_with(phrase))
     return partners
+
+
+def _number_merge_partners(
+    several: Sequence[ProviderToken],
+    number_flags: Sequence[bool],
+    singles: _SingleWords,
+    shortest: int,
+    longest: int,
+) -> dict[int, list[tuple[int, frozenset[int]]]]:
+    """The long number phrases on one side, and the single words they fold into.
+
+    Maps an end position, one-based as the matrix counts them, to a list of
+    ``(span, partners)``: the ``span`` words ending just before that
+    position are all number words, and ``partners`` are the words on the
+    other side that say the same as them. Only spans from ``shortest`` to
+    ``longest`` are tried, and only phrases made entirely of number words,
+    so ordinary text adds nothing here and is never joined into a long
+    phrase. An end position with no partner at any span is left out.
+    """
+    found: dict[int, list[tuple[int, frozenset[int]]]] = {}
+    run = 0
+    for end in range(1, len(several) + 1):
+        run = run + 1 if number_flags[end - 1] else 0
+        for span in range(shortest, min(run, longest) + 1):
+            phrase = _key_of(" ".join(token.text for token in several[end - span : end]))
+            partners = singles.agreeing_with(phrase)
+            if partners:
+                found.setdefault(end, []).append((span, partners))
+    return found
 
 
 def _pair_cost(backbone: _Key, other: _Key, options: AlignmentOptions) -> float:

@@ -275,6 +275,11 @@ class ReconciliationOptions:
     maximum_merge_span: int = 3
     """How many backbone words one decision may cover, matching alignment."""
 
+    maximum_number_merge_span: int = 10
+    """How many backbone words one decision may cover where they are a
+    spoken number, matching alignment. "one hundred and fifty thousand" is
+    six words that one service may have written as "150,000"."""
+
     absence_reach: int = 20
     """How far, in backbone words, a service may be silent before it is
     treated as absent rather than as disagreeing.
@@ -753,10 +758,16 @@ def _scope(
     all of them are decided at once, because "database" can only be compared
     with "data base" as a whole. Comparing it with "data" alone would report
     a disagreement between two services that heard exactly the same thing.
+
+    The bound is the wider of the two merge spans. Alignment only merges
+    past three words where every word is a number word, so the wider bound
+    changes nothing for ordinary words, and it keeps a long number in one
+    scope where two services merged overlapping parts of it.
     """
+    limit = max(options.maximum_merge_span, options.maximum_number_merge_span)
     last = position
     changed = True
-    while changed and last - position + 1 < options.maximum_merge_span:
+    while changed and last - position + 1 < limit:
         changed = False
         for per_position in coverage.values():
             for index in range(position, last + 1):

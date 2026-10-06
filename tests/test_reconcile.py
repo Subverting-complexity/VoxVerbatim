@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import dataclasses
 
-from vox_verbatim.transcription.alignment import build_aligned_table
+import pytest
+
+from vox_verbatim.transcription.alignment import AlignmentColumn, build_aligned_table
 from vox_verbatim.transcription.confidence import (
     HIGH_CONFIDENCE_THRESHOLD,
     category_for,
@@ -1136,3 +1138,73 @@ def test_an_audio_event_before_the_first_word_comes_first() -> None:
 
     assert texts_of(tokens) == ["(laughter)", "so", "then"]
     assert not tokens[0].needs_review
+
+
+# -- Long spoken numbers -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("spoken_words", "digits"),
+    [
+        ("two hundred and fifty", "250"),
+        ("one hundred and fifty thousand", "150,000"),
+    ],
+)
+def test_a_long_spoken_number_against_its_digits_is_settled_as_one(spoken_words, digits):
+    """The backbone spells a number out in four or more words; the others write digits.
+
+    This used to leave "[UNCERTAIN: fifty / 250]" in the export, because only
+    the last word of the number was set against the digits.
+    """
+    backbone = spoken(Provider.ELEVENLABS, f"it cost {spoken_words} rand".split())
+    openai = spoken(Provider.OPENAI, f"it cost {digits} rand".split(), timed=False)
+    assemblyai = spoken(Provider.ASSEMBLYAI, f"it cost {digits} rand".split(), timed=False)
+
+    tokens = reconcile(table_of(backbone, openai, assemblyai))
+
+    assert not any(
+        ReviewReason.PROVIDER_DISAGREEMENT in token.review_reasons for token in tokens
+    )
+    last_word = spoken_words.split()[-1]
+    for token in tokens:
+        candidate_texts = {candidate.text for candidate in token.candidates}
+        assert not {last_word, digits} <= candidate_texts, candidate_texts
+    assert texts_of(tokens)[:2] == ["it", "cost"]
+    assert texts_of(tokens)[-1] == "rand"
+    number = " ".join(texts_of(tokens)[2:-1])
+    assert number in (spoken_words, digits)
+
+
+def test_overlapping_number_merges_from_two_services_are_decided_together() -> None:
+    """One service folds words one to four, another words two to five.
+
+    Each column alone stays inside the number merge span, but together they
+    cover five words, past the ordinary limit of three. All five have to be
+    one decision, or the number would be split between two of them.
+    """
+    from vox_verbatim.transcription.reconcile import _scope
+
+    backbone = spoken(Provider.ELEVENLABS, ["one", "hundred", "and", "fifty", "thousand"])
+    words = tuple(backbone.tokens)
+    openai = spoken(Provider.OPENAI, ["150", "thousand"], timed=False).tokens
+    assemblyai = spoken(Provider.ASSEMBLYAI, ["one", "50000"], timed=False).tokens
+    first = AlignmentColumn(
+        provider=Provider.OPENAI,
+        position=0,
+        backbone_tokens=words[0:4],
+        aligned_tokens=(openai[0],),
+        status=AlignmentStatus.MERGE,
+    )
+    second = AlignmentColumn(
+        provider=Provider.ASSEMBLYAI,
+        position=1,
+        backbone_tokens=words[1:5],
+        aligned_tokens=(assemblyai[1],),
+        status=AlignmentStatus.MERGE,
+    )
+    coverage = {
+        Provider.OPENAI: {index: first for index in first.backbone_indices},
+        Provider.ASSEMBLYAI: {index: second for index in second.backbone_indices},
+    }
+
+    assert _scope(0, coverage, len(words), DEFAULT_OPTIONS) == (0, 1, 2, 3, 4)

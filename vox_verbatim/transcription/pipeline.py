@@ -410,6 +410,18 @@ def _adjudicate(
         return tokens
     if _stopped(cancelled):
         return tokens
+    if not settings.openai_adjudication.enabled:
+        # The user has switched the service off, so nothing is sent. The run
+        # still finishes, and the words it would have been asked about wait
+        # for review. The warning is only given where there was something to
+        # ask about, so a clean recording does not mention it.
+        if _build_disputes(tokens, transcript):
+            transcript.warnings.append(
+                "Adjudication was not used, because OpenAI adjudication is "
+                "switched off in Settings. The words it would have settled are "
+                "waiting for review."
+            )
+        return tokens
 
     from vox_verbatim.transcription import adjudication
 

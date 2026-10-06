@@ -452,7 +452,8 @@ def test_a_diarisation_field_in_the_extras_is_obeyed_but_never_passed_through(re
     adapter worked out and could land the request with a combination the
     service refuses. All three diarisation fields are therefore taken out of
     the body. Two of them are still read: the extras are, for now, the only
-    place either the switch or the threshold can be set at all.
+    place the threshold can be set, and a switch written there is the most
+    specific instruction the adapter has.
     """
     client = FakeClient(transcription(SAMPLE_WORDS))
     provider = build_provider(
@@ -468,6 +469,44 @@ def test_a_diarisation_field_in_the_extras_is_obeyed_but_never_passed_through(re
     assert call["diarize"] is False
     # Refused on a request that does not diarise, whichever way it was set.
     assert "diarization_threshold" not in call
+
+
+def test_the_diarise_setting_switched_off_sends_a_request_without_diarisation(request_for):
+    """Unticking "Tell the speakers apart" must reach the request.
+
+    The run still asks for diarisation, because it asks by what the service
+    can do. The setting is the user's word on top of that, so it wins, and
+    the two fields that only go with diarisation are not sent either.
+    """
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(
+        client, diarise=False, parameters={"diarization_threshold": 0.9}
+    )
+
+    provider.transcribe(request_for(diarise=True, expected_speaker_count=3))
+
+    call = client.speech_to_text.calls[0]
+    assert call["diarize"] is False
+    assert "num_speakers" not in call
+    assert "diarization_threshold" not in call
+
+
+def test_the_diarise_setting_switched_on_leaves_the_request_to_decide(request_for):
+    client = FakeClient(transcription(SAMPLE_WORDS))
+
+    build_provider(client, diarise=True).transcribe(request_for(diarise=True))
+
+    assert client.speech_to_text.calls[0]["diarize"] is True
+
+
+def test_a_diarize_field_in_the_extras_still_overrides_the_setting(request_for):
+    """The extras are the more specific instruction, in either direction."""
+    client = FakeClient(transcription(SAMPLE_WORDS))
+    provider = build_provider(client, diarise=False, parameters={"diarize": True})
+
+    provider.transcribe(request_for(diarise=True))
+
+    assert client.speech_to_text.calls[0]["diarize"] is True
 
 
 def test_a_threshold_from_the_extras_is_sent_when_the_service_will_take_it(request_for):

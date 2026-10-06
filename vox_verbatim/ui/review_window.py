@@ -4551,6 +4551,22 @@ class ReviewWindow(QMainWindow):
         here, which is a different statement from saying the services had it
         right, and a person who has already replaced a word and then confirms
         one occurrence of it means the first.
+
+        An occurrence a replacement or a rule has already changed is marked
+        reviewed but never "correct as detected": the text it carries is not
+        the text that was detected, and calling it both would describe two
+        different decisions on one row.
+
+        Afterwards the selection moves on to the next occurrence of the word,
+        or to the next word when this was its last occurrence. Confirming is
+        what somebody does most often, one occurrence after another, and
+        staying put meant pressing F3 after every F4 and hearing a "Now on"
+        sentence about the row that had just been settled. The move happens
+        inside the same lists, so the focus stays where it is, and it is said
+        once, in the sentence that reports the confirmation.
+
+        When every occurrence of a word has been confirmed, the word itself is
+        reviewed, so that it leaves the list like any other settled word.
         """
         occurrence = self.current_occurrence()
         token = self.current_token()
@@ -4560,6 +4576,8 @@ class ReviewWindow(QMainWindow):
         if token is None:
             self._set_status(WORD_NOT_IN_TRANSCRIPT, alert=True, urgent=True)
             return False
+        row = self.current_row()
+        next_word_key, next_occurrence_id, at_end = self._place_after_current()
         word = chosen_text(token)
         transcript = self._transcript(occurrence.recording_name)
         if not self._hand_on(
@@ -4567,10 +4585,69 @@ class ReviewWindow(QMainWindow):
         ):
             return False
         if self._state.occurrence(occurrence.id) is not None:
-            occurrence.reviewed = True
-            occurrence.correct_as_detected = True
-        self._after_change(f"{word} confirmed as correct in {occurrence.recording_name}.")
+            if not occurrence.detected_text or token.text == occurrence.detected_text:
+                occurrence.reviewed = True
+                occurrence.correct_as_detected = True
+            else:
+                self._mark_replaced(occurrence, None)
+        if row is not None and row.group_id is not None:
+            self._settle_group_if_done(row.group_id)
+        message = f"{word} confirmed as correct in {occurrence.recording_name}."
+        if at_end:
+            message = f"{message} That was the last occurrence of the last word in the list."
+        self._after_change(
+            message,
+            word_key=next_word_key,
+            occurrence_id=next_occurrence_id,
+            from_word_key=row.key if row is not None else None,
+        )
+        landed = self.current_occurrence()
+        if landed is not None and landed.id != occurrence.id:
+            # Arriving here by F4 is arriving at an occurrence, exactly as F3
+            # does, so the audio is lined up the same way. The rebuild of the
+            # lists was quiet and started nothing.
+            self._start_automatic_playback()
         return True
+
+    def _place_after_current(self) -> tuple[str | None, str | None, bool]:
+        """Where the selection goes after the current occurrence is settled.
+
+        Answers ``(word key, occurrence id, at end)``: the next occurrence of
+        the same word, else the top of the next word, else nowhere, in which
+        case the person stays where they are and is told so. Worked out
+        before anything changes, because the rebuild afterwards may drop the
+        current word from the list and the row numbers with it.
+        """
+        occurrence_row = self._occurrences.selected_row()
+        if 0 <= occurrence_row and occurrence_row + 1 < self._occurrence_model.rowCount():
+            following = self._occurrence_model.occurrence_at(occurrence_row + 1)
+            if following is not None:
+                return self._selected_group_key, following.id, False
+        group_row = self._groups.selected_row()
+        if 0 <= group_row and group_row + 1 < self._group_model.rowCount():
+            following_row = self._group_model.row_at(group_row + 1)
+            if following_row is not None:
+                return following_row.key, None, False
+        return None, None, True
+
+    def _settle_group_if_done(self, group_id: str) -> None:
+        """Mark a word reviewed once every one of its occurrences has been.
+
+        It is "correct as detected" only when the word has no replacement and
+        every occurrence was confirmed as detected. A word with a replacement
+        keeps it, and its rules with it.
+        """
+        group = self._state.group(group_id)
+        if group is None:
+            return
+        occurrences = self._state.occurrences_of(group.id)
+        if not occurrences or not all(item.reviewed for item in occurrences):
+            return
+        group.reviewed = True
+        if group.replacement is None and all(
+            item.correct_as_detected for item in occurrences
+        ):
+            group.correct_as_detected = True
 
     # -- Handing changes on, and saying what happened -----------------------
 
@@ -4701,7 +4778,15 @@ class ReviewWindow(QMainWindow):
         self._set_status(message, alert=True, urgent=urgent or not saved)
         return message
 
-    def _after_change(self, message: str, urgent: bool = False) -> None:
+    def _after_change(
+        self,
+        message: str,
+        urgent: bool = False,
+        *,
+        word_key: str | None = None,
+        occurrence_id: str | None = None,
+        from_word_key: str | None = None,
+    ) -> None:
         """Save, rebuild the lists, and say what happened and where the person now is.
 
         The saving comes first and its answer is carried into the sentence,
@@ -4709,15 +4794,24 @@ class ReviewWindow(QMainWindow):
         a change succeeded in one breath and failed in the next. ``urgent`` is
         for a failure the caller has already written into the message, such as
         a transcript that could not be saved while others could.
+
+        ``word_key`` and ``occurrence_id`` move the selection somewhere other
+        than where it was. ``from_word_key`` is the word the change was made
+        on: when the selection has ended up on a different word, that word is
+        named before its occurrence, because the occurrence alone does not
+        tell a screen reader user that they have moved to another word.
         """
         saved = self._save_project(quiet=True)
-        self.refresh()
+        self.refresh(word_key, occurrence_id)
         occurrence = self.current_occurrence()
         if occurrence is not None:
-            message = (
-                f"{message} Now on "
-                f"{spoken_occurrence_summary(occurrence, self._occurrence_model.group_replacement)}"
+            summary = spoken_occurrence_summary(
+                occurrence, self._occurrence_model.group_replacement
             )
+            row = self.current_row()
+            if from_word_key is not None and row is not None and row.key != from_word_key:
+                summary = f"{spoken_group_summary(row)} {summary}"
+            message = f"{message} Now on {summary}"
         else:
             message = f"{message} {self._count_label.text()}"
         if not saved:

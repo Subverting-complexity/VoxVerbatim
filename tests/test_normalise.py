@@ -231,6 +231,32 @@ def test_a_thousands_comma_does_not_change_the_number():
     assert are_equivalent("15,000", "fifteen thousand")
 
 
+
+class TestAmountsWithPrefixesAndDecimals:
+    """A currency prefix or a decimal tail does not hide a thousands comma.
+
+    "R15,000" and "R15 000" are the same amount written two ways, so they
+    must not be shown to the user as a disagreement. The comma grouping
+    stays strict, so a different amount still reads as different.
+    """
+
+    def test_a_currency_prefix_does_not_stop_the_comma_being_a_separator(self):
+        assert equivalence_kind("R15,000", "R15 000").is_equivalent
+        assert equivalence_kind("$1,000", "$1000") is EquivalenceKind.NUMBER_FORMAT
+
+    def test_a_decimal_tail_after_a_comma_grouping_is_kept(self):
+        assert equivalence_kind("1,000.50", "1000.50") is EquivalenceKind.NUMBER_FORMAT
+        assert are_equivalent("R1,000.50", "R1000.50")
+
+    def test_a_different_amount_with_the_same_prefix_stays_different(self):
+        assert equivalence_kind("R15,000", "R50,000") is EquivalenceKind.DIFFERENT
+
+    def test_the_fraction_is_kept_exactly_as_written(self):
+        assert not are_equivalent("1,000.50", "1000.5")
+
+    def test_german_decimal_order_is_still_not_guessed(self):
+        assert not are_equivalent("1.000,50", "1000.50")
+
 def test_a_full_stop_between_digits_is_left_exactly_where_it_is():
     """A full stop means one thing in English and the opposite in German.
 

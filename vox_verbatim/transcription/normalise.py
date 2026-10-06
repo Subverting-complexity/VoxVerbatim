@@ -709,9 +709,15 @@ def _digit_group(word: str) -> str | None:
     """Return a digit string with its thousands separators taken out.
 
     Only commas are treated as separators, and only where they group three
-    digits. A full stop is left where it is, because it means one thing in
-    English and the opposite in German, and a wrong guess produces a number
-    that looks entirely reasonable and is out by a factor of a thousand.
+    digits. A currency symbol or letters in front, as in "R15,000" or
+    "$1,000", stay in front of the plain digits.
+
+    A full stop is read as a decimal point only after a comma grouping, as
+    in "1,000.50": that is English order and cannot be read any other way.
+    A full stop on its own is left where it is, because it means one thing
+    in English and the opposite in German, and a wrong guess produces a
+    number that looks entirely reasonable and is out by a factor of a
+    thousand. German "1.000,50" is left alone for the same reason.
     """
     if word.startswith("-") and len(word) > 1:
         # A minus sign stays in front of the number it belongs to, so that
@@ -722,12 +728,35 @@ def _digit_group(word: str) -> str | None:
         return word
     if "," not in word:
         return None
+    prefix_length = 0
+    while prefix_length < len(word) and not word[prefix_length].isdigit():
+        prefix_length += 1
+    if prefix_length:
+        # Only letters and currency symbols count as a prefix, so "r15,000"
+        # and "$1,000" are amounts and "(1,000" or "#1,000" are not.
+        prefix, rest = word[:prefix_length], word[prefix_length:]
+        if not all(
+            character.isalpha() or unicodedata.category(character) == "Sc"
+            for character in prefix
+        ):
+            return None
+        digits = _digit_group(rest)
+        if digits is None or digits.startswith("-"):
+            return None
+        return prefix + digits
     parts = word.split(",")
+    fraction = None
+    if "." in parts[-1]:
+        whole, fraction = parts[-1].split(".", 1)
+        if not (len(whole) == 3 and whole.isdigit() and fraction.isdigit()):
+            return None
+        parts[-1] = whole
     if len(parts) < 2 or not parts[0].isdigit() or not 1 <= len(parts[0]) <= 3:
         return None
     if not all(part.isdigit() and len(part) == 3 for part in parts[1:]):
         return None
-    return "".join(parts)
+    joined = "".join(parts)
+    return joined if fraction is None else joined + "." + fraction
 
 
 def _read_numbers(form: str, dropped: bool) -> str:

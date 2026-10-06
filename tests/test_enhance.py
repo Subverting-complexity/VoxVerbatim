@@ -405,6 +405,35 @@ def test_a_completed_replace_takes_the_place_of_the_previous_copy(tmp_path):
     assert sorted(path.name for path in folder.iterdir()) == ["quiet.wav"]
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+def test_the_unfinished_file_never_writes_over_a_recording(tmp_path, cancel):
+    """The temporary name is a fresh one, never a file already in the folder.
+
+    With the output folder set to the recordings folder, a fixed temporary
+    name such as quiet.unfinished.wav could be a recording, which would be
+    written over and then renamed or deleted.
+    """
+    source = tmp_path / "quiet.m4a"
+    write_real_audio(source, level_db=-30.0, seconds=4.0)
+    recording = tmp_path / "quiet.unfinished.wav"
+    recording.write_bytes(b"a recording that happens to have this name")
+    options = EnhanceOptions(output_folder=tmp_path, replace_existing=True)
+    writing: list[float] = []
+
+    def note(fraction: float) -> None:
+        if 0.5 < fraction < 1.0:
+            writing.append(fraction)
+
+    result = enhance_file(
+        source, options, progress=note, cancelled=lambda: cancel and bool(writing)
+    )
+
+    assert result.outcome == (Outcome.CANCELLED if cancel else Outcome.ENHANCED)
+    assert recording.read_bytes() == b"a recording that happens to have this name"
+    expected = ["quiet.m4a", "quiet.unfinished.wav"] + ([] if cancel else ["quiet.wav"])
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(expected)
+
+
 def test_a_mono_recording_keeps_its_single_channel(tmp_path, options):
     """The channel arrangement is not something this is allowed to change."""
     import av

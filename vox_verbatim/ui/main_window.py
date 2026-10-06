@@ -1599,12 +1599,27 @@ class MainWindow(QMainWindow):
         reader: _TranscriptReader,
         recording_name: str,
         transcript: Transcript,
-    ) -> None:
-        """Write a corrected transcript back, and say so plainly if that failed.
+    ) -> bool:
+        """Write a corrected transcript back, and answer whether that worked.
 
         A correction the person made and believes is saved, but is not, is the
         one failure here that must never pass quietly, because they will only
         find out about it after closing the window that still held the work.
+
+        The answer goes back to the review window, and it is the review window
+        that says so out loud. This window used to be the only one told, and it
+        announced the failure from its own status bar, which is behind the
+        review window the person is working in. The review window meanwhile
+        went on as if the save had worked: it kept the change, marked the word
+        replaced in the project and announced success. When the person moved
+        away and back, the old text came back from the file, and the project no
+        longer flagged the word, so nothing would ever bring it back to them.
+
+        The reason is still written into this window's status bar, with the
+        path, so it is there to be read later. It is not announced from here
+        as well: two urgent announcements raised one after the other cut
+        across each other, and the one from the window in front is the one
+        that matters.
 
         It goes through the same reader the review is reading from, so the
         corrected transcript is the one in hand afterwards. Saving straight to
@@ -1620,17 +1635,13 @@ class MainWindow(QMainWindow):
         if path is None:
             self._set_status(
                 f"The correction to {recording_name} could not be saved, because that "
-                "recording is not one of the ones being reviewed.",
-                alert=True,
-                urgent=True,
+                "recording is not one of the ones being reviewed."
             )
-            return
+            return False
         if not reader.save(recording_name, transcript):
-            self._set_status(
-                f"The correction could not be saved to {path}.",
-                alert=True,
-                urgent=True,
-            )
+            self._set_status(f"The correction could not be saved to {path}.")
+            return False
+        return True
 
     def _summary_text(self) -> str:
         total = self._model.rowCount()

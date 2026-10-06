@@ -1196,7 +1196,7 @@ class ReviewWindow(QMainWindow):
         recording_paths: dict[str, Path],
         project_store: ProjectStore,
         player: AudioPlayer,
-        save_correction: Callable[[str, Transcript], None] | None = None,
+        save_correction: Callable[[str, Transcript], bool] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1218,6 +1218,9 @@ class ReviewWindow(QMainWindow):
         # damaged both arrive as an empty project, and the window opens on it.
         self._state = project_store.load()
         self._player = player
+        # Answers whether the transcript was written. Nothing given at all is
+        # taken as every save working, which is what a window with nowhere to
+        # write to has always meant; see _hand_on.
         self._save_correction = save_correction
 
         self._note_keys: dict[QWidget, str] = {}
@@ -1301,6 +1304,10 @@ class ReviewWindow(QMainWindow):
         # The recordings one run of the analysis managed to read, so that it
         # can say how many it could not. Emptied at the start of every run.
         self._read_this_run: set[str] = set()
+        # The recordings whose automatic answers could not be written during
+        # the last processing run, so the sentence about that run can say so.
+        # See _write_rule_answers.
+        self._unsaved_rule_answers: list[str] = []
         # The flagged words of the whole folder, taken from the project rather
         # than found by reading the transcripts. This is the line that makes
         # the second block complete on a folder nobody has opened a file of,
@@ -3408,7 +3415,17 @@ class ReviewWindow(QMainWindow):
                 f"{'was' if applied == 1 else 'were'} answered automatically by "
                 "replacements you accepted earlier, and needs nothing from you."
             )
-        self._save_and_say(f"{message}{self._take_focus_note()}")
+        unsaved = self._unsaved_rule_answers
+        if unsaved:
+            # Said as part of the one sentence about this run, and urgently,
+            # because a separate announcement would be wiped out by this one.
+            # The automatic answers are kept in the project, so the next run
+            # writes them again, which is what the person needs to know.
+            message = (
+                f"{message} {self._correction_failure_text(unsaved)} The automatic "
+                "answers will be written again the next time the folder is processed."
+            )
+        self._save_and_say(f"{message}{self._take_focus_note()}", urgent=bool(unsaved))
         return True
 
     def _scanning_loader(self, recording_name: str) -> Transcript | None:
@@ -3452,7 +3469,16 @@ class ReviewWindow(QMainWindow):
         rule's ``occurrence_count`` was right therefore depended on which of
         the two roads a particular correction happened to take, which is not a
         difference anybody looking at the number could have known about.
+
+        A recording whose transcript cannot be written is counted neither in
+        the number returned nor in any rule's tally, because nothing in it was
+        changed. Its name goes into ``_unsaved_rule_answers`` for the sentence
+        about this run to report. Its occurrences stay as the analysis left
+        them, answered by a rule, and that is safe: the transcript still says
+        the old word, so the next run finds the same difference and writes it
+        again.
         """
+        self._unsaved_rule_answers = []
         applied = 0
         for recording_name, occurrences in self._by_recording(
             [
@@ -3464,7 +3490,9 @@ class ReviewWindow(QMainWindow):
             transcript = self._transcript(recording_name)
             if transcript is None:
                 continue
-            changed = False
+            # The rules that fired here are only counted once the transcript
+            # is safely written, so a failed save leaves no tally behind it.
+            fired: list[str | None] = []
             for occurrence in occurrences:
                 token = transcript.token_by_id(occurrence.token_id)
                 if token is None or token.text == occurrence.replacement:
@@ -3472,12 +3500,16 @@ class ReviewWindow(QMainWindow):
                 transcript = transcript.with_correction(
                     token.id, text=occurrence.replacement
                 )
-                changed = True
-                applied += 1
-                if occurrence.applied_rule_id is not None:
-                    note_rule_applied(self._state, occurrence.applied_rule_id)
-            if changed:
-                self._hand_on(recording_name, transcript)
+                fired.append(occurrence.applied_rule_id)
+            if not fired:
+                continue
+            if not self._hand_on(recording_name, transcript, quiet=True):
+                self._unsaved_rule_answers.append(recording_name)
+                continue
+            applied += len(fired)
+            for rule_id in fired:
+                if rule_id is not None:
+                    note_rule_applied(self._state, rule_id)
         return applied
 
     @staticmethod
@@ -3979,6 +4011,10 @@ class ReviewWindow(QMainWindow):
         touched: list[Occurrence] = []
         missing = 0
         anything_changed = False
+        # The recordings whose transcripts could not be written. Their
+        # occurrences are left out of ``touched``, so the project goes on
+        # saying exactly what their files still say.
+        unsaved: list[str] = []
         # One recording at a time, corrected, handed on and let go of before
         # the next is opened. A word said in fifty files would otherwise hold
         # fifty transcripts at once, which is the whole folder.
@@ -3988,6 +4024,7 @@ class ReviewWindow(QMainWindow):
                 missing += len(occurrences)
                 continue
             changed = False
+            reached: list[Occurrence] = []
             for occurrence in occurrences:
                 # An occurrence with a replacement of its own has been decided
                 # separately and keeps its own answer, which is the whole
@@ -3998,14 +4035,27 @@ class ReviewWindow(QMainWindow):
                 if token is None:
                     missing += 1
                     continue
-                touched.append(occurrence)
+                reached.append(occurrence)
                 if token.text == text:
                     continue
                 transcript = transcript.with_correction(token.id, text=text)
                 changed = True
             if changed:
+                if not self._hand_on(recording_name, transcript, quiet=True):
+                    unsaved.append(recording_name)
+                    continue
                 anything_changed = True
-                self._hand_on(recording_name, transcript)
+            touched.extend(reached)
+
+        # Every transcript that needed changing refused to be written, so
+        # nothing happened at all and the project is left exactly as it was.
+        # Said here rather than by _hand_on, once for the whole word rather
+        # than once for each recording.
+        if unsaved and not anything_changed:
+            self._set_status(
+                self._correction_failure_text(unsaved), alert=True, urgent=True
+            )
+            return False
 
         # Nothing has been written at this point unless something actually
         # changed, so refusing here refuses a change that was never made. A
@@ -4024,24 +4074,41 @@ class ReviewWindow(QMainWindow):
 
         for occurrence in touched:
             self._mark_replaced(occurrence, None if group is not None else text)
-        if group is not None:
-            group.replacement = text
-            group.reviewed = True
-            group.correct_as_detected = False
-            self._update_rules(group, text)
-        else:
-            self._update_loose_rules(touched, text)
+        # The word as a whole is settled, and its rules learned, only when
+        # every file it is in took the change. Settling it after a partial
+        # failure would take it off the list while some of its occurrences
+        # still say the old word on disk, and a rule would go on to answer
+        # files transcribed later under a decision that never fully landed.
+        # Left open, the word stays in front of the person, and applying the
+        # same replacement again finishes the job: the occurrences already
+        # changed read the new text and are simply settled.
+        if not unsaved:
+            if group is not None:
+                group.replacement = text
+                group.reviewed = True
+                group.correct_as_detected = False
+                self._update_rules(group, text)
+            else:
+                self._update_loose_rules(touched, text)
 
-        message = (
-            f"{text}. {self._affected_text(row)} The speaker and the timing of every "
-            "one of them are unchanged."
-        )
+        if unsaved:
+            message = (
+                f"{text} applied to {_counted(len(touched), 'occurrence')}, but not to "
+                f"all of them. {self._correction_failure_text(unsaved)} The word stays "
+                "open, so apply the replacement again to finish it. The speaker and "
+                "the timing of every occurrence are unchanged."
+            )
+        else:
+            message = (
+                f"{text}. {self._affected_text(row)} The speaker and the timing of "
+                "every one of them are unchanged."
+            )
         if missing:
             message = (
                 f"{message} {_counted(missing, 'occurrence')} could not be reached in "
                 "the transcripts and were left alone."
             )
-        self._after_change(message)
+        self._after_change(message, urgent=bool(unsaved))
         return True
 
     def apply_replacement_to_occurrence(self) -> bool:
@@ -4071,9 +4138,13 @@ class ReviewWindow(QMainWindow):
             )
             return False
         transcript = self._transcript(occurrence.recording_name)
-        self._hand_on(
+        # A transcript that could not be written has already been announced,
+        # and the occurrence is left exactly as it was: marking it replaced
+        # would take it off the list while its file still says the old word.
+        if not self._hand_on(
             occurrence.recording_name, transcript.with_correction(token.id, text=text)
-        )
+        ):
+            return False
         self._mark_replaced(occurrence, text)
         self._after_change(
             f"{text} applied to this occurrence only, in {occurrence.recording_name}. "
@@ -4231,12 +4302,17 @@ class ReviewWindow(QMainWindow):
         group = self._state.group(row.group_id) if row.group_id is not None else None
 
         missing = 0
+        settled = 0
+        # The recordings whose transcripts could not be written. Their
+        # occurrences keep every mark they had, because their files still say
+        # what they said before.
+        unsaved: list[str] = []
         for recording_name, occurrences in self._by_recording(list(row.occurrences)):
             transcript = self._transcript(recording_name)
             if transcript is None:
                 missing += len(occurrences)
                 continue
-            changed = False
+            reached: list[Occurrence] = []
             for occurrence in occurrences:
                 token = transcript.token_by_id(occurrence.token_id)
                 if token is None:
@@ -4247,33 +4323,66 @@ class ReviewWindow(QMainWindow):
                         token.id, text=occurrence.detected_text
                     )
                 transcript = with_confirmation(transcript, token.id)
-                changed = True
+                reached.append(occurrence)
+            if not reached:
+                continue
+            # The occurrences are marked only after their transcript is
+            # written. They used to be marked while it was being corrected,
+            # before the save had been tried, so a save that failed left the
+            # project calling them correct as detected while the file still
+            # carried the replacement.
+            if not self._hand_on(recording_name, transcript, quiet=True):
+                unsaved.append(recording_name)
+                continue
+            settled += len(reached)
+            for occurrence in reached:
                 if self._state.occurrence(occurrence.id) is not None:
                     occurrence.reviewed = True
                     occurrence.correct_as_detected = True
                     occurrence.replacement = None
                     occurrence.auto_applied = False
                     occurrence.applied_rule_id = None
-            if changed:
-                self._hand_on(recording_name, transcript)
 
-        if group is not None:
-            group.reviewed = True
-            group.correct_as_detected = True
-            group.replacement = None
-            self._state.rules = [
-                rule for rule in self._state.rules if rule.group_id != group.id
-            ]
+        # Every transcript refused to be written, so nothing happened at all
+        # and the project is left exactly as it was.
+        if unsaved and not settled:
+            self._set_status(
+                self._correction_failure_text(unsaved), alert=True, urgent=True
+            )
+            return False
+
+        # The word as a whole is settled, and its rules dropped, only when
+        # every file it is in took the change, for the same reason as in
+        # apply_replacement_to_word: a word settled after a partial failure
+        # would leave the list while some of its files still say otherwise.
+        if not unsaved:
+            if group is not None:
+                group.reviewed = True
+                group.correct_as_detected = True
+                group.replacement = None
+                self._state.rules = [
+                    rule for rule in self._state.rules if rule.group_id != group.id
+                ]
+            else:
+                self._drop_loose_rules(row.occurrences)
+
+        if unsaved:
+            message = (
+                f"{row.word} confirmed as correct as detected in "
+                f"{_counted(settled, 'occurrence')}, but not in all of them. "
+                f"{self._correction_failure_text(unsaved)} The word stays open, so "
+                "confirm it again to finish it."
+            )
         else:
-            self._drop_loose_rules(row.occurrences)
-
-        message = f"{row.word} confirmed as correct as detected. {self._affected_text(row)}"
+            message = (
+                f"{row.word} confirmed as correct as detected. {self._affected_text(row)}"
+            )
         if missing:
             message = (
                 f"{message} {_counted(missing, 'occurrence')} could not be reached in "
                 "the transcripts and were left alone."
             )
-        self._after_change(message)
+        self._after_change(message, urgent=bool(unsaved))
         return True
 
     def isolate_occurrence(self) -> bool:
@@ -4332,10 +4441,11 @@ class ReviewWindow(QMainWindow):
             self._set_status("The speaker is unchanged.", alert=True, urgent=True)
             return False
         transcript = self._transcript(occurrence.recording_name)
-        self._hand_on(
+        if not self._hand_on(
             occurrence.recording_name,
             transcript.with_correction(token.id, speaker=speaker),
-        )
+        ):
+            return False
         self._after_change(
             f"Speaker set to {speaker} for this occurrence. The text and the timing are "
             "unchanged, and no other occurrence of this word is affected."
@@ -4371,10 +4481,11 @@ class ReviewWindow(QMainWindow):
             self._set_status(WORD_NOT_IN_TRANSCRIPT, alert=True, urgent=True)
             return False
         transcript = self._transcript(occurrence.recording_name)
-        self._hand_on(
+        if not self._hand_on(
             occurrence.recording_name,
             with_timing_decision(transcript, token.id, accepted),
-        )
+        ):
+            return False
         self._after_change(
             "Timing confirmed. The text and the speaker are unchanged."
             if accepted
@@ -4402,7 +4513,10 @@ class ReviewWindow(QMainWindow):
             return False
         word = chosen_text(token)
         transcript = self._transcript(occurrence.recording_name)
-        self._hand_on(occurrence.recording_name, with_confirmation(transcript, token.id))
+        if not self._hand_on(
+            occurrence.recording_name, with_confirmation(transcript, token.id)
+        ):
+            return False
         if self._state.occurrence(occurrence.id) is not None:
             occurrence.reviewed = True
             occurrence.correct_as_detected = True
@@ -4411,14 +4525,45 @@ class ReviewWindow(QMainWindow):
 
     # -- Handing changes on, and saying what happened -----------------------
 
-    def _hand_on(self, recording_name: str, transcript: Transcript) -> None:
-        """Keep a corrected transcript, and tell whoever is storing it.
+    def _hand_on(
+        self, recording_name: str, transcript: Transcript, quiet: bool = False
+    ) -> bool:
+        """Save a corrected transcript, and keep it only if that worked.
 
         There is no Save button on this screen and there is not going to be
         one. A correction is written through at the moment it is made, so that
         closing the window, losing power or a crash can never take back
         something the person watched happen.
+
+        The save comes first, and nothing else happens unless it worked. It
+        used to come last and its answer was not even asked for, so a
+        transcript that could not be written -- a full disk, a file held open
+        by a sync client -- was still kept in the cache, still noted in the
+        project's flagged words, still handed on as changed, and every caller
+        went on to mark the word replaced and announce success. The person
+        moved away and back, the file gave back the old text, and the project
+        no longer flagged the word, so nothing would ever lead them back to
+        it. Saving first means a failure leaves the window, the project and
+        the file all agreeing on the word as it was.
+
+        Answers whether the change was kept, and every caller has to stop at
+        False before it changes the project or says anything was done. A
+        failure is announced here, urgently and from this window, unless
+        ``quiet`` is given: the callers that change several recordings at once
+        ask for quiet and say it themselves, in the one sentence that also
+        says what did work, because a second announcement would wipe out the
+        first. No callback at all counts as a save that worked.
         """
+        if self._save_correction is not None and not self._save_correction(
+            recording_name, transcript
+        ):
+            if not quiet:
+                self._set_status(
+                    self._correction_failure_text([recording_name]),
+                    alert=True,
+                    urgent=True,
+                )
+            return False
         self._cached_name = recording_name
         self._cached_transcript = transcript
         # The flagged words of this recording have changed: a confirmed word
@@ -4431,9 +4576,32 @@ class ReviewWindow(QMainWindow):
         # project describing the word as it was before the person changed it.
         # It costs nothing: the corrected transcript is the argument.
         self._note_uncertainties(recording_name, transcript)
-        if self._save_correction is not None:
-            self._save_correction(recording_name, transcript)
         self.transcriptChanged.emit(recording_name, transcript)
+        return True
+
+    @staticmethod
+    def _correction_failure_text(recording_names: list[str]) -> str:
+        """Say that a transcript could not be written, and that nothing changed.
+
+        Saying that the word is as it was matters as much as saying the save
+        failed. Without it a person cannot tell whether the change half
+        happened, and the honest answer is that in that recording it did not
+        happen at all.
+        """
+        if len(recording_names) == 1:
+            return (
+                "The change could not be saved to the transcript of "
+                f"{recording_names[0]}, so it has not been made. The word there is "
+                "as it was. Check that the disk has room and that no other program "
+                "has the transcript open, then try again."
+            )
+        return (
+            "The change could not be saved to the transcripts of "
+            f"{_counted(len(recording_names), 'recording')}: "
+            f"{', '.join(recording_names)}. It has not been made in them, and the "
+            "words there are as they were. Check that the disk has room and that no "
+            "other program has the transcripts open, then try again."
+        )
 
     def _save_project(self, quiet: bool = False) -> bool:
         """Write the project, and say plainly when that did not work.
@@ -4454,7 +4622,7 @@ class ReviewWindow(QMainWindow):
             "is only in this window until that is put right."
         )
 
-    def _save_and_say(self, message: str) -> str:
+    def _save_and_say(self, message: str, urgent: bool = False) -> str:
         """Save the project and say one sentence covering both. Returns what was said.
 
         Every path that changes the project has to do this, and the reason is
@@ -4475,20 +4643,23 @@ class ReviewWindow(QMainWindow):
         many recordings were processed.
 
         So there is one sentence, the failure is the tail of it, and the whole
-        thing is urgent when there was a failure to report.
+        thing is urgent when there was a failure to report. ``urgent`` is for a
+        failure the caller has already written into the message itself.
         """
         saved = self._save_project(quiet=True)
         if not saved:
             message = f"{message} {self._save_failure_text()}"
-        self._set_status(message, alert=True, urgent=not saved)
+        self._set_status(message, alert=True, urgent=urgent or not saved)
         return message
 
-    def _after_change(self, message: str) -> None:
+    def _after_change(self, message: str, urgent: bool = False) -> None:
         """Save, rebuild the lists, and say what happened and where the person now is.
 
         The saving comes first and its answer is carried into the sentence,
         rather than being announced separately, so that a person is never told
-        a change succeeded in one breath and failed in the next.
+        a change succeeded in one breath and failed in the next. ``urgent`` is
+        for a failure the caller has already written into the message, such as
+        a transcript that could not be saved while others could.
         """
         saved = self._save_project(quiet=True)
         self.refresh()
@@ -4502,7 +4673,9 @@ class ReviewWindow(QMainWindow):
             message = f"{message} {self._count_label.text()}"
         if not saved:
             message = f"{message} {self._save_failure_text()}"
-        self._set_status(f"{message}{self._take_focus_note()}", alert=True, urgent=not saved)
+        self._set_status(
+            f"{message}{self._take_focus_note()}", alert=True, urgent=urgent or not saved
+        )
 
     def _take_focus_note(self) -> str:
         """Say that the focus was caught, once, as part of whatever is being said."""

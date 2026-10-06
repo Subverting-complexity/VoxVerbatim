@@ -1521,9 +1521,47 @@ def test_a_correction_that_could_not_be_saved_is_reported(qapp, store, audio_fol
                 return False
 
         reader = main_window_module._TranscriptReader({"alpha.m4a": RefusingStore()})
-        window._save_correction(reader, "alpha.m4a", transcript)
+
+        # The answer is what lets the review window, which is the one in
+        # front, say so and leave the word as it was.
+        assert window._save_correction(reader, "alpha.m4a", transcript) is False
 
         assert "could not be saved" in window._status_label.text()
+    finally:
+        close_window(window)
+
+
+def test_a_correction_that_could_not_be_saved_is_announced_by_the_review_window_only(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Two urgent announcements one after the other cut across each other.
+
+    The review window is in front and says it; this window only keeps the
+    reason, with the path, on its status bar.
+    """
+    said: list[str] = []
+    monkeypatch.setattr(
+        main_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        transcript = weak_transcript("alpha.m4a")
+        transcript_store = save_transcript(window, audio_folder / "alpha.m4a", transcript)
+
+        class RefusingStore:
+            transcript_path = transcript_store.transcript_path
+
+            def save(self, _transcript) -> bool:
+                return False
+
+        reader = main_window_module._TranscriptReader({"alpha.m4a": RefusingStore()})
+        said.clear()
+
+        window._save_correction(reader, "alpha.m4a", transcript)
+
+        assert said == []
     finally:
         close_window(window)
 
@@ -1544,7 +1582,12 @@ def test_a_saved_correction_is_what_the_next_read_of_that_recording_sees(
         reader = main_window_module._TranscriptReader({"alpha.m4a": transcript_store})
         assert words_of(reader.load("alpha.m4a")) == ["the", "Bosch", "account"]
 
-        window._save_correction(reader, "alpha.m4a", strong_transcript("alpha.m4a", "Bosche"))
+        assert (
+            window._save_correction(
+                reader, "alpha.m4a", strong_transcript("alpha.m4a", "Bosche")
+            )
+            is True
+        )
 
         assert words_of(reader.load("alpha.m4a")) == ["the", "Bosche", "account"]
     finally:
@@ -1558,7 +1601,10 @@ def test_a_correction_to_a_recording_this_review_does_not_know_is_refused(
     window = loaded_window(qapp, store, audio_folder)
     try:
         reader = main_window_module._TranscriptReader({})
-        window._save_correction(reader, "stranger.m4a", weak_transcript("stranger.m4a"))
+        assert (
+            window._save_correction(reader, "stranger.m4a", weak_transcript("stranger.m4a"))
+            is False
+        )
 
         assert "not one of the ones being reviewed" in window._status_label.text()
     finally:

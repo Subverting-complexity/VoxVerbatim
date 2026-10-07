@@ -214,3 +214,65 @@ def test_a_list_replaced_by_an_equal_sized_one_is_not_mistaken_for_the_old() -> 
 def test_an_empty_result_answers_none_without_complaint() -> None:
     result = ProviderResult(provider=Provider.OPENAI, error="it fell over")
     assert result.token_at(0) is None
+
+
+# -- The overall rating of a word with no time ---------------------------------
+
+
+def _untimed(text_confidence: Confidence) -> FinalToken:
+    token = FinalToken()
+    token.text = "contract"
+    token.text_confidence = text_confidence
+    token.timing_confidence = Confidence.UNRESOLVED
+    token.speaker_confidence = Confidence.HIGH
+    return token
+
+
+def test_an_agreed_word_with_no_time_is_rated_review_suggested() -> None:
+    """Its text was chosen, so "Unresolved" would tell the reader something false."""
+    token = _untimed(Confidence.HIGH)
+
+    assert token.confidence is Confidence.REVIEW_SUGGESTED
+    assert token.confidence.needs_review
+
+
+def test_a_disputed_word_with_no_time_keeps_the_rating_its_text_gives() -> None:
+    assert _untimed(Confidence.REVIEW_REQUIRED).confidence is Confidence.REVIEW_REQUIRED
+
+
+def test_a_word_where_nothing_was_chosen_is_still_unresolved() -> None:
+    """The words in square brackets are the ones "Unresolved" exists for."""
+    assert _untimed(Confidence.UNRESOLVED).confidence is Confidence.UNRESOLVED
+
+
+def test_a_doubtful_time_still_weighs_on_the_word_in_full() -> None:
+    """Only a missing time is capped; a time that is there but doubtful is not."""
+    token = _untimed(Confidence.HIGH)
+    token.timing_confidence = Confidence.REVIEW_REQUIRED
+
+    assert token.confidence is Confidence.REVIEW_REQUIRED
+
+
+def test_a_time_a_person_rejected_is_not_capped() -> None:
+    """The word keeps its numbers, so its time is rejected rather than missing."""
+    token = _untimed(Confidence.HIGH)
+    token.start = 30.0
+    token.end = 30.5
+
+    assert token.confidence is Confidence.UNRESOLVED
+
+
+def test_the_counts_by_rating_follow_the_capped_rating() -> None:
+    transcript = Transcript(
+        recording_name="interview.wav",
+        tokens=[
+            _untimed(Confidence.HIGH),
+            _untimed(Confidence.HIGH),
+            _untimed(Confidence.UNRESOLVED),
+        ]
+    )
+
+    counts = transcript.counts_by_confidence()
+
+    assert counts[Confidence.REVIEW_SUGGESTED] == 2
+    assert counts[Confidence.UNRESOLVED] == 1

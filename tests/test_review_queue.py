@@ -178,10 +178,10 @@ def test_the_confidence_is_the_weakest_of_the_three_answers(qapp):
     """Text we are sure of, at a time we are not, is not a settled word."""
     model = ReviewQueueModel()
     token = make_token()
-    token.timing_confidence = Confidence.UNRESOLVED
+    token.timing_confidence = Confidence.REVIEW_REQUIRED
     model.set_tokens([token])
 
-    assert model.data(model.index(0, COLUMN_CONFIDENCE)) == "Unresolved"
+    assert model.data(model.index(0, COLUMN_CONFIDENCE)) == "Review required"
 
 
 # -- The filters ---------------------------------------------------------

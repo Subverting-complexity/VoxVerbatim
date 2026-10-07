@@ -68,7 +68,12 @@ from pathlib import Path
 from typing import Any
 
 from vox_verbatim import DISTRIBUTION_NAME
-from vox_verbatim.json_store import read_json_object, write_json_object
+from vox_verbatim.json_store import (
+    JsonReadStatus,
+    read_json_object,
+    read_json_object_status,
+    write_json_object,
+)
 from vox_verbatim.transcription.model import Confidence, Language
 
 _log = logging.getLogger(__name__)
@@ -585,6 +590,100 @@ class ReplacementRule:
 
 
 @dataclass
+class LearnedName:
+    """A name this folder's reviews taught, and the ways the services got it wrong.
+
+    A person correcting ``Bosh`` to ``Bosch`` while listening to their own
+    recording has said, with the best evidence there is, that ``Bosch`` is a
+    word spoken in this folder. It is kept here, in the folder's own project
+    file, rather than in the shared vocabulary, for the reason the module
+    docstring gives: one client's surname has no business being suggested to
+    the services when another client's recordings are transcribed.
+
+    ``wrong_forms`` are the spellings the services wrote instead. The correct
+    text never appears among them.
+    """
+
+    text: str
+    language: str
+    """A :class:`~vox_verbatim.transcription.model.Language` value, or
+    ``"unknown"`` where the language was never established."""
+
+    wrong_forms: list[str] = field(default_factory=list)
+    learned_at: str = ""
+    """When the name was first learned, ISO 8601."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> LearnedName | None:
+        """Rebuild a learned name, or return ``None`` if it has no text.
+
+        A name with no text could teach nothing, so it is dropped. Everything
+        else falls back to its own default.
+        """
+        if not isinstance(data, dict):
+            return None
+        text = _text(data.get("text")).strip()
+        if not text:
+            _log.warning("A learned name with no text was ignored.")
+            return None
+        return cls(
+            text=text,
+            language=_language(data.get("language")),
+            wrong_forms=_string_list(data.get("wrong_forms")),
+            learned_at=_text(data.get("learned_at")),
+        )
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """What two entries are compared on to decide they are one name.
+
+        Capitals and surrounding space are set aside, because ``bosch`` and
+        ``Bosch`` are one name written twice. Casefolding leaves accented
+        letters alone, so ``Müller`` and ``Mueller`` stay two names. The
+        language is part of the key, so the same spelling learned in two
+        languages is two entries.
+        """
+        return (self.text.strip().casefold(), self.language)
+
+
+def merge_learned_names(existing: list[LearnedName], new: list[LearnedName]) -> list[LearnedName]:
+    """Return ``existing`` with ``new`` added, never listing one name twice.
+
+    A name already listed keeps its place, its spelling and the time it was
+    first learned, and gains any wrong forms it did not have. Wrong forms are
+    compared without regard to capitals, and the correct text itself is never
+    kept as a wrong form. Neither argument is changed: the entries returned
+    are new objects. The order is the order names were first learned in.
+    """
+    merged: list[LearnedName] = []
+    positions: dict[tuple[str, str], int] = {}
+    for name in [*existing, *new]:
+        text = name.text.strip()
+        if not text:
+            continue
+        position = positions.get(name.key)
+        if position is None:
+            position = len(merged)
+            positions[name.key] = position
+            merged.append(LearnedName(text=text, language=name.language,
+                                      learned_at=name.learned_at))
+        target = merged[position]
+        if not target.learned_at and name.learned_at:
+            target.learned_at = name.learned_at
+        known = {form.casefold() for form in target.wrong_forms}
+        known.add(target.text.casefold())
+        for form in name.wrong_forms:
+            form = form.strip()
+            if form and form.casefold() not in known:
+                target.wrong_forms.append(form)
+                known.add(form.casefold())
+    return merged
+
+
+@dataclass
 class ProjectSettings:
     """The choices the person made about how this folder is reviewed."""
 
@@ -705,6 +804,14 @@ class ProjectState:
     last_occurrence_id: str | None = None
     """The occurrence the person was last on."""
 
+    learned_names: list[LearnedName] = field(default_factory=list)
+    """The names this folder's reviews taught, each listed once.
+
+    Saved through :meth:`ProjectStore.save_keeping_learned_names` rather than
+    plain :meth:`ProjectStore.save` wherever the file may have changed since
+    it was loaded, so that a name somebody removed is not written back.
+    """
+
     # -- The lookups the window needs
     #
     # These walk the lists rather than keeping an index beside them, and that
@@ -805,6 +912,7 @@ class ProjectState:
             "transcript_times": dict(self.transcript_times),
             "last_group_id": self.last_group_id,
             "last_occurrence_id": self.last_occurrence_id,
+            "learned_names": [item.to_dict() for item in self.learned_names],
         }
 
     @classmethod
@@ -841,6 +949,7 @@ class ProjectState:
         state.transcript_times = _whole_number_map(data.get("transcript_times"))
         state.last_group_id = _optional_text(data.get("last_group_id"))
         state.last_occurrence_id = _optional_text(data.get("last_occurrence_id"))
+        state.learned_names = _learned_names(data)
         state._repair()
         return state
 
@@ -979,6 +1088,53 @@ def _unique_by_id(items: list[Any], description: str) -> list[Any]:
     return kept
 
 
+def _learned_names(data: dict[str, Any]) -> list[LearnedName]:
+    """The learned names in a loaded project file, each listed once."""
+    return merge_learned_names([], _each(data.get("learned_names"), LearnedName.from_dict))
+
+
+def read_learned_names(folder: Path | str) -> tuple[list[LearnedName], JsonReadStatus]:
+    """Read only the learned names from a folder's project file, as it is now.
+
+    The status says whether the file was read, is not there, or is there and
+    could not be read. The list is empty unless it was read. Nothing else in
+    the file is built, so this is cheap enough to call before every save.
+    """
+    data, status = read_json_object_status(Path(folder) / PROJECT_FILE_NAME)
+    if data is None:
+        return [], status
+    return _learned_names(data), status
+
+
+def remove_learned_name(folder: Path | str, text: str, language: str) -> bool:
+    """Take one learned name out of a folder's project file on disk.
+
+    Returns whether a name was removed and the file was written. The file is
+    read and written back as raw JSON, so every other key in it is kept
+    exactly as it was, including any this version does not know about. A file
+    that is missing, locked or damaged is not written at all, because writing
+    it would replace somebody's whole project with one list.
+    """
+    path = Path(folder) / PROJECT_FILE_NAME
+    data, status = read_json_object_status(path)
+    if data is None or status is not JsonReadStatus.READ:
+        return False
+    entries = data.get("learned_names")
+    if not isinstance(entries, list):
+        return False
+    wanted = LearnedName(text=text, language=_language(language)).key
+    kept = []
+    for entry in entries:
+        name = LearnedName.from_dict(entry)
+        if name is not None and name.key == wanted:
+            continue
+        kept.append(entry)
+    if len(kept) == len(entries):
+        return False
+    data["learned_names"] = kept
+    return write_json_object(path, data)
+
+
 def _new_id() -> str:
     """A fresh identifier for this layer's own use."""
     return uuid.uuid4().hex
@@ -1037,3 +1193,27 @@ class ProjectStore:
         somebody tells them now.
         """
         return write_json_object(self.path, state.to_dict())
+
+    def save_keeping_learned_names(
+        self, state: ProjectState, learned_here: list[LearnedName]
+    ) -> bool:
+        """Save the project without bringing back a name removed from the file.
+
+        ``learned_here`` is what the caller has learned since its last save.
+        The names written are the ones in the file as it is on disk now, with
+        those added, rather than the ones in ``state``. This is the failure it
+        prevents: the Review window holds the project for as long as it is
+        open, and a person may remove a name from the file in the meantime.
+        Saving the window's copy would write that name back without anybody
+        noticing.
+
+        When the file is missing or cannot be read there is nothing newer to
+        respect, so the names in ``state`` are kept. ``state.learned_names``
+        is set to what was written. Returns whether the save worked.
+        """
+        disk_names, status = read_learned_names(self._folder)
+        if status is JsonReadStatus.READ:
+            state.learned_names = merge_learned_names(disk_names, learned_here)
+        else:
+            state.learned_names = merge_learned_names(state.learned_names, learned_here)
+        return self.save(state)

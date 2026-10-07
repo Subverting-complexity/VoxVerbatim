@@ -7,15 +7,13 @@ from dataclasses import replace
 
 from vox_verbatim.transcription.calibration import Dimension, ProviderStatistics
 from vox_verbatim.transcription.learning import (
-    LEARNED_PROFILE_ID,
     MistakeCategory,
     count_settled_words,
     extract_corrections,
-    learn_from_review,
+    names_learned,
     note_settled_words,
     repeated_mistakes,
     teaches_a_term,
-    term_for,
 )
 from vox_verbatim.transcription.model import (
     Confidence,
@@ -28,11 +26,7 @@ from vox_verbatim.transcription.model import (
     Transcript,
 )
 from vox_verbatim.transcription.vocabulary import (
-    TermCategory,
-    Vocabulary,
-    VocabularyLevel,
-    VocabularyProfile,
-    VocabularyTerm,
+    LearnedCorrections,
 )
 
 
@@ -219,10 +213,7 @@ def test_a_name_becomes_a_term_the_services_will_listen_for():
     correction = only_correction(before, after)
 
     assert teaches_a_term(correction) is True
-    term = term_for(correction)
-    assert term is not None
-    assert term.text == "Vermeulen"
-    assert term.common_misrecognitions == ("Fermeulen",)
+    assert [name.text for name in names_learned(before, after)] == ["Vermeulen"]
     assert correction.category is MistakeCategory.NAME
 
 
@@ -234,7 +225,7 @@ def test_a_grammar_fix_never_becomes_a_term():
     correction = only_correction(before, after)
 
     assert teaches_a_term(correction) is False
-    assert term_for(correction) is None
+    assert names_learned(before, after) == []
     assert correction.category is MistakeCategory.WORDING
 
 
@@ -258,14 +249,11 @@ def test_the_same_word_in_the_middle_of_a_sentence_does_prove_something():
     assert teaches_a_term(correction) is True
 
 
-def test_an_acronym_becomes_a_term_and_is_labelled_as_one():
+def test_an_acronym_is_learned_as_a_name():
     before = sentence("Send", "it", "to", "sars", "today.")
     after = corrected(before, "sars", "SARS")
 
-    term = term_for(only_correction(before, after))
-
-    assert term is not None
-    assert term.category is TermCategory.ACRONYM
+    assert [name.text for name in names_learned(before, after)] == ["SARS"]
 
 
 def test_a_number_is_never_taught_as_a_term():
@@ -275,7 +263,7 @@ def test_a_number_is_never_taught_as_a_term():
     correction = only_correction(before, after)
 
     assert correction.is_numeric is True
-    assert term_for(correction) is None
+    assert names_learned(before, after) == []
     assert correction.category is MistakeCategory.NUMBER
 
 
@@ -286,28 +274,27 @@ def test_an_amount_is_never_taught_as_a_term():
     )
     after = corrected(before, "15,000", "50,000")
 
-    assert term_for(only_correction(before, after)) is None
+    assert names_learned(before, after) == []
 
 
 def test_a_rewritten_phrase_is_not_a_term():
     before = sentence("He", "said", "Thefour", "wecan")
     after = corrected(before, "Thefour", "Therefore Malan and Botha")
 
-    assert term_for(only_correction(before, after)) is None
+    assert names_learned(before, after) == []
 
 
 def test_a_corrected_spelling_of_a_name_is_taught_with_its_own_spelling():
     before = sentence("We", "met", "Mueller", "yesterday.")
     after = corrected(before, "Mueller", "Müller")
 
-    term = term_for(only_correction(before, after))
+    [name] = names_learned(before, after)
 
-    assert term is not None
-    assert term.text == "Müller"
-    assert term.common_misrecognitions == ("Mueller",)
+    assert name.text == "Müller"
+    assert name.wrong_forms == ["Mueller"]
 
 
-def test_the_language_of_the_word_travels_onto_the_term():
+def test_the_language_of_the_word_travels_onto_the_name():
     before = Transcript(
         recording_name="meeting",
         tokens=[
@@ -319,76 +306,50 @@ def test_the_language_of_the_word_travels_onto_the_term():
     )
     after = corrected(before, "Muehler", "Müller")
 
-    term = term_for(only_correction(before, after))
+    [name] = names_learned(before, after)
 
-    assert term is not None
-    assert term.language is Language.GERMAN
-
-
-# -- Storing what was learned --------------------------------------------
+    assert name.language == Language.GERMAN.value
 
 
-def test_a_review_feeds_the_corrections_the_vocabulary_module_keeps():
-    before = sentence("We", "met", "Fermeulen", "yesterday.")
-    after = corrected(before, "Fermeulen", "Vermeulen")
-    vocabulary = Vocabulary()
-
-    result = learn_from_review(before, after, vocabulary, when="2026-08-17T09:00:00")
-
-    assert len(vocabulary.corrections.corrections) == 1
-    stored = vocabulary.corrections.corrections[0]
-    assert (stored.wrong_text, stored.right_text) == ("Fermeulen", "Vermeulen")
-    assert stored.provider is Provider.OPENAI
-    assert vocabulary.corrections.mistakes_by_provider() == {Provider.OPENAI: 1}
-    assert [term.text for term in result.taught] == ["Vermeulen"]
+# -- What a review taught this folder ------------------------------------
 
 
-def test_the_same_correction_twice_is_counted_rather_than_listed_twice():
-    before = sentence("We", "met", "Fermeulen", "yesterday.")
-    after = corrected(before, "Fermeulen", "Vermeulen")
-    vocabulary = Vocabulary()
+def test_a_corrected_name_is_learned_with_its_language_and_wrong_form():
+    before = sentence("We", "met", "Bosh", "yesterday.")
+    after = corrected(before, "Bosh", "Bosch")
 
-    learn_from_review(before, after, vocabulary, when="2026-08-17T09:00:00")
-    learn_from_review(before, after, vocabulary, when="2026-08-18T09:00:00")
+    learned = names_learned(before, after, when="2026-10-07T09:00:00+02:00")
 
-    assert len(vocabulary.corrections.corrections) == 1
-    assert vocabulary.corrections.corrections[0].occurrences == 2
-    profile = vocabulary.profile(LEARNED_PROFILE_ID)
-    assert profile is not None
-    assert len(profile.terms) == 1
-    assert profile.terms[0].confirmation_count == 2
+    assert len(learned) == 1
+    assert learned[0].text == "Bosch"
+    assert learned[0].language == Language.ENGLISH.value
+    assert learned[0].wrong_forms == ["Bosh"]
+    assert learned[0].learned_at == "2026-10-07T09:00:00+02:00"
 
 
-def test_the_vetted_terms_are_collected_in_a_list_the_user_can_see():
-    before = sentence("Put", "it", "over", "their")
-    after = corrected(before, "their", "there")
-    vocabulary = Vocabulary()
+def test_an_ordinary_word_teaches_no_name():
+    before = sentence("the", "cat", "sat", "there")
+    after = corrected(before, "cat", "hat")
 
-    result = learn_from_review(before, after, vocabulary)
-
-    # The correction is still evidence, but it is not taught to the services.
-    assert len(vocabulary.corrections.corrections) == 1
-    assert result.taught == ()
-    assert vocabulary.profile(LEARNED_PROFILE_ID) is None
+    assert names_learned(before, after) == []
 
 
-def test_a_word_the_user_already_categorised_keeps_that_category():
-    vocabulary = Vocabulary(
-        profiles=[
-            VocabularyProfile(
-                id="acme",
-                level=VocabularyLevel.CLIENT,
-                name="Acme",
-                terms=[VocabularyTerm(text="Vermeulen", category=TermCategory.PERSON)],
-            )
-        ]
-    )
-    before = sentence("We", "met", "Fermeulen", "yesterday.")
-    after = corrected(before, "Fermeulen", "Vermeulen")
+def test_one_name_corrected_twice_in_a_review_is_listed_once():
+    before = sentence("Bosh", "and", "Bosche", "met", "Bosh")
+    after = corrected(corrected(before, "Bosche", "Bosch"), "Bosh", "Bosch")
+    after = corrected(after, "Bosh", "Bosch")
 
-    result = learn_from_review(before, after, vocabulary)
+    learned = names_learned(before, after)
 
-    assert [term.category for term in result.taught] == [TermCategory.PERSON]
+    # Two of them started a sentence, but one did not, and that one is enough.
+    assert [name.text for name in learned] == ["Bosch"]
+    assert sorted(learned[0].wrong_forms) == ["Bosche", "Bosh"]
+
+
+def test_a_review_that_changed_nothing_teaches_nothing():
+    before = sentence("We", "met", "Vermeulen", "yesterday.")
+
+    assert names_learned(before, before) == []
 
 
 def save(
@@ -543,20 +504,13 @@ def test_a_speaker_mistake_is_one_total_with_no_label():
 
 
 def test_the_recurring_corrections_are_grouped_the_way_section_23_asks():
-    before = sentence("We", "met", "Fermeulen", "yesterday.")
-    after = corrected(before, "Fermeulen", "Vermeulen")
-    numbers_before = sentence("about", "fifteen", "people")
-    numbers_after = corrected(numbers_before, "fifteen", "50")
-    words_before = sentence("Put", "it", "over", "their")
-    words_after = corrected(words_before, "their", "there")
-    vocabulary = Vocabulary()
-
+    memory = LearnedCorrections()
     for _ in range(2):
-        learn_from_review(before, after, vocabulary)
-        learn_from_review(numbers_before, numbers_after, vocabulary)
-        learn_from_review(words_before, words_after, vocabulary)
+        memory.record("Fermeulen", "Vermeulen", Provider.OPENAI)
+        memory.record("fifteen", "50", Provider.OPENAI)
+        memory.record("their", "there", Provider.OPENAI)
 
-    grouped = repeated_mistakes(vocabulary.corrections.corrections)
+    grouped = repeated_mistakes(memory.corrections)
 
     assert [found.right_text for found in grouped[MistakeCategory.NAME]] == ["Vermeulen"]
     assert [found.right_text for found in grouped[MistakeCategory.NUMBER]] == ["50"]
@@ -564,22 +518,9 @@ def test_the_recurring_corrections_are_grouped_the_way_section_23_asks():
 
 
 def test_a_correction_seen_only_once_is_not_yet_a_pattern():
-    before = sentence("We", "met", "Fermeulen", "yesterday.")
-    after = corrected(before, "Fermeulen", "Vermeulen")
-    vocabulary = Vocabulary()
+    memory = LearnedCorrections()
+    memory.record("Fermeulen", "Vermeulen", Provider.OPENAI)
 
-    learn_from_review(before, after, vocabulary)
-    grouped = repeated_mistakes(vocabulary.corrections.corrections)
+    grouped = repeated_mistakes(memory.corrections)
 
     assert grouped[MistakeCategory.NAME] == []
-
-
-def test_a_review_that_changed_nothing_teaches_nothing():
-    before = sentence("We", "met", "Vermeulen", "yesterday.")
-    vocabulary = Vocabulary()
-
-    result = learn_from_review(before, before, vocabulary)
-
-    assert result.recorded == ()
-    assert result.taught == ()
-    assert vocabulary.corrections.corrections == []

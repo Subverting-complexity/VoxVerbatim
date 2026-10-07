@@ -1330,6 +1330,9 @@ def reprocess(
             for name, age in state.transcript_times.items()
             if not _has_left_the_folder(name, present)
         },
+        # The names the folder's reviews taught belong to the folder, not to
+        # any one recording, so analysing the recordings again keeps them all.
+        learned_names=list(state.learned_names),
     )
     _restore_markers(state, rebuilt)
     return rebuilt

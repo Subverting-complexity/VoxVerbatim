@@ -145,6 +145,7 @@ from vox_verbatim.transcription.grouping import (
 from vox_verbatim.transcription.learning import (
     StatisticsChange,
     count_settled_words,
+    names_learned,
     note_settled_words,
 )
 from vox_verbatim.transcription.model import (
@@ -163,8 +164,10 @@ from vox_verbatim.transcription.model import (
 )
 from vox_verbatim.transcription.project import (
     MAXIMUM_AUTO_PLAY_DELAY_SECONDS,
+    LearnedName,
     Occurrence,
     ProjectStore,
+    merge_learned_names,
     ReplacementRule,
     WordGroup,
 )
@@ -1235,6 +1238,11 @@ class ReviewWindow(QMainWindow):
         # path here. A folder nobody has reviewed and a folder whose file was
         # damaged both arrive as an empty project, and the window opens on it.
         self._state = project_store.load()
+        # The names the person's replacements taught since the project was
+        # last saved. Kept apart from the project's own list so that a save
+        # can add them to the names on disk rather than write back the whole
+        # list this window loaded; see _save_project.
+        self._names_learned_here: list[LearnedName] = []
         self._player = player
         # Answers whether the transcript was written. Nothing given at all is
         # taken as every save working, which is what a window with nowhere to
@@ -4116,7 +4124,7 @@ class ReviewWindow(QMainWindow):
                 transcript = transcript.with_correction(token.id, text=text)
                 changed = True
             if changed:
-                if not self._hand_on(recording_name, transcript, quiet=True):
+                if not self._hand_on(recording_name, transcript, quiet=True, teach=True):
                     unsaved.append(recording_name)
                     continue
                 anything_changed = True
@@ -4223,7 +4231,9 @@ class ReviewWindow(QMainWindow):
         # and the occurrence is left exactly as it was: marking it replaced
         # would take it off the list while its file still says the old word.
         if not self._hand_on(
-            occurrence.recording_name, transcript.with_correction(token.id, text=text)
+            occurrence.recording_name,
+            transcript.with_correction(token.id, text=text),
+            teach=True,
         ):
             return False
         self._mark_replaced(occurrence, text)
@@ -4694,7 +4704,11 @@ class ReviewWindow(QMainWindow):
     # -- Handing changes on, and saying what happened -----------------------
 
     def _hand_on(
-        self, recording_name: str, transcript: Transcript, quiet: bool = False
+        self,
+        recording_name: str,
+        transcript: Transcript,
+        quiet: bool = False,
+        teach: bool = False,
     ) -> bool:
         """Save a corrected transcript, and keep it only if that worked.
 
@@ -4734,7 +4748,17 @@ class ReviewWindow(QMainWindow):
         next status announcement rather than announced on its own: the caller
         is about to announce what it did, and a second announcement would cut
         across it.
+
+        ``teach`` is given only by the two replacement commands, the ones where
+        a person typed what was actually said. Once the transcript is saved,
+        any name that correction reveals is added to the folder's learned
+        names; see :func:`~vox_verbatim.transcription.learning.names_learned`.
+        A rule answering a word, a word confirmed as detected and a change of
+        speaker or timing teach nothing, because nobody typed a word.
         """
+        # The transcript as it was saved last time, read before the cache is
+        # replaced with the new one below.
+        before = self._cached_transcript if recording_name == self._cached_name else None
         noted, change, counted = self._statistics_for(recording_name, transcript)
         kept = noted if change is None or change.is_empty else counted
         if self._save_correction is not None and not self._save_correction(
@@ -4761,6 +4785,8 @@ class ReviewWindow(QMainWindow):
             kept = noted
             self._statistics_warning = STATISTICS_FAILURE_TEXT
         transcript = kept
+        if teach and before is not None:
+            self._learn_names(before, transcript)
         self._cached_name = recording_name
         self._cached_transcript = transcript
         # The flagged words of this recording have changed: a confirmed word
@@ -4775,6 +4801,21 @@ class ReviewWindow(QMainWindow):
         self._note_uncertainties(recording_name, transcript)
         self.transcriptChanged.emit(recording_name, transcript)
         return True
+
+    def _learn_names(self, before: Transcript, after: Transcript) -> None:
+        """Add the names a saved correction revealed to this folder's list.
+
+        They go into the window's own copy of the project at once, and into
+        the list waiting for the next project save, which adds them to the
+        names on disk. Undoing the correction later takes nothing away: the
+        person typed the name, and that it was said in this folder stays true.
+        """
+        when = datetime.now().astimezone().isoformat(timespec="seconds")
+        learned = names_learned(before, after, when)
+        if not learned:
+            return
+        self._names_learned_here = merge_learned_names(self._names_learned_here, learned)
+        self._state.learned_names = merge_learned_names(self._state.learned_names, learned)
 
     def _statistics_for(
         self, recording_name: str, transcript: Transcript
@@ -4831,8 +4872,15 @@ class ReviewWindow(QMainWindow):
         A failed save is the one thing here that must never pass quietly. The
         person believes their decisions are kept, and unless they are told now
         they will find out only after closing the window that still held them.
+
+        The learned names are written as the file on disk lists them, with the
+        names learned in this window since the last save added. A name somebody
+        removed from the file while this window was open therefore stays gone.
         """
-        if self._project_store.save(self._state):
+        if self._project_store.save_keeping_learned_names(
+            self._state, self._names_learned_here
+        ):
+            self._names_learned_here = []
             return True
         if not quiet:
             self._set_status(self._save_failure_text(), alert=True, urgent=True)

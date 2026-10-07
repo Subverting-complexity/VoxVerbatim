@@ -1069,7 +1069,7 @@ class MainWindow(QMainWindow):
         # telling somebody, and telling the review window, when the folder was
         # last gone through.
         state.processed_at = datetime.now().astimezone().isoformat()
-        if not project_store.save(state):
+        if not project_store.save_keeping_learned_names(state, []):
             problems.append(
                 f"The review of this folder could not be saved to {project_store.path}."
             )

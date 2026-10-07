@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 from PySide6.QtCore import Qt, QUrl, Signal
@@ -427,6 +428,9 @@ class TranscribeDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Transcribe")
         self._recordings = list(recordings)
+        # The folder the recordings sit in, which is where the project file
+        # holding the names learned in its reviews lives.
+        self._folder: Path | None = self._recordings[0].path.parent if self._recordings else None
         self._settings = settings
         self._vocabulary = vocabulary if vocabulary is not None else Vocabulary()
         self._runner = TranscriptionRunner(self)
@@ -1074,6 +1078,11 @@ class TranscribeDialog(QDialog):
         return box.exec() == QMessageBox.StandardButton.Yes
 
     # -- Running ----------------------------------------------------------
+
+    @property
+    def folder(self) -> Path | None:
+        """The folder the recordings sit in, or ``None`` when there are none."""
+        return self._folder
 
     @property
     def is_running(self) -> bool:

@@ -11,18 +11,23 @@ from __future__ import annotations
 
 import json
 
+from vox_verbatim.json_store import JsonReadStatus
 from vox_verbatim.transcription.project import (
     DEFAULT_GROUPING_TOLERANCE,
     DEFAULT_MINIMUM_CONFIDENCE,
     PROJECT_FILE_NAME,
     PROJECT_FORMAT_VERSION,
     FlaggedItem,
+    LearnedName,
     Occurrence,
     ProjectSettings,
     ProjectState,
     ProjectStore,
     ReplacementRule,
     WordGroup,
+    merge_learned_names,
+    read_learned_names,
+    remove_learned_name,
 )
 
 
@@ -870,3 +875,139 @@ def test_a_save_creates_the_folder_when_it_is_not_there(tmp_path):
 
     assert store.save(ProjectState(processed_at="2026-08-17T09:05:00")) is True
     assert store.load().processed_at == "2026-08-17T09:05:00"
+
+
+# -- The names a folder's reviews taught ----------------------------------
+
+
+def bosch(*wrong_forms: str, language: str = "en") -> LearnedName:
+    return LearnedName(
+        text="Bosch",
+        language=language,
+        wrong_forms=list(wrong_forms),
+        learned_at="2026-10-07T09:00:00+02:00",
+    )
+
+
+def test_learned_names_survive_a_save_and_a_load(tmp_path):
+    store = ProjectStore(tmp_path)
+    store.save(ProjectState(learned_names=[bosch("Bosh"), LearnedName("Müller", "de")]))
+
+    loaded = store.load().learned_names
+
+    assert loaded == [bosch("Bosh"), LearnedName("Müller", "de")]
+
+
+def test_a_file_from_before_learned_names_loads_with_none(tmp_path):
+    write_project(tmp_path, {"version": PROJECT_FORMAT_VERSION, "rules": []})
+
+    assert ProjectStore(tmp_path).load().learned_names == []
+
+
+def test_a_learned_name_with_no_text_is_dropped_and_the_rest_kept(tmp_path):
+    write_project(
+        tmp_path,
+        {
+            "learned_names": [
+                {"text": "", "language": "en"},
+                "not an entry",
+                {"text": "Bosch", "wrong_forms": ["Bosh", 3]},
+            ]
+        },
+    )
+
+    [name] = ProjectStore(tmp_path).load().learned_names
+
+    assert name.text == "Bosch"
+    assert name.language == "unknown"
+    assert name.wrong_forms == ["Bosh"]
+
+
+def test_a_file_listing_one_name_twice_loads_it_once(tmp_path):
+    write_project(
+        tmp_path,
+        {"learned_names": [bosch("Bosh").to_dict(), {"text": "bosch", "language": "en",
+                                                      "wrong_forms": ["Bosj"]}]},
+    )
+
+    assert ProjectStore(tmp_path).load().learned_names == [bosch("Bosh", "Bosj")]
+
+
+def test_a_repeated_name_gains_new_wrong_forms_and_is_listed_once():
+    existing = [bosch("Bosh"), LearnedName("Vermeulen", "en", ["Fermeulen"])]
+
+    merged = merge_learned_names(existing, [bosch("bosh", "Bosj", "BOSCH")])
+
+    assert [name.text for name in merged] == ["Bosch", "Vermeulen"]
+    # Capitals aside "bosh" is already known, and the correct text is never a wrong form.
+    assert merged[0].wrong_forms == ["Bosh", "Bosj"]
+    assert existing[0].wrong_forms == ["Bosh"]
+
+
+def test_one_spelling_in_two_languages_is_two_names():
+    merged = merge_learned_names([bosch("Bosh")], [bosch("Bos", language="de")])
+
+    assert [(name.text, name.language) for name in merged] == [("Bosch", "en"), ("Bosch", "de")]
+
+
+def test_reading_the_names_says_what_it_found(tmp_path):
+    assert read_learned_names(tmp_path) == ([], JsonReadStatus.MISSING)
+
+    ProjectStore(tmp_path).save(ProjectState(learned_names=[bosch("Bosh")]))
+    assert read_learned_names(tmp_path) == ([bosch("Bosh")], JsonReadStatus.READ)
+
+    (tmp_path / PROJECT_FILE_NAME).write_text("{ not json", encoding="utf-8")
+    assert read_learned_names(tmp_path) == ([], JsonReadStatus.DAMAGED)
+
+
+def test_removing_a_name_keeps_everything_else_in_the_file(tmp_path):
+    write_project(
+        tmp_path,
+        {
+            "rules": [],
+            "a_key_from_a_newer_version": {"kept": True},
+            "learned_names": [bosch("Bosh").to_dict(), LearnedName("Müller", "de").to_dict()],
+        },
+    )
+
+    assert remove_learned_name(tmp_path, "bosch", "en") is True
+
+    data = json.loads((tmp_path / PROJECT_FILE_NAME).read_text(encoding="utf-8"))
+    assert data["a_key_from_a_newer_version"] == {"kept": True}
+    assert [entry["text"] for entry in data["learned_names"]] == ["Müller"]
+
+
+def test_removing_a_name_from_a_damaged_file_writes_nothing(tmp_path):
+    path = tmp_path / PROJECT_FILE_NAME
+    path.write_text('{"learned_names": [', encoding="utf-8")
+
+    assert remove_learned_name(tmp_path, "Bosch", "en") is False
+    assert path.read_text(encoding="utf-8") == '{"learned_names": ['
+
+
+def test_removing_a_name_that_is_not_there_writes_nothing(tmp_path):
+    assert remove_learned_name(tmp_path, "Bosch", "en") is False
+    assert not (tmp_path / PROJECT_FILE_NAME).exists()
+
+
+def test_a_save_does_not_bring_back_a_name_removed_on_disk(tmp_path):
+    store = ProjectStore(tmp_path)
+    store.save(ProjectState(learned_names=[bosch("Bosh")]))
+    state = store.load()
+
+    # Removed by somebody else while this copy was held.
+    assert remove_learned_name(tmp_path, "Bosch", "en") is True
+    vermeulen = LearnedName("Vermeulen", "en", ["Fermeulen"])
+    assert store.save_keeping_learned_names(state, [vermeulen]) is True
+
+    assert [name.text for name in store.load().learned_names] == ["Vermeulen"]
+    assert state.learned_names == [vermeulen]
+
+
+def test_a_save_with_no_file_keeps_the_names_it_holds(tmp_path):
+    store = ProjectStore(tmp_path)
+    state = ProjectState(learned_names=[bosch("Bosh")])
+
+    assert store.save_keeping_learned_names(state, [bosch("Bosj")]) is True
+
+    assert store.load().learned_names == [bosch("Bosh", "Bosj")]

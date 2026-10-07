@@ -1344,6 +1344,7 @@ class EscalationApplication:
 def apply_answers(
     tokens: Sequence[FinalToken],
     outcome: EscalationOutcome,
+    first_index: int = 0,
 ) -> EscalationApplication:
     """Weigh what the second opinions said against the words in dispute.
 
@@ -1373,6 +1374,10 @@ def apply_answers(
     from their own sources, which is the idea the whole design rests on; a
     word whose spelling changed is marked as a substitution so that the
     timing stage knows to look at it again.
+
+    ``first_index`` is where the numbering of the answers starts. It is
+    above zero when the escalation service also made a full pass, whose
+    words already hold the low numbers and are added to, not replaced.
     """
     by_id = {token.id: token for token in tokens}
     settled = confirmed = unsettled = 0
@@ -1386,7 +1391,9 @@ def apply_answers(
             continue
         for token in result.tokens:
             if token.is_spoken_word:
-                heard_everywhere.append(_renumbered(token, len(heard_everywhere)))
+                heard_everywhere.append(
+                    _renumbered(token, first_index + len(heard_everywhere))
+                )
 
     evidence = None
     if heard_everywhere:

@@ -4572,9 +4572,12 @@ class ReviewWindow(QMainWindow):
             self._set_status(WORD_NOT_IN_TRANSCRIPT, alert=True, urgent=True)
             return False
         transcript = self._transcript(occurrence.recording_name)
+        # A decision about the clock says nothing about the text or the
+        # speaker, so it must not count the service as right about either.
         if not self._hand_on(
             occurrence.recording_name,
             with_timing_decision(transcript, token.id, accepted),
+            uncounted=frozenset({token.id}),
         ):
             return False
         self._after_change(
@@ -4694,7 +4697,11 @@ class ReviewWindow(QMainWindow):
     # -- Handing changes on, and saying what happened -----------------------
 
     def _hand_on(
-        self, recording_name: str, transcript: Transcript, quiet: bool = False
+        self,
+        recording_name: str,
+        transcript: Transcript,
+        quiet: bool = False,
+        uncounted: frozenset[str] = frozenset(),
     ) -> bool:
         """Save a corrected transcript, and keep it only if that worked.
 
@@ -4735,7 +4742,7 @@ class ReviewWindow(QMainWindow):
         is about to announce what it did, and a second announcement would cut
         across it.
         """
-        noted, change, counted = self._statistics_for(recording_name, transcript)
+        noted, change, counted = self._statistics_for(recording_name, transcript, uncounted)
         kept = noted if change is None or change.is_empty else counted
         if self._save_correction is not None and not self._save_correction(
             recording_name, kept
@@ -4753,8 +4760,12 @@ class ReviewWindow(QMainWindow):
             and self._record_statistics is not None
             and not self._record_statistics(change)
         ):
-            if self._save_correction is None or self._save_correction(recording_name, noted):
-                kept = noted
+            # The uncounted copy is kept even if writing it again fails. The
+            # next save of this recording then starts from it and counts the
+            # words, which is what the warning promises.
+            if self._save_correction is not None:
+                self._save_correction(recording_name, noted)
+            kept = noted
             self._statistics_warning = STATISTICS_FAILURE_TEXT
         transcript = kept
         self._cached_name = recording_name
@@ -4773,21 +4784,26 @@ class ReviewWindow(QMainWindow):
         return True
 
     def _statistics_for(
-        self, recording_name: str, transcript: Transcript
+        self,
+        recording_name: str,
+        transcript: Transcript,
+        uncounted: frozenset[str] = frozenset(),
     ) -> tuple[Transcript, StatisticsChange | None, Transcript]:
         """Note and count the settled words of a transcript about to be saved.
 
         Returns the transcript with its new notes, the change to the
         statistics, and the transcript with its notes saying that change was
         counted. With nowhere to record statistics, or no saved version of
-        this recording in hand to compare with, nothing is counted.
+        this recording in hand to compare with, nothing is counted. Words in
+        ``uncounted`` are never noted, nor are the words a folder rule
+        answered.
         """
         if self._record_statistics is None or recording_name != self._cached_name:
             return transcript, None, transcript
         before = self._cached_transcript
         if before is None:
             return transcript, None, transcript
-        excluded = frozenset(
+        excluded = uncounted | frozenset(
             occurrence.token_id
             for occurrence in self._state.occurrences
             if occurrence.recording_name == recording_name and occurrence.auto_applied

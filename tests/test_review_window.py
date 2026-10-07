@@ -4512,3 +4512,72 @@ def test_a_statistics_failure_keeps_the_correction_and_says_so(qapp, tmp_path, m
         assert any("service statistics could not be saved" in message for message, _ in said)
     finally:
         window.close()
+
+
+def test_the_next_save_that_works_counts_the_words_a_failure_left(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    working = [False]
+
+    def record(change):
+        return working[0] and store.apply(change.apply)
+
+    window = open_counting_window(tmp_path, folder, record)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosche")
+        assert window.apply_replacement_to_occurrence() is True
+        assert store.load().total_words == 0
+
+        working[0] = True
+        # Any later save of the same file is the next one that works.
+        assert window.current_occurrence().recording_name == RECORDING
+        assert window.confirm_item() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (1, 1)
+    finally:
+        window.close()
+
+
+def test_a_word_replacement_counts_the_words_in_each_file_it_saves(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    window = open_counting_window(tmp_path, folder, lambda change: store.apply(change.apply))
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosk")
+
+        assert window.apply_replacement_to_word() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (3, 3)
+        changed = [
+            token
+            for name in folder.names
+            for token in folder.transcripts[name].tokens
+            if token.text == "Bosk"
+        ]
+        assert len(changed) == 3
+        assert all(token.statistics_note.counted for token in changed)
+    finally:
+        window.close()
+
+
+def test_accepting_a_timing_counts_nothing_about_the_text(qapp, tmp_path):
+    token = make_token(
+        "contract",
+        reasons=(ReviewReason.WEAK_ALIGNMENT,),
+        confidence=Confidence.REVIEW_SUGGESTED,
+    )
+    token.timing_confidence = Confidence.REVIEW_REQUIRED
+    folder = Folder({RECORDING: make_transcript([token])})
+    changes = []
+    window = open_counting_window(tmp_path, folder, lambda change: changes.append(change) or True)
+    try:
+        assert window.decide_timing(True) is True
+
+        assert changes == []
+        assert folder.token(RECORDING, token.id).statistics_note is None
+    finally:
+        window.close()

@@ -684,17 +684,26 @@ def test_a_profile_term_that_is_also_a_folder_name_is_sent_once_in_the_folder_pl
     assert ordered[0].confirmation_count == 4
 
 
-def test_a_profile_term_is_not_folded_into_a_folder_name_of_another_language():
-    # A profile term with no language belongs to every language. Folding it
-    # into an Afrikaans folder name would make it Afrikaans, and a run with
-    # Afrikaans off would then drop a term it sends today.
+def test_a_folder_name_and_a_profile_term_of_another_language_are_sent_once_for_every_language():
+    # A profile term with no language belongs to every language. Keeping an
+    # Afrikaans folder name's language would make a run with Afrikaans off
+    # drop a term it sends today, and sending both would spend a place twice.
+    for folder_language in (Language.AFRIKAANS, Language.ENGLISH):
+        ordered = folder_terms_first(
+            [term("Bosch", 1, language=folder_language)],
+            [term("Bosch", 2)],
+        )
+
+        assert [(found.text, found.language) for found in ordered] == [("Bosch", None)]
+        assert ordered[0].confirmation_count == 3
+
+
+def test_a_folder_name_and_a_profile_term_of_the_same_language_keep_it():
     ordered = folder_terms_first(
         [term("Bosch", 1, language=Language.AFRIKAANS)],
-        [term("Bosch", 2)],
+        [term("Bosch", 2, language=Language.AFRIKAANS)],
     )
 
     assert [(found.text, found.language) for found in ordered] == [
-        ("Bosch", Language.AFRIKAANS),
-        ("Bosch", None),
+        ("Bosch", Language.AFRIKAANS)
     ]
-    assert ordered[1].confirmation_count == 2

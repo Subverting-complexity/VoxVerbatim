@@ -29,7 +29,7 @@ on its own.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -741,22 +741,22 @@ def folder_terms_first(
     word as a folder name is folded into the folder's entry rather than
     sent twice, which would spend one of the few places a service offers.
 
-    Two terms are folded together only when their languages agree. A profile
-    term with no language belongs to every language, and folding it into an
-    Afrikaans folder name would give it that name's language, so a run with
-    Afrikaans off would drop a term it sends today.
+    When the two terms' languages differ, the folded term has no language.
+    A profile term with no language belongs to every language, and keeping an
+    Afrikaans folder name's language would make a run with Afrikaans off drop
+    a term it sends today.
     """
     merged: dict[str, tuple[int, int, VocabularyTerm]] = {}
     for position, term in enumerate([*folder_terms, *profile_terms]):
         key = _key_for(term.text, merged)
         existing = merged.get(key)
-        if existing is not None and existing[2].language != term.language:
-            key = f"{key}|{term.language}"
-            existing = merged.get(key)
         if existing is None:
             merged[key] = (0, position, term)
         else:
-            merged[key] = (existing[0], existing[1], _combine(existing[2], term))
+            combined = _combine(existing[2], term)
+            if existing[2].language != term.language:
+                combined = replace(combined, language=None)
+            merged[key] = (existing[0], existing[1], combined)
     # A dictionary keeps the order its keys arrived in, which is the order wanted.
     return [entry[2] for entry in merged.values()]
 

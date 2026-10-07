@@ -400,6 +400,33 @@ class TranscriptionProvider(ABC):
 MAXIMUM_RETRY_AFTER_SECONDS = 120.0
 
 
+def describe_api_key_characters(service_name: str, api_key: str) -> str | None:
+    """Why this key cannot be sent, or None if every character in it can.
+
+    A key travels in a request header, and a header carries only ASCII. A
+    key with an en dash in place of a hyphen, which is what copying through
+    Word, Outlook or a notes app does, therefore fails inside the client
+    library before anything is sent, and the library's complaint about a
+    codec reads as if the service could not be reached. Checking first lets
+    the report point at the key instead of the network.
+
+    The message gives the position of the first such character and never
+    the character or any other part of the key, because this sentence is
+    shown in the review report, written to the log and kept in the run
+    folder.
+    """
+    for index, character in enumerate(api_key):
+        if not character.isascii():
+            return (
+                f"the {service_name} API key has a character that is not allowed "
+                f"at position {index + 1}. A key holds only plain letters, digits "
+                "and punctuation, and copying it through Word, Outlook or a notes "
+                "app can turn a hyphen into a dash. Copy the key again from the "
+                "service's own website or portal"
+            )
+    return None
+
+
 def wait_unless_cancelled(seconds: float, cancelled: CancelCheck | None) -> bool:
     """Sleep for the backoff, a little at a time, and return False if the run was stopped.
 

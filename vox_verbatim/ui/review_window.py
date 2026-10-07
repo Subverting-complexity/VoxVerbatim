@@ -4694,11 +4694,7 @@ class ReviewWindow(QMainWindow):
     # -- Handing changes on, and saying what happened -----------------------
 
     def _hand_on(
-        self,
-        recording_name: str,
-        transcript: Transcript,
-        quiet: bool = False,
-        uncounted: frozenset[str] = frozenset(),
+        self, recording_name: str, transcript: Transcript, quiet: bool = False
     ) -> bool:
         """Save a corrected transcript, and keep it only if that worked.
 
@@ -4739,7 +4735,7 @@ class ReviewWindow(QMainWindow):
         is about to announce what it did, and a second announcement would cut
         across it.
         """
-        noted, change, counted = self._statistics_for(recording_name, transcript, uncounted)
+        noted, change, counted = self._statistics_for(recording_name, transcript)
         kept = noted if change is None or change.is_empty else counted
         if self._save_correction is not None and not self._save_correction(
             recording_name, kept
@@ -4781,26 +4777,22 @@ class ReviewWindow(QMainWindow):
         return True
 
     def _statistics_for(
-        self,
-        recording_name: str,
-        transcript: Transcript,
-        uncounted: frozenset[str] = frozenset(),
+        self, recording_name: str, transcript: Transcript
     ) -> tuple[Transcript, StatisticsChange | None, Transcript]:
         """Note and count the settled words of a transcript about to be saved.
 
         Returns the transcript with its new notes, the change to the
         statistics, and the transcript with its notes saying that change was
         counted. With nowhere to record statistics, or no saved version of
-        this recording in hand to compare with, nothing is counted. Words in
-        ``uncounted`` are never noted, nor are the words a folder rule
-        answered.
+        this recording in hand to compare with, nothing is counted, and the
+        words a folder rule answered are never noted.
         """
         if self._record_statistics is None or recording_name != self._cached_name:
             return transcript, None, transcript
         before = self._cached_transcript
         if before is None:
             return transcript, None, transcript
-        excluded = uncounted | frozenset(
+        excluded = frozenset(
             occurrence.token_id
             for occurrence in self._state.occurrences
             if occurrence.recording_name == recording_name and occurrence.auto_applied

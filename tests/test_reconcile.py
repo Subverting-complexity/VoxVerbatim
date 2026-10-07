@@ -1208,3 +1208,24 @@ def test_overlapping_number_merges_from_two_services_are_decided_together() -> N
     }
 
     assert _scope(0, coverage, len(words), DEFAULT_OPTIONS) == (0, 1, 2, 3, 4)
+
+
+def test_agreed_words_with_no_time_anywhere_are_not_rated_unresolved() -> None:
+    """A recording where no service gave word times must not read as all unknown.
+
+    Every service heard every word the same way, so the text was chosen. Only
+    where each word sits is unknown, which is worth a look but is not the
+    "nothing was chosen" that "Unresolved" tells the reader.
+    """
+    table = table_of(
+        spoken(Provider.ELEVENLABS, SENTENCE, timed=False),
+        spoken(Provider.OPENAI, SENTENCE, timed=False),
+        spoken(Provider.MICROSOFT, SENTENCE, timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert texts_of(tokens) == SENTENCE
+    assert all(token.start is None for token in tokens)
+    assert all(token.confidence is Confidence.REVIEW_SUGGESTED for token in tokens)
+    assert all(token.needs_review for token in tokens)

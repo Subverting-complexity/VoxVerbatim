@@ -716,10 +716,20 @@ class FinalToken:
 
     @property
     def confidence(self) -> Confidence:
-        """The weakest of the three, which is what the review queue sorts on."""
-        return Confidence.weakest(
-            self.text_confidence, self.timing_confidence, self.speaker_confidence
-        )
+        """The weakest of the three, which is what the review queue sorts on.
+
+        A missing time counts as "review suggested" here, not "unresolved".
+        "Unresolved" tells the reader that nothing was chosen, and a word
+        every service heard the same has had its text chosen; only where it
+        sits is unknown. Letting the missing time through unchanged rated
+        every word of a recording with no word times as unresolved, and hid
+        the few real disputes among them. The word still needs review, so it
+        stays in the queue, and its text rating still wins when it is worse.
+        """
+        timing = self.timing_confidence
+        if timing is Confidence.UNRESOLVED:
+            timing = Confidence.REVIEW_SUGGESTED
+        return Confidence.weakest(self.text_confidence, timing, self.speaker_confidence)
 
     @property
     def needs_review(self) -> bool:

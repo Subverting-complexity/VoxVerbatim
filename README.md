@@ -480,6 +480,64 @@ are stripped of credentials on their way out of Settings and checked a
 second time as the file is written. A transcript is a document people send
 to each other, and a key that has reached a disk cannot be called back.
 
+### Starting a recording again
+
+There is no Reset command. To transcribe a recording again, select it and
+press Transcribe. The application does a full new run without asking,
+apart from the usual cost confirmation, and the new transcript replaces the
+old one. The raw answers from the first run stay beside the new ones,
+because they are never rewritten.
+
+That is not a clean start for the review. Corrections you made are stored
+in the old transcript, so the new one does not have them. The review itself
+is in the folder's project file, which a new transcription does not touch.
+When you next open the review, the application matches your earlier
+decisions to the new words, and marks the ones it cannot match as stale.
+
+For a true fresh start, delete the recording's `.transcript` folder first,
+then open the review once. The application sees that the recording has no
+transcript and removes that recording's review entries. Then transcribe it
+again. The folder's replacements and learned names stay, on purpose, and
+answer the new transcript where they apply. To lose those as well, delete
+`vox-verbatim-project.json`, but that deletes the review of every
+recording in the folder, not only this one.
+
+### Handing a folder to somebody else
+
+To have somebody else review your transcripts, give them a copy of the
+application and a copy of the folder. They select the folder in their copy
+and continue from the place you stopped. Everything the review needs is in
+the folder: the transcripts beside each recording, and the decisions,
+replacements, learned names and review settings in the project file. The
+project file finds recordings by file name, not by full path, so the
+folder can go anywhere, and playback still finds the audio.
+
+Some things stay with you, because they are kept in your own settings
+folder rather than in the project:
+
+- **API keys and service settings.** The other person enters their own.
+  They need keys only to transcribe, not to review.
+- **The transcript folder name.** Both of you must keep the default
+  `.transcript` ending in Settings. If one of you changed it, the other's
+  application does not find the transcripts.
+- **Vocabulary profiles and service statistics.**
+- **Window layout and the last folder you opened.**
+
+The first time the other person opens the review, it takes longer than
+usual. Copying changes the file details the application uses to see that a
+transcript has not changed, so it reads every transcript again. No decision
+is lost.
+
+The two exports are written when a recording is transcribed, and a review
+does not update them. After a review, `transcript.txt` and
+`review-report.md` still show the transcript as it was before your
+corrections.
+
+Do not let two people work in one shared folder at the same time. The
+application does not lock the folder and does not record who made a
+change, so the last person to save overwrites the other's review changes.
+Give each person a copy, or take turns.
+
 ### Where the settings live
 
 Everything about the services is in the Settings dialog, on `Ctrl+,`, which

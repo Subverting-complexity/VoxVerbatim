@@ -137,7 +137,9 @@ VoxVerbatim never guesses numbers, amounts or dates. You must decide.
 
 To decide, use the review window:
 
-1. Press `Ctrl+R`, or select **Open review window**.
+1. Press `Ctrl+R`, or select **Open review window**. The window opens
+   in its simple version. Press `Ctrl+D`, or select **View > Show
+   Details**, to show the panels that these steps use.
 2. Go to the **Occurrences** list (`Alt+O`). Select an occurrence.
    VoxVerbatim plays the word. Press `F5` to hear it again,
    `Shift+F5` to hear it with the words around it, or `Ctrl+F5` to hear

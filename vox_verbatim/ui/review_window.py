@@ -2314,7 +2314,7 @@ class ReviewWindow(QMainWindow):
             self.focus_replacement,
         )
         self._apply_word_action = self._add_action(
-            word_menu, "&Apply to This Word", None, self.apply_replacement_to_word
+            word_menu, "&Apply to This Word", None, self.apply_word_from_menu
         )
         self._correct_as_detected_action = self._add_action(
             word_menu, "&Correct as Detected", None, self.correct_word_as_detected
@@ -2332,7 +2332,7 @@ class ReviewWindow(QMainWindow):
             item_menu,
             "Apply to This &Occurrence Only",
             None,
-            self.apply_replacement_to_occurrence,
+            self.apply_occurrence_from_menu,
         )
         self._apply_speaker_action = self._add_action(
             item_menu, "Apply the &Speaker", None, self.apply_speaker_correction
@@ -3262,8 +3262,10 @@ class ReviewWindow(QMainWindow):
         if occurrence is None or self._quiet:
             return
         if self._announce_occurrence:
+            # The simple window hides the occurrence list, and a screen reader
+            # may not read an announcement raised from a hidden widget.
             announce(
-                self._occurrences,
+                self._occurrences if self._occurrences.isVisible() else self._groups,
                 spoken_occurrence_summary(
                     occurrence,
                     self._occurrence_model.group_replacement,
@@ -3980,8 +3982,25 @@ class ReviewWindow(QMainWindow):
         self._replacement_edit.setText(text)
         return self.apply_replacement_to_word()
 
-    def apply_typed_word(self) -> bool:
-        """Replace the word with what was typed in the simple window."""
+    def apply_word_from_menu(self) -> bool:
+        """Apply to This Word, from whichever box the window is showing."""
+        if self._state.settings.show_details:
+            return self.apply_replacement_to_word()
+        return self.apply_typed_word()
+
+    def apply_occurrence_from_menu(self) -> bool:
+        """Apply to This Occurrence Only, from whichever box the window is showing.
+
+        F2 goes to the typed-word box in the simple window, so the menu items
+        read that box there. Reading the hidden Replacement box instead would
+        ignore what was just typed and settle the word as it stood.
+        """
+        if self._state.settings.show_details:
+            return self.apply_replacement_to_occurrence()
+        return self.apply_typed_word(only_this_occurrence=True)
+
+    def apply_typed_word(self, only_this_occurrence: bool = False) -> bool:
+        """Replace the word, or one occurrence, with what was typed in the simple window."""
         text = self._typed_edit.text().strip()
         if not text:
             self._set_status(
@@ -3991,7 +4010,12 @@ class ReviewWindow(QMainWindow):
             )
             return False
         self._replacement_edit.setText(text)
-        if not self.apply_replacement_to_word():
+        apply = (
+            self.apply_replacement_to_occurrence
+            if only_this_occurrence
+            else self.apply_replacement_to_word
+        )
+        if not apply():
             return False
         self._typed_edit.clear()
         return True

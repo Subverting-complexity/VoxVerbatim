@@ -5102,6 +5102,59 @@ def test_f2_in_the_simple_window_goes_to_the_typed_word(qapp, tmp_path):
         window.close()
 
 
+def test_the_apply_to_word_menu_item_uses_the_typed_word_in_the_simple_window(qapp, tmp_path):
+    """F2 sends the typing to the typed-word box, so the menu must read that box."""
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        window.focus_replacement()
+        window._typed_edit.setText("Bausch")
+
+        window._apply_word_action.trigger()
+
+        assert "Bausch" in folder.texts(RECORDING)
+        assert "Bausch" in folder.texts(OTHER_RECORDING)
+        assert window._typed_edit.text() == ""
+    finally:
+        window.close()
+
+
+def test_the_apply_to_occurrence_menu_item_uses_the_typed_word_in_the_simple_window(
+    qapp, tmp_path
+):
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        occurrence = window.current_occurrence()
+        window.focus_replacement()
+        window._typed_edit.setText("Bausch")
+
+        window._apply_occurrence_action.trigger()
+
+        assert occurrence.replacement == "Bausch"
+        assert window._typed_edit.text() == ""
+    finally:
+        window.close()
+
+
+def test_the_apply_menu_items_use_the_replacement_box_with_the_details_shown(qapp, tmp_path):
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True, show_details=True)
+    try:
+        select_word(window, "Bosch")
+        window._typed_edit.setText("Ignored")
+        window._replacement_edit.setText("Bausch")
+
+        window._apply_word_action.trigger()
+
+        assert "Bausch" in folder.texts(RECORDING)
+        assert "Ignored" not in folder.texts(RECORDING)
+    finally:
+        window.close()
+
+
 def test_setting_a_threshold_from_the_menu_shows_the_details_first(qapp, tmp_path):
     """The menu entry must never send the focus to a control nobody can see."""
     window = open_window(tmp_path, two_file_folder(), process=True)

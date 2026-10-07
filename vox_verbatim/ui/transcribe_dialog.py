@@ -42,9 +42,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -71,6 +72,7 @@ from PySide6.QtWidgets import (
 )
 
 from vox_verbatim.audio.library import AudioFile
+from vox_verbatim.json_store import JsonReadStatus
 from vox_verbatim.paths import calibration_file_path
 from vox_verbatim.settings import (
     MAXIMUM_EXPECTED_SPEAKER_COUNT,
@@ -85,6 +87,12 @@ from vox_verbatim.transcription.cost import (
 )
 from vox_verbatim.transcription.model import Provider, RecordingConfiguration
 from vox_verbatim.transcription.pipeline import PipelineOptions
+from vox_verbatim.transcription.project import (
+    PROJECT_FILE_NAME,
+    LearnedName,
+    read_learned_names,
+    remove_learned_name,
+)
 from vox_verbatim.transcription.providers.registry import DEFAULT_FULL_PASS_PROVIDERS
 from vox_verbatim.transcription.runner import (
     RecordingOutcome,
@@ -93,8 +101,14 @@ from vox_verbatim.transcription.runner import (
     summarise,
 )
 from vox_verbatim.transcription.store import TranscriptStore
-from vox_verbatim.transcription.vocabulary import Vocabulary, resolve_terms
+from vox_verbatim.transcription.vocabulary import (
+    Vocabulary,
+    VocabularyTerm,
+    resolve_terms,
+    terms_from_learned_names,
+)
 from vox_verbatim.ui.accessibility import announce, describe
+from vox_verbatim.ui.review_lists import NO_LANGUAGE, language_name
 
 _log = logging.getLogger(__name__)
 
@@ -125,6 +139,7 @@ SPEAKER_COUNT = "speaker_count"
 KNOWN_SPEAKERS = "known_speakers"
 CONTEXT = "context"
 PROFILES = "profiles"
+LEARNED_NAMES = "learned_names"
 COST = "cost"
 
 
@@ -317,6 +332,29 @@ Profiles are created and edited in Settings, under Vocabulary.
 """,
     ),
     Note(
+        key=LEARNED_NAMES,
+        title="Names learned in this folder",
+        summary=(
+            "The names your reviews in this folder have taught. Select a wrong one "
+            "and press Delete, or the Remove name button, to forget it."
+        ),
+        note="""The names that your corrections in the review window have taught this folder.
+
+When you correct a word the services got wrong, and the correct word looks
+like a name, the folder remembers it, together with the spellings the services
+wrote instead. Each line says the name, its language, and how the services
+heard it.
+
+These names belong to this folder only. They are kept in the folder's project
+file, not in the vocabulary profiles in Settings, so one client's surname is
+never suggested for another client's recordings.
+
+A slip in a review can teach a wrong name. To forget one, select it and press
+Delete, or use the Remove name button. Removing a name only forgets it: if you
+correct the same word again in a review, the folder learns it again.
+""",
+    ),
+    Note(
         key=COST,
         title="What this run will cost",
         summary=(
@@ -427,6 +465,12 @@ class TranscribeDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Transcribe")
         self._recordings = list(recordings)
+        # The folder the recordings sit in, which is where the project file
+        # holding the names learned in its reviews lives.
+        self._folder: Path | None = self._recordings[0].path.parent if self._recordings else None
+        # The folder's learned names as terms. Read now for the cost estimate,
+        # and read again when the run starts, which is what the run sends.
+        self._folder_terms: tuple[VocabularyTerm, ...] = self._read_folder_terms()[0]
         self._settings = settings
         self._vocabulary = vocabulary if vocabulary is not None else Vocabulary()
         self._runner = TranscriptionRunner(self)
@@ -657,7 +701,61 @@ class TranscribeDialog(QDialog):
         inner = QVBoxLayout(group)
         inner.addWidget(label)
         inner.addWidget(self._profile_list)
+        self._build_learned_names(group, inner)
         return group
+
+    def _build_learned_names(self, group: QGroupBox, inner: QVBoxLayout) -> None:
+        """The names this folder's reviews have taught, with a way to forget one.
+
+        A slip in a review teaches a wrong name, and this list is the only
+        place to see it and take it out. It is a plain list with a selection
+        rather than check boxes, because the one thing to do here is act on
+        one name at a time.
+        """
+        # Alt+N is the speaker count and Alt+R the review window button, so the
+        # list takes Alt+L and Remove takes Alt+M.
+        label = QLabel("Names &learned in this folder", group)
+        self._learned_list = QListWidget(group)
+        self._learned_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._explain(self._learned_list, LEARNED_NAMES)
+        label.setBuddy(self._learned_list)
+        # Delete removes the selected name, as it would in a list in Explorer.
+        # An event filter rather than a shortcut, so the key does this only
+        # while the list has the focus and does not reach the dialog's default
+        # button.
+        self._learned_list.installEventFilter(self)
+
+        self._remove_name_button = QPushButton("Re&move name", group)
+        self._remove_name_button.setAutoDefault(False)
+        describe(
+            self._remove_name_button,
+            "Remove name",
+            "Forgets the name selected in the list of names learned in this folder. "
+            "A later correction in a review teaches it again.",
+        )
+        self._note_keys[self._remove_name_button] = LEARNED_NAMES
+
+        # What the last removal came to. It is on screen as well as spoken, so
+        # a sighted user and a screen reader user are told the same thing. A
+        # label carrying a message is never given a name of its own, because
+        # its name would hide what it says.
+        self._learned_status = QLabel("", group)
+        self._learned_status.setWordWrap(True)
+
+        self._fill_learned_names()
+        _fit_rows(self._learned_list, self._learned_list.count())
+        self._learned_list.itemSelectionChanged.connect(self._update_remove_name_button)
+        self._remove_name_button.clicked.connect(self.remove_selected_name)
+        self._update_remove_name_button()
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self._remove_name_button, 0)
+
+        inner.addWidget(label)
+        inner.addWidget(self._learned_list)
+        inner.addLayout(row)
+        inner.addWidget(self._learned_status)
 
     def _build_cost(self) -> QWidget:
         group = QGroupBox("What this run will cost", self)
@@ -911,6 +1009,117 @@ class TranscribeDialog(QDialog):
         """Open the window that explains every setting one after another."""
         TranscriptionGuideDialog(self).exec()
 
+    # -- Names learned in this folder -------------------------------------
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Remove the selected learned name when Delete is pressed in its list."""
+        if (
+            watched is self._learned_list
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Delete
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        ):
+            self.remove_selected_name()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _fill_learned_names(self) -> None:
+        """Fill the list from the project file as it is on disk now.
+
+        The file is read afresh each time rather than kept, because the review
+        window may be open on the same folder and learning names as it saves.
+        An empty list, and a file that could not be read, are each said in the
+        list itself rather than left as an empty box, so somebody who finds
+        nothing here is told why.
+        """
+        self._learned_list.clear()
+        names: list[LearnedName] = []
+        status = JsonReadStatus.MISSING
+        if self._folder is not None:
+            names, status = read_learned_names(self._folder)
+        for name in names:
+            item = QListWidgetItem(_learned_name_line(name))
+            item.setData(Qt.ItemDataRole.UserRole, (name.text, name.language))
+            self._learned_list.addItem(item)
+        if names:
+            return
+        if status is JsonReadStatus.DAMAGED:
+            text = (
+                "The project file in this folder could not be read, so its learned "
+                "names cannot be shown."
+            )
+        else:
+            text = "No names have been learned in this folder yet."
+        # Selectable, so it can be landed on and read like any other row, but
+        # it carries no name, so Remove stays off while it is selected.
+        empty = QListWidgetItem(text)
+        empty.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        self._learned_list.addItem(empty)
+
+    def _selected_learned_name(self) -> tuple[str, str] | None:
+        """The text and language of the name selected in the list, if any."""
+        for item in self._learned_list.selectedItems():
+            chosen = item.data(Qt.ItemDataRole.UserRole)
+            if chosen:
+                return chosen[0], chosen[1]
+        return None
+
+    def _update_remove_name_button(self) -> None:
+        """Switch Remove on only while a real name is selected.
+
+        A screen reader reads a switched-off button as unavailable, which says
+        "select a name first" where a button that did nothing would not.
+        """
+        self._remove_name_button.setEnabled(self._selected_learned_name() is not None)
+
+    def remove_selected_name(self) -> bool:
+        """Forget the selected learned name, and say so. Returns whether it went.
+
+        Only that one name is taken out of the project file as it is on disk
+        now, and the file is saved at once. A copy loaded when the dialog
+        opened is never written back, because the review window may have
+        learned other names since, and writing the old copy would lose them.
+
+        The focus goes to the list, on the row that took the removed name's
+        place, so a screen reader reads where the person now is, whether they
+        pressed Delete in the list or the Remove button, which may now be off.
+        """
+        chosen = self._selected_learned_name()
+        if chosen is None or self._folder is None:
+            return False
+        text, language = chosen
+        row = self._learned_list.currentRow()
+
+        removed = remove_learned_name(self._folder, text, language)
+        if not removed:
+            names, status = read_learned_names(self._folder)
+            still_there = any(
+                name.key == LearnedName(text=text, language=language).key for name in names
+            )
+            if status is not JsonReadStatus.READ or still_there:
+                message = (
+                    f"{text} could not be removed, because the project file in this "
+                    "folder could not be read or saved. Nothing was changed."
+                )
+                self._learned_status.setText(message)
+                announce(self._learned_list, message, urgent=True)
+                return False
+
+        self._fill_learned_names()
+        # The removed name must no longer count towards the cost estimate.
+        self._folder_terms = self._read_folder_terms()[0]
+        self._show_cost()
+        self._learned_list.setCurrentRow(max(0, min(row, self._learned_list.count() - 1)))
+        self._update_remove_name_button()
+        self._learned_list.setFocus(Qt.FocusReason.OtherFocusReason)
+        if removed:
+            message = f"{text} removed. It will be learned again if you correct it in a review."
+        else:
+            message = f"{text} had already been removed from the project file."
+        self._learned_status.setText(message)
+        announce(self._learned_list, message)
+        return removed
+
     # -- What the user chose ----------------------------------------------
 
     def _show_defaults(self) -> None:
@@ -946,6 +1155,7 @@ class TranscribeDialog(QDialog):
             settings=self._settings,
             vocabulary=self._vocabulary,
             calibration_path=calibration_file_path(),
+            folder_terms=self._folder_terms,
         )
 
     # -- What it will cost -------------------------------------------------
@@ -999,12 +1209,14 @@ class TranscribeDialog(QDialog):
         )
 
     def vocabulary_terms_will_be_sent(self) -> bool:
-        """Whether the chosen profiles hold any term at all.
+        """Whether the folder's learned names or the chosen profiles hold any term.
 
         ElevenLabs charges more for a request that carries terms, so the
         estimate has to know. A profile that is switched on but empty sends
         nothing and costs nothing extra.
         """
+        if self._folder_terms:
+            return True
         return bool(resolve_terms(self._vocabulary, self.chosen_profile_ids()))
 
     def cost_text(self) -> str:
@@ -1073,7 +1285,49 @@ class TranscribeDialog(QDialog):
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         return box.exec() == QMessageBox.StandardButton.Yes
 
+    def confirm_without_learned_names(self) -> bool:
+        """Ask whether to go on when the folder's project file cannot be read.
+
+        A message box is announced by screen readers when it opens and is
+        answered from the keyboard. Cancel is the default, for the reason
+        :meth:`confirm_cost` gives: an Enter meant for Start must not carry
+        through and start a run the person has not agreed to.
+        """
+        path = (self._folder / PROJECT_FILE_NAME) if self._folder else PROJECT_FILE_NAME
+        box = QMessageBox(self)
+        box.setWindowTitle("Transcribe")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("The names this folder learned in its reviews could not be read.")
+        box.setInformativeText(
+            f"The project file {path} is damaged, or another program has it open. "
+            "Go on and transcribe without the learned names, or cancel and try "
+            "again later?"
+        )
+        go_on = box.addButton("Go on without learned names", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is go_on
+
+    def _read_folder_terms(self) -> tuple[tuple[VocabularyTerm, ...], JsonReadStatus]:
+        """The folder's learned names as terms, and what reading the file found."""
+        if self._folder is None:
+            return (), JsonReadStatus.MISSING
+        names, status = read_learned_names(self._folder)
+        return tuple(terms_from_learned_names(names)), status
+
+    def _say_not_started(self) -> None:
+        self._set_progress_text("The run was not started.")
+        self._progress_group.setVisible(True)
+        self._grow_to_fit()
+        announce(self._progress_bar, "The run was not started.", urgent=True)
+
     # -- Running ----------------------------------------------------------
+
+    @property
+    def folder(self) -> Path | None:
+        """The folder the recordings sit in, or ``None`` when there are none."""
+        return self._folder
 
     @property
     def is_running(self) -> bool:
@@ -1113,14 +1367,22 @@ class TranscribeDialog(QDialog):
             self._refuse_with_problems(problems)
             return False
 
+        # The folder's learned names are read again, because a review may have
+        # added some since the dialog opened. A file that is there but cannot
+        # be read is asked about rather than quietly passed over.
+        folder_terms, status = self._read_folder_terms()
+        if status is JsonReadStatus.DAMAGED:
+            if not self.confirm_without_learned_names():
+                self._say_not_started()
+                return False
+            folder_terms = ()
+        self._folder_terms = folder_terms
+
         # Worked out again here rather than trusted from when the dialog
         # opened, because Settings may have been changed in between.
         self._show_cost()
         if self._settings.cost.confirm_before_running and not self.confirm_cost(self.cost_text()):
-            self._set_progress_text("The run was not started.")
-            self._progress_group.setVisible(True)
-            self._grow_to_fit()
-            announce(self._progress_bar, "The run was not started.", urgent=True)
+            self._say_not_started()
             return False
 
         self._results = []
@@ -1563,6 +1825,28 @@ def _recording_line(recording: AudioFile) -> str:
     if recording.duration_seconds:
         return f"{recording.name}, {describe_duration(recording.duration_seconds)}"
     return f"{recording.name}, length unknown"
+
+
+def _learned_name_line(name: LearnedName) -> str:
+    """One row of the learned names: the name, its language, how it was misheard.
+
+    For example "Bosch (English), also heard as Bosh". It is written as one
+    sentence so that a screen reader reads the whole row as it would read it
+    aloud, rather than as columns to be worked out.
+    """
+    language = language_name(name.language)
+    if language == NO_LANGUAGE:
+        line = f"{name.text} (language not known)"
+    else:
+        line = f"{name.text} ({language})"
+    forms = [form for form in name.wrong_forms if form.strip()]
+    if not forms:
+        return line
+    if len(forms) == 1:
+        heard = forms[0]
+    else:
+        heard = f"{', '.join(forms[:-1])} and {forms[-1]}"
+    return f"{line}, also heard as {heard}"
 
 
 def _fit_rows(widget: QListWidget, count: int) -> None:

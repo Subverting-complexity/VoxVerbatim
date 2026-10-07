@@ -13,27 +13,50 @@ import logging
 import os
 import tempfile
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
 _log = logging.getLogger(__name__)
 
 
-def read_json_object(path: Path) -> dict[str, Any] | None:
-    """Return the object held in ``path``, or ``None`` if there is nothing usable.
+class JsonReadStatus(Enum):
+    """What reading a JSON file found, for a caller that must tell them apart.
 
-    A missing file, an unreadable one, one that is not valid JSON, one that
-    is not even valid text, and one holding something other than an object
-    all come back as ``None``. The caller falls back to its defaults, which
-    is always better than refusing to start.
+    Most callers only want the object or nothing, and use
+    :func:`read_json_object`. A caller that is about to write the file back
+    needs more than that. A file that is not there yet is safe to create, but
+    a file that is there and could not be read -- locked by another program,
+    or damaged -- must not be overwritten with what this caller happens to
+    hold, because what is on the disk may be newer or may be all there is.
+    """
+
+    READ = "read"
+    """The file was read and held a JSON object."""
+
+    MISSING = "missing"
+    """There is no file."""
+
+    DAMAGED = "damaged"
+    """The file is there but could not be read as a JSON object."""
+
+
+def read_json_object_status(path: Path) -> tuple[dict[str, Any] | None, JsonReadStatus]:
+    """Return the object held in ``path`` and what reading it found.
+
+    The object is ``None`` unless the status is :attr:`JsonReadStatus.READ`.
+    A missing file is :attr:`~JsonReadStatus.MISSING`. A file that could not
+    be opened (another program holding it, say), one that is not valid text,
+    one that is not valid JSON and one holding something other than an object
+    are all :attr:`~JsonReadStatus.DAMAGED`. Nothing here raises.
     """
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        return None
+        return None, JsonReadStatus.MISSING
     except OSError:
         _log.warning("Could not read %s", path, exc_info=True)
-        return None
+        return None, JsonReadStatus.DAMAGED
 
     # The bytes are decoded here rather than on the way in, so that a file
     # holding something other than UTF-8 text is treated as damaged like any
@@ -46,11 +69,24 @@ def read_json_object(path: Path) -> dict[str, Any] | None:
         data = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, ValueError):
         _log.warning("%s could not be read as JSON; ignoring it.", path)
-        return None
+        return None, JsonReadStatus.DAMAGED
 
     if not isinstance(data, dict):
         _log.warning("%s does not contain an object; ignoring it.", path)
-        return None
+        return None, JsonReadStatus.DAMAGED
+    return data, JsonReadStatus.READ
+
+
+def read_json_object(path: Path) -> dict[str, Any] | None:
+    """Return the object held in ``path``, or ``None`` if there is nothing usable.
+
+    A missing file, an unreadable one, one that is not valid JSON, one that
+    is not even valid text, and one holding something other than an object
+    all come back as ``None``. The caller falls back to its defaults, which
+    is always better than refusing to start. :func:`read_json_object_status`
+    says which of those it was.
+    """
+    data, _status = read_json_object_status(path)
     return data
 
 

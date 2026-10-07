@@ -6,6 +6,7 @@ import json
 
 from vox_verbatim.transcription.model import Language, Provider
 from vox_verbatim.transcription.normalise import EquivalenceKind, normalise
+from vox_verbatim.transcription.project import LearnedName
 from vox_verbatim.transcription.vocabulary import (
     LearnedCorrection,
     LearnedCorrections,
@@ -16,7 +17,9 @@ from vox_verbatim.transcription.vocabulary import (
     VocabularyProfile,
     VocabularyStore,
     VocabularyTerm,
+    folder_terms_first,
     resolve_terms,
+    terms_from_learned_names,
 )
 
 
@@ -641,3 +644,66 @@ def test_the_keyed_lookup_finds_exactly_the_term_the_walk_would():
         found = index.match(text)
 
         assert (found.term if found else None) == expected, text
+
+
+# -- A folder's learned names ---------------------------------------------
+
+
+def test_a_learned_name_becomes_a_confirmed_term_with_its_wrong_forms():
+    [found] = terms_from_learned_names([LearnedName("Bosch", "de", ["Bosh", "Bush"])])
+
+    assert found.text == "Bosch"
+    assert found.language is Language.GERMAN
+    assert found.common_misrecognitions == ("Bosh", "Bush")
+    assert found.confirmation_count == 1
+
+
+def test_a_learned_name_of_unknown_language_belongs_to_every_language():
+    [unknown, invalid] = terms_from_learned_names(
+        [LearnedName("Bosch", "unknown"), LearnedName("Smit", "klingon")]
+    )
+
+    assert unknown.language is None
+    assert invalid.language is None
+
+
+def test_the_folder_names_come_before_the_profile_terms():
+    ordered = folder_terms_first([term("Bosch"), term("Smit")], [term("Acme"), term("Rollout")])
+
+    assert [found.text for found in ordered] == ["Bosch", "Smit", "Acme", "Rollout"]
+
+
+def test_a_profile_term_that_is_also_a_folder_name_is_sent_once_in_the_folder_place():
+    ordered = folder_terms_first(
+        [term("Bosch", 1, common_misrecognitions=("Bosh",))],
+        [term("Acme"), term("bosch", 3, common_misrecognitions=("Bush",))],
+    )
+
+    assert [found.text for found in ordered] == ["Bosch", "Acme"]
+    assert ordered[0].common_misrecognitions == ("Bosh", "Bush")
+    assert ordered[0].confirmation_count == 4
+
+
+def test_a_folder_name_and_a_profile_term_of_another_language_are_sent_once_for_every_language():
+    # A profile term with no language belongs to every language. Keeping an
+    # Afrikaans folder name's language would make a run with Afrikaans off
+    # drop a term it sends today, and sending both would spend a place twice.
+    for folder_language in (Language.AFRIKAANS, Language.ENGLISH):
+        ordered = folder_terms_first(
+            [term("Bosch", 1, language=folder_language)],
+            [term("Bosch", 2)],
+        )
+
+        assert [(found.text, found.language) for found in ordered] == [("Bosch", None)]
+        assert ordered[0].confirmation_count == 3
+
+
+def test_a_folder_name_and_a_profile_term_of_the_same_language_keep_it():
+    ordered = folder_terms_first(
+        [term("Bosch", 1, language=Language.AFRIKAANS)],
+        [term("Bosch", 2, language=Language.AFRIKAANS)],
+    )
+
+    assert [(found.text, found.language) for found in ordered] == [
+        ("Bosch", Language.AFRIKAANS)
+    ]

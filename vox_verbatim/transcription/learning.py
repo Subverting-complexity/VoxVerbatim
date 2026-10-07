@@ -11,13 +11,20 @@ after review and working out what actually changed: which word, what it said
 before, what it says now, which service produced the wrong one, what
 language it was in, whether it was a name or a number, and whether it was
 one of the values that must never be guessed at. The second is handing that
-to the two places that can use it: the learned corrections the vocabulary
-module already keeps, and the provider statistics that the weighting is
-built from. The statistics are fed by :func:`note_settled_words` and
+to the places that can use it. The provider statistics that the weighting is
+built from are fed by :func:`note_settled_words` and
 :func:`count_settled_words`, which count each word a person settles once
-however many times the transcript is saved. The third, and the only one that involves a judgement, is
-deciding which corrections should be taught back to the services as terms
-to listen out for.
+however many times the transcript is saved. The names a correction reveals
+are returned by :func:`names_learned`, and the review window keeps them in
+the folder's own project file. The third part, and the only one that
+involves a judgement, is deciding which corrections reveal a name worth
+teaching back to the services as a term to listen out for.
+
+Nothing here writes to the shared vocabulary. A name learned while reviewing
+one client's recordings belongs to that client's folder; written into the
+shared vocabulary it would be offered to the services for every other
+client's recordings as well, which is the leak the project file exists to
+prevent.
 
 That third part is where this module earns its keep, because teaching the
 wrong thing is worse than teaching nothing. Every service accepts a list of
@@ -72,11 +79,10 @@ precisely the kind of correction this module exists to catch, and a test
 built on equivalence would silently discard every one of them. Each
 comparison in this module says which of the two questions it is asking.
 
-Corrections that do not become terms are not wasted. They are still recorded
-as corrections, still counted against the service that produced them, and
-still grouped into the categories section 23 asks for, so that a service
-that keeps mishearing numbers or keeps mixing up two speakers can be seen
-doing it.
+Corrections that do not become terms are not wasted. They are still counted
+against the service that produced them, and still fall into the categories
+section 23 asks for, so that a service that keeps mishearing numbers or
+keeps mixing up two speakers can be seen doing it.
 
 Nothing here depends on Qt or on any provider library, so it can be tested
 on its own.
@@ -100,14 +106,13 @@ from vox_verbatim.transcription.model import (
     Transcript,
 )
 from vox_verbatim.transcription.normalise import read_number
+from vox_verbatim.transcription.project import LearnedName, merge_learned_names
 from vox_verbatim.transcription.vocabulary import (
     MINIMUM_CORRECTION_OCCURRENCES,
     LearnedCorrection,
     TermCategory,
     Vocabulary,
     VocabularyIndex,
-    VocabularyLevel,
-    VocabularyProfile,
     VocabularyTerm,
 )
 
@@ -115,13 +120,6 @@ from vox_verbatim.transcription.vocabulary import (
 #: Beyond this it is a rewritten phrase rather than a word the services
 #: could not hear, and the services are asking for terms, not sentences.
 MAXIMUM_TERM_WORDS = 3
-
-#: The profile the vetted terms are collected in. It is one named list
-#: rather than a scattering, so the user can open it, see what the
-#: application has decided to teach the services, and delete anything they
-#: disagree with.
-LEARNED_PROFILE_ID = "learned"
-LEARNED_PROFILE_NAME = "Learned from corrections"
 
 #: What ends a sentence, for the purpose of telling a name from a word that
 #: happened to come first. Closing quotes and brackets are stripped before
@@ -308,18 +306,6 @@ class CorrectionReport:
         return counts
 
 
-@dataclass(frozen=True)
-class LearningResult:
-    """What a review changed in the stored knowledge."""
-
-    report: CorrectionReport
-    recorded: tuple[LearnedCorrection, ...] = ()
-    """The corrections as they now stand, counts included."""
-
-    taught: tuple[VocabularyTerm, ...] = ()
-    """The terms the services will be told to listen for next time."""
-
-
 # -- Reading a review ----------------------------------------------------
 
 
@@ -441,76 +427,36 @@ def teaches_a_term(correction: TextCorrection) -> bool:
     )
 
 
-def term_for(correction: TextCorrection) -> VocabularyTerm | None:
-    """Turn a correction into a term, or return ``None`` if it should not be one.
+# -- What a review taught this folder --------------------------------------
 
-    The wrong text is kept on the term as a known misrecognition, which is
-    the shape the vocabulary module already understands: it lets
-    reconciliation recognise the wrong spelling as a mistake it has seen
-    before rather than as an ordinary rival.
 
-    Only the acronym category is filled in. Telling a person's surname from a
-    company name from a product name cannot be done from one word, and a
-    guess written into the category would look like something the
-    application knows.
+def names_learned(
+    before: Transcript, after: Transcript, when: str | None = None
+) -> list[LearnedName]:
+    """The names a review revealed, one entry for each, ready for the folder's list.
+
+    ``before`` is the transcript as it was saved last time and ``after`` the
+    one just saved. Only a correction that :func:`teaches_a_term` passes gives
+    a name: an ordinary word, a number or a value that must not be guessed
+    gives nothing. Each name carries the language of the word, the text the
+    service wrote instead as its first wrong form, and ``when``.
+
+    Nothing is stored here. The caller adds what comes back to the folder's
+    project, and nothing is ever written to the shared vocabulary.
     """
-    if not teaches_a_term(correction):
-        return None
-    text = correction.right_text.strip()
-    return VocabularyTerm(
-        text=text,
-        category=TermCategory.ACRONYM if _is_acronym(text) else correction.vocabulary_category,
-        language=correction.language if correction.language is not Language.UNKNOWN else None,
-        common_misrecognitions=(correction.wrong_text.strip(),),
-        confirmation_count=1,
-    )
-
-
-# -- Storing what was learned --------------------------------------------
-
-
-def learn_from_review(
-    before: Transcript,
-    after: Transcript,
-    vocabulary: Vocabulary,
-    when: str | None = None,
-    profile_id: str = LEARNED_PROFILE_ID,
-) -> LearningResult:
-    """Read a review and store everything it taught.
-
-    The corrections go into the learned corrections the vocabulary module
-    already keeps, so that there is one record of them and not two. The
-    vetted terms go into a profile of their own, which is what carries the
-    category and the language that the vocabulary's own automatic pass
-    cannot know.
-
-    That profile is the reason a caller who uses it should ask for its terms
-    with ``include_corrections=False``. The vocabulary module offers every
-    recurring correction to the services on its own, grammar fixes included,
-    which is the behaviour this module exists to improve on; taking both
-    would put back exactly what the rule above filtered out.
-
-    It does not touch the provider statistics. It compares two whole
-    transcripts, so it would count every word in them, including the ones
-    nobody looked at; :func:`count_settled_words` counts only what a person
-    settled.
-    """
-    index = VocabularyIndex(_profile_terms(vocabulary))
-    report = extract_corrections(before, after, index)
-
-    recorded: list[LearnedCorrection] = []
-    for correction in report.text_corrections:
-        stored = vocabulary.corrections.record(
-            wrong_text=correction.wrong_text,
-            right_text=correction.right_text,
-            provider=correction.provider,
-            when=when,
+    found: list[LearnedName] = []
+    for correction in extract_corrections(before, after).text_corrections:
+        if not teaches_a_term(correction):
+            continue
+        found.append(
+            LearnedName(
+                text=correction.right_text.strip(),
+                language=correction.language.value,
+                wrong_forms=[correction.wrong_text.strip()],
+                learned_at=when or "",
+            )
         )
-        if stored is not None:
-            recorded.append(stored)
-
-    taught = _teach(vocabulary, report, profile_id)
-    return LearningResult(report=report, recorded=tuple(recorded), taught=tuple(taught))
+    return merge_learned_names([], found)
 
 
 # -- Counting each settled word once -------------------------------------
@@ -747,82 +693,6 @@ def repeated_mistakes(
 
 
 # -- The details ---------------------------------------------------------
-
-
-def _teach(
-    vocabulary: Vocabulary,
-    report: CorrectionReport,
-    profile_id: str,
-) -> list[VocabularyTerm]:
-    """Add the vetted terms to the learned profile, merging repeats.
-
-    A term already in the profile has its confirmation count raised rather
-    than being added again, because the count is what decides which terms
-    survive when a service will not take the whole list, and a term the user
-    has now corrected twice deserves to outrank one they corrected once.
-    """
-    terms = [term for term in (term_for(c) for c in report.text_corrections) if term is not None]
-    if not terms:
-        return []
-    profile = vocabulary.profile(profile_id)
-    if profile is None:
-        profile = VocabularyProfile(
-            id=profile_id,
-            level=VocabularyLevel.GLOBAL,
-            name=LEARNED_PROFILE_NAME,
-        )
-        vocabulary.profiles.append(profile)
-
-    taught: list[VocabularyTerm] = []
-    for term in terms:
-        position = _position_of(profile.terms, term.text)
-        if position is None:
-            profile.terms.append(term)
-            taught.append(term)
-            continue
-        existing = profile.terms[position]
-        misrecognitions = list(existing.common_misrecognitions)
-        for wrong in term.common_misrecognitions:
-            if wrong and wrong not in misrecognitions:
-                misrecognitions.append(wrong)
-        merged = VocabularyTerm(
-            text=existing.text,
-            category=existing.category or term.category,
-            language=existing.language or term.language,
-            pronunciation_hints=existing.pronunciation_hints,
-            common_misrecognitions=tuple(misrecognitions),
-            confirmation_count=existing.confirmation_count + 1,
-        )
-        profile.terms[position] = merged
-        taught.append(merged)
-    return taught
-
-
-def _position_of(terms: list[VocabularyTerm], text: str) -> int | None:
-    """Where this exact term already sits on the list, if it sits there at all.
-
-    Another question about text rather than about sound. Two terms that
-    sound the same and are spelled differently are two terms: a user whose
-    list holds both "Müller" and "Mueller" has drawn a distinction, and
-    merging them here would quietly undo it.
-    """
-    wanted = _stored_form(text)
-    for position, term in enumerate(terms):
-        if _stored_form(term.text) == wanted:
-            return position
-    return None
-
-
-def _stored_form(text: str) -> str:
-    """The form two stored strings are compared on: space and capitals aside.
-
-    Deliberately the same rule the vocabulary module uses for its own stored
-    strings. Capitals are set aside because a term written "bosch" and one
-    written "Bosch" are one term written twice, and casefolding leaves the
-    German letters exactly where they are, which is what keeps "Müller" and
-    "Mueller" apart.
-    """
-    return text.strip().casefold()
 
 
 def _profile_terms(vocabulary: Vocabulary) -> list[VocabularyTerm]:

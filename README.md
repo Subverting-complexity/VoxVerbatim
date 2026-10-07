@@ -396,6 +396,16 @@ and is invisible in every other folder. That isolation is deliberate: a
 surname that is almost certain in one client's recordings is a distraction
 in somebody else's.
 
+The same is true of names. When you replace a word with a name — "Bosh"
+corrected to "Bosch", say — the folder learns that name, in the language
+of the recording, together with the spelling the service wrote instead. The
+names are kept in the folder's project file, in a list called
+`learned_names`, and nowhere else: the shared vocabulary in
+`vocabulary.json` is never written by a review. Ordinary words, numbers and
+amounts teach no name. Undoing a correction does not remove a name it
+taught, and a name you remove from the project file while the review is
+open stays removed.
+
 There is one exception. Each time you correct or confirm a word, the
 application counts whether the service it believed got that word right.
 These service statistics are kept for you across every folder, so they keep

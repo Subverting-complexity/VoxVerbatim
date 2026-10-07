@@ -27,7 +27,7 @@ from vox_verbatim.transcription.context import (
 )
 from vox_verbatim.transcription.model import Language, Provider, RecordingConfiguration
 from vox_verbatim.transcription.providers.base import ProviderCapabilities
-from vox_verbatim.transcription.vocabulary import VocabularyTerm
+from vox_verbatim.transcription.vocabulary import VocabularyTerm, folder_terms_first
 
 
 def terms(*texts: str) -> list[VocabularyTerm]:
@@ -530,3 +530,32 @@ def test_a_service_that_takes_both_is_sent_both():
     written = adapt_for(package, Provider.ELEVENLABS, capabilities)
 
     assert written.parameters == {"keyterms": ["Vermeulen"]}
+
+
+# -- A folder's learned names ---------------------------------------------
+
+
+def test_over_the_limit_the_folder_names_are_kept_and_profile_terms_dropped():
+    folder = terms("Bosch", "Smit")
+    profile = many_terms(ELEVENLABS_MAXIMUM_KEYTERMS)
+    package = build_context_package(configuration(), folder_terms_first(folder, profile))
+
+    written = adapt_for(package, Provider.ELEVENLABS)
+
+    assert written.terms[:2] == ("Bosch", "Smit")
+    assert len(written.terms) == ELEVENLABS_MAXIMUM_KEYTERMS
+    assert profile[-1].text not in written.terms
+    assert written.dropped_term_count == 2
+
+
+def test_an_afrikaans_folder_name_is_left_out_when_afrikaans_is_off():
+    folder = [
+        VocabularyTerm(text="Bosch"),
+        VocabularyTerm(text="Vrystaat", language=Language.AFRIKAANS),
+    ]
+
+    off = build_context_package(configuration(afrikaans_enabled=False), folder)
+    on = build_context_package(configuration(afrikaans_enabled=True), folder)
+
+    assert off.term_texts == ("Bosch",)
+    assert on.term_texts == ("Bosch", "Vrystaat")

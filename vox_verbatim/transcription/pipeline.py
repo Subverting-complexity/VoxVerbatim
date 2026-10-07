@@ -73,6 +73,8 @@ from vox_verbatim.transcription.store import TranscriptStore
 from vox_verbatim.transcription.vocabulary import (
     Vocabulary,
     VocabularyIndex,
+    VocabularyTerm,
+    folder_terms_first,
     resolve_terms,
 )
 
@@ -92,6 +94,13 @@ class PipelineOptions:
     The file is read when each recording starts, so a run picks up what the
     reviews before it taught. Reconcile then believes each service by what
     it has earned rather than by the fixed defaults alone.
+    """
+    folder_terms: tuple[VocabularyTerm, ...] = ()
+    """The names the recordings' folder learned in its reviews, as terms.
+
+    They are sent ahead of the profile terms, so a service that will not
+    take every term drops profile terms first. Read from the folder's
+    project file once, when the run starts.
     """
 
 
@@ -166,7 +175,10 @@ def transcribe_recording(
         return _finish(transcript, store, started, stopped=True)
 
     # -- Work out what to tell the services about this recording
-    terms = resolve_terms(options.vocabulary, configuration.vocabulary_profile_ids)
+    terms = folder_terms_first(
+        options.folder_terms,
+        resolve_terms(options.vocabulary, configuration.vocabulary_profile_ids),
+    )
     context = build_context_package(configuration, terms)
     index = VocabularyIndex(terms)
 

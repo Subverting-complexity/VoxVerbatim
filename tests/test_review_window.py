@@ -52,7 +52,8 @@ from vox_verbatim.transcription.model import (
     TokenReference,
     Transcript,
 )
-from vox_verbatim.transcription.project import ProjectStore
+from vox_verbatim.transcription.project import ProjectStore, remove_learned_name
+from vox_verbatim.transcription.vocabulary import VocabularyStore
 from vox_verbatim.ui import review_lists
 from vox_verbatim.ui import review_window as review_window_module
 from vox_verbatim.ui.review_lists import (
@@ -1758,6 +1759,109 @@ def test_correcting_a_word_as_detected_puts_the_words_back_and_drops_its_rules(
         assert window.state.rules == []
     finally:
         window.close()
+
+
+# -- The names a folder's reviews teach -----------------------------------
+
+
+def test_a_replacement_teaches_the_folder_the_name(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+
+        assert window.apply_replacement_to_word() is True
+
+        [name] = ProjectStore(tmp_path).load().learned_names
+        assert name.text == "Bosch"
+        assert name.language == Language.ENGLISH.value
+        assert "Bosh" in name.wrong_forms
+        assert "Bosch" not in name.wrong_forms
+    finally:
+        window.close()
+
+
+def test_a_replacement_of_one_occurrence_teaches_the_name_too(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        for row in range(window._occurrence_model.rowCount()):
+            window._occurrences.select_row(row)
+            if window.current_occurrence().detected_text == "Bosh":
+                break
+        assert window.current_occurrence().detected_text == "Bosh"
+        window._replacement_edit.setText("Bosch")
+
+        assert window.apply_replacement_to_occurrence() is True
+
+        names = ProjectStore(tmp_path).load().learned_names
+        assert [(name.text, name.wrong_forms) for name in names] == [("Bosch", ["Bosh"])]
+    finally:
+        window.close()
+
+
+def test_a_correction_that_is_not_a_name_teaches_nothing(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "15,000")
+        window._replacement_edit.setText("50,000")
+
+        assert window.apply_replacement_to_word() is True
+
+        assert ProjectStore(tmp_path).load().learned_names == []
+    finally:
+        window.close()
+
+
+def test_undoing_a_correction_keeps_the_name_it_taught(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+        window.apply_replacement_to_word()
+        window.set_show_reviewed(True)
+        select_word(window, "Bosch")
+
+        assert window.correct_word_as_detected() is True
+
+        names = ProjectStore(tmp_path).load().learned_names
+        assert [name.text for name in names] == ["Bosch"]
+    finally:
+        window.close()
+
+
+def test_a_name_removed_while_the_window_is_open_stays_removed(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+        window.apply_replacement_to_word()
+        assert remove_learned_name(tmp_path, "Bosch", Language.ENGLISH.value) is True
+
+        # Another change saves the project again from the window's copy.
+        select_word(window, "15,000")
+        window._replacement_edit.setText("50,000")
+        assert window.apply_replacement_to_word() is True
+
+        assert ProjectStore(tmp_path).load().learned_names == []
+    finally:
+        window.close()
+
+
+def test_a_review_never_writes_the_shared_vocabulary(qapp, tmp_path, monkeypatch):
+    written: list[object] = []
+    monkeypatch.setattr(
+        VocabularyStore, "save", lambda store, vocabulary: written.append(vocabulary) or True
+    )
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosch")
+        window.apply_replacement_to_word()
+    finally:
+        window.close()
+
+    assert written == []
 
 
 def test_a_settled_word_leaves_the_list_and_the_work_carries_on(qapp, tmp_path):

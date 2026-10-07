@@ -82,9 +82,10 @@ In the review window
   Ctrl+I              Isolate this occurrence, which takes it out of its
                       word and keeps it out when the folder is looked at
                       again.
-  F5 and Shift+F5     Play the word again, and play a wider stretch around
-                      it. In this window F5 plays; in the file list it reads
-                      the folder again.
+  F5                  Play the word alone. In this window F5 plays a word;
+                      in the file list it reads the folder again.
+  Shift+F5            Play the word with a second and a half either side.
+  Ctrl+F5             Play the word with twelve seconds either side.
   Ctrl+L              Process the low confidence words of the whole folder.
   Ctrl+G              Group the words again, using the minimum confidence
                       and the grouping tolerance as they now stand.

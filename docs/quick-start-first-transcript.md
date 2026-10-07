@@ -139,8 +139,9 @@ To decide, use the review window:
 
 1. Press `Ctrl+R`, or select **Open review window**.
 2. Go to the **Occurrences** list (`Alt+O`). Select an occurrence.
-   VoxVerbatim plays that part of the recording. Press `F5` to hear it
-   again.
+   VoxVerbatim plays the word. Press `F5` to hear it again,
+   `Shift+F5` to hear it with the words around it, or `Ctrl+F5` to hear
+   12 seconds either side.
 3. Go to **What was said**. It shows what each service heard. In the
    **Chosen** column, one row says "The current choice". The
    **Candidate** on that row is the word that VoxVerbatim keeps if you

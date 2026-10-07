@@ -81,11 +81,12 @@ from vox_verbatim.ui.review_window import (
     CANDIDATE_COLUMN_SERVICE,
     CANDIDATE_COLUMN_TEXT,
     CANDIDATE_COLUMN_VOCABULARY,
-    CONTEXT_SECONDS,
     CURRENT_CHOICE,
     IN_VOCABULARY,
     NOT_IN_VOCABULARY,
+    SHORT_CONTEXT_SECONDS,
     WIDE_CONTEXT_SECONDS,
+    WORD_MARGIN_SECONDS,
     ReviewWindow,
     candidate_rows,
 )
@@ -1262,21 +1263,26 @@ def test_a_candidate_can_be_put_straight_into_the_replacement_box(qapp, tmp_path
 # -- Playback ------------------------------------------------------------
 
 
-def test_playing_a_word_includes_several_seconds_either_side_of_it(qapp, tmp_path):
-    """A word without its sentence cannot be judged."""
+def test_playing_a_word_plays_it_alone_with_only_a_small_margin(qapp, tmp_path):
+    """The margin is there because the services' timings are not exact."""
     folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})
     window = open_window(tmp_path, folder, process=True)
     try:
-        assert window.span_to_play() == AudioSpan(30.0 - CONTEXT_SECONDS, 30.4 + CONTEXT_SECONDS)
+        assert window.span_to_play() == AudioSpan(
+            30.0 - WORD_MARGIN_SECONDS, 30.4 + WORD_MARGIN_SECONDS
+        )
     finally:
         window.close()
 
 
-def test_asking_for_more_context_widens_the_same_span(qapp, tmp_path):
+def test_asking_for_some_or_more_context_widens_the_same_span(qapp, tmp_path):
     folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})
     window = open_window(tmp_path, folder, process=True)
     try:
-        assert window.span_to_play(wide=True) == AudioSpan(
+        assert window.span_to_play(SHORT_CONTEXT_SECONDS) == AudioSpan(
+            30.0 - SHORT_CONTEXT_SECONDS, 30.4 + SHORT_CONTEXT_SECONDS
+        )
+        assert window.span_to_play(WIDE_CONTEXT_SECONDS) == AudioSpan(
             30.0 - WIDE_CONTEXT_SECONDS, 30.4 + WIDE_CONTEXT_SECONDS
         )
     finally:
@@ -1294,10 +1300,10 @@ def test_the_padding_never_asks_for_audio_outside_the_recording(qapp, tmp_path):
     window = open_window(tmp_path, folder, process=True)
     try:
         select_word(window, "early")
-        assert window.span_to_play().start == 0.0
+        assert window.span_to_play(WIDE_CONTEXT_SECONDS).start == 0.0
 
         select_word(window, "late")
-        assert window.span_to_play().end == 60.0
+        assert window.span_to_play(WIDE_CONTEXT_SECONDS).end == 60.0
     finally:
         window.close()
 
@@ -1308,7 +1314,9 @@ def test_a_word_with_no_boundaries_plays_the_wider_region_it_was_found_in(qapp, 
     folder = Folder({RECORDING: make_transcript([token])})
     window = open_window(tmp_path, folder, process=True)
     try:
-        assert window.span_to_play() == AudioSpan(30.0 - CONTEXT_SECONDS, 33.0 + CONTEXT_SECONDS)
+        assert window.span_to_play() == AudioSpan(
+            30.0 - WORD_MARGIN_SECONDS, 33.0 + WORD_MARGIN_SECONDS
+        )
     finally:
         window.close()
 
@@ -1332,7 +1340,7 @@ def test_playing_waits_for_the_media_before_seeking_into_it(qapp, tmp_path):
         assert player.seeks == []
 
         player.becomes_ready()
-        assert player.seeks == [27_000]
+        assert player.seeks == [29_850]
         assert player.plays == 1
     finally:
         window.close()
@@ -1366,10 +1374,10 @@ def test_a_second_play_in_the_same_file_does_not_load_it_again(qapp, tmp_path):
     try:
         window.play_span()
         player.becomes_ready()
-        window.play_span(wide=True)
+        window.play_span(WIDE_CONTEXT_SECONDS)
 
         assert player.loads == [str(Path(f"C:/Audio/{RECORDING}.wav"))]
-        assert player.seeks == [27_000, 18_000]
+        assert player.seeks == [29_850, 18_000]
     finally:
         window.close()
 
@@ -1453,17 +1461,94 @@ def test_playback_stops_at_the_end_of_the_region_rather_than_running_on(qapp, tm
         window.play_span()
         player.becomes_ready()
 
-        # Still inside the region, so it plays on.
-        player.positionChanged.emit(33_000)
+        # The word ends at 30.4 seconds, and its last sound must not be cut
+        # off, so it plays on through it into the margin.
+        player.positionChanged.emit(30_400)
+        player.positionChanged.emit(30_500)
         assert player.pauses == 0
 
-        player.positionChanged.emit(33_500)
+        player.positionChanged.emit(30_600)
         assert player.pauses == 1
 
         # And having stopped, it stays stopped rather than pausing again on
         # every position the player reports afterwards.
-        player.positionChanged.emit(34_000)
+        player.positionChanged.emit(31_000)
         assert player.pauses == 1
+    finally:
+        window.close()
+
+
+def test_automatic_playback_plays_the_word_alone(qapp, tmp_path):
+    """Landing on an occurrence plays the word, not the sentence around it.
+
+    The sentence is a keypress away on Shift+F5. Playing it every time buried
+    the word the person had come to hear among the ones either side of it.
+    """
+    player = FakePlayer()
+    window = open_window(tmp_path, two_file_folder(), player, process=True)
+    try:
+        select_word(window, "Bosch")
+        window.go_to_next_item()
+        window._play_after_waiting()
+        player.becomes_ready()
+
+        span = window.current_token().audible_span
+        assert player.seeks == [round((span.start - WORD_MARGIN_SECONDS) * 1000)]
+        assert window._stop_at_ms == round((span.end + WORD_MARGIN_SECONDS) * 1000)
+    finally:
+        window.close()
+
+
+def test_each_play_key_has_a_menu_item_that_names_it(qapp, tmp_path):
+    """The menu is where a person finds out which key plays how much."""
+    window = open_window(tmp_path)
+    try:
+        playback = [
+            (action.text(), action.shortcut())
+            for action in (
+                window._play_action,
+                window._play_short_action,
+                window._play_wide_action,
+            )
+        ]
+        assert playback == [
+            ("Play the &Word", QKeySequence(Qt.Key.Key_F5)),
+            ("Play with &Some Context", QKeySequence("Shift+F5")),
+            ("Play with &More Context", QKeySequence("Ctrl+F5")),
+        ]
+    finally:
+        window.close()
+
+
+def test_each_play_key_plays_the_length_it_names(qapp, tmp_path):
+    player = FakePlayer()
+    folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        window._play_action.trigger()
+        player.becomes_ready()
+        window._play_short_action.trigger()
+        window._play_wide_action.trigger()
+
+        assert player.seeks == [29_850, 28_500, 18_000]
+        assert window._stop_at_ms == 42_400
+    finally:
+        window.close()
+
+
+def test_a_word_with_no_audio_is_not_played_by_itself_either(qapp, tmp_path):
+    """Nothing is lined up, and nothing new is said on arriving at it."""
+    player = FakePlayer()
+    token = make_token(start=None, end=None, span=None, strength=0.3)
+    folder = Folder({RECORDING: make_transcript([token])})
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        window._start_automatic_playback()
+        assert not window._play_timer.isActive()
+
+        assert window.play_span() is False
+        assert window._status_label.text() == review_window_module.NO_AUDIO
+        assert player.loads == []
     finally:
         window.close()
 
@@ -1487,7 +1572,7 @@ def test_the_field_says_what_pressing_play_would_actually_play(qapp, tmp_path):
     folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})
     window = open_window(tmp_path, folder, process=True)
     try:
-        assert window._span_edit.text() == "From 27 seconds, 6.4 seconds in all"
+        assert window._span_edit.text() == "From 30 seconds, 0.7 seconds in all"
     finally:
         window.close()
 
@@ -3015,7 +3100,8 @@ def test_every_action_has_a_shortcut_a_person_can_actually_press(qapp, tmp_path)
         # modifier and nothing to hold down.
         assert window._confirm_action.shortcut() == QKeySequence(Qt.Key.Key_F4)
         assert window._play_action.shortcut() == QKeySequence(Qt.Key.Key_F5)
-        assert window._play_wide_action.shortcut() == QKeySequence("Shift+F5")
+        assert window._play_short_action.shortcut() == QKeySequence("Shift+F5")
+        assert window._play_wide_action.shortcut() == QKeySequence("Ctrl+F5")
         assert window._isolate_action.shortcut() == QKeySequence("Ctrl+I")
         assert window._process_action.shortcut() == QKeySequence("Ctrl+L")
         assert window._regroup_action.shortcut() == QKeySequence("Ctrl+G")

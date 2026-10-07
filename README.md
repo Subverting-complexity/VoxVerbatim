@@ -378,11 +378,12 @@ pulls that one word out and leaves the rest of the group intact; separate
 words can be gathered into a group of your own the same way. `Correct as
 Detected` says the word was right all along.
 
-For each occurrence you can still hear it with several seconds either side,
-see what every service heard there, and correct the text, the speaker or the
-timing separately, exactly as before. `F3` and `Shift+F3` move between
-occurrences, `Ctrl+F3` between groups, `F5` plays again, and `F4` confirms an
-item as correct and moves on.
+For each occurrence you can hear the word alone, or with some context either
+side, see what every service heard there, and correct the text, the speaker or
+the timing separately, exactly as before. `F3` and `Shift+F3` move between
+occurrences, `Ctrl+F3` between groups, `F5` plays the word alone, `Shift+F5`
+plays it with 1.5 seconds either side, `Ctrl+F5` with 12 seconds, and `F4`
+confirms an item as correct and moves on.
 
 Nothing here has a Save button. Every change is written as you make it, and
 a folder reopens on the group and the occurrence you were last on.

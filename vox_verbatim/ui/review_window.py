@@ -197,13 +197,20 @@ from vox_verbatim.ui.review_queue import (
     reason_text,
 )
 
-#: How much audio to add either side of a word when it is played. A word on
-#: its own is not judgeable: the sentence around it is what tells a person
-#: whether "fifteen" or "fifty" is the one that makes sense.
-CONTEXT_SECONDS = 3.0
+#: How much audio to add either side of a word when it is played alone. The
+#: word is what a person listens for first, and playing three seconds of
+#: sentence around it every time buried the one thing they had come to hear.
+#: The margin is not nothing because the services' timings are not exact: a
+#: word cut at the very edge of its stated span can lose its first consonant,
+#: and "fifteen" without its "f" is not a word anyone can judge.
+WORD_MARGIN_SECONDS = 0.15
 
-#: The same again, for the second play button, when three seconds turned
-#: out not to be enough to place what was being talked about.
+#: The padding for Shift+F5, for when the word alone does not settle it and
+#: the few words either side are what tell "fifteen" from "fifty".
+SHORT_CONTEXT_SECONDS = 1.5
+
+#: The padding for Ctrl+F5, for when a sentence is not enough to place what
+#: was being talked about.
 WIDE_CONTEXT_SECONDS = 12.0
 
 #: Said when the wait is set to nothing at all, which is a real choice and not
@@ -969,13 +976,15 @@ _NOTES: dict[str, ControlNote] = {
     ),
     PLAYBACK: ControlNote(
         "Playing the word",
-        "Plays the word with several seconds either side. F5, or Shift+F5 for more.",
+        "F5 plays the word alone, Shift+F5 with a little context, Ctrl+F5 with more.",
         _reflowed(
             """
-            A word without its sentence cannot be judged, so playing never plays the
-            word alone. Three seconds go either side of it, and the second button gives
-            twelve, for when you need to hear what was being talked about rather than
-            just the word.
+            F5 plays just the word, with a fraction of a second either side so that
+            its first and last sounds are not cut off. Moving onto an occurrence plays
+            it the same way. Where the word alone does not settle it, Shift+F5 adds a
+            second and a half either side, which is usually enough to hear the words
+            around it, and Ctrl+F5 adds twelve seconds, for when you need to hear what
+            was being talked about.
 
             Where the word's own boundaries are not known, the wider region it was found
             in is played instead. That is exactly the case where you most need to hear
@@ -1931,25 +1940,37 @@ class ReviewWindow(QMainWindow):
 
         # Y rather than G, which the Word Groups label now has. Nothing else in
         # the window answers Y.
-        self._play_button = QPushButton("Pla&y the word again", self._playback_group)
+        self._play_button = QPushButton("Pla&y the word", self._playback_group)
         describe(
             self._play_button,
-            "Play the word again",
-            f"Plays the word with {CONTEXT_SECONDS:.0f} seconds either side of it. F5.",
+            "Play the word",
+            f"Plays the word alone, with {WORD_MARGIN_SECONDS:g} seconds either side so "
+            "that its edges are not cut off. F5.",
         )
         self._note_keys[self._play_button] = PLAYBACK
+
+        # S, which nothing else in the window answers.
+        self._play_short_button = QPushButton("Play with &some context", self._playback_group)
+        describe(
+            self._play_short_button,
+            "Play with some context",
+            f"Plays the word with {SHORT_CONTEXT_SECONDS:g} seconds either side of it, "
+            "to hear the words around it. Shift+F5.",
+        )
+        self._note_keys[self._play_short_button] = PLAYBACK
 
         self._play_wide_button = QPushButton("Play with more conte&xt", self._playback_group)
         describe(
             self._play_wide_button,
             "Play with more context",
-            f"Plays the word with {WIDE_CONTEXT_SECONDS:.0f} seconds either side of it, "
-            "for when the sentence alone is not enough. Shift+F5.",
+            f"Plays the word with {WIDE_CONTEXT_SECONDS:g} seconds either side of it, "
+            "for when the sentence alone is not enough. Ctrl+F5.",
         )
         self._note_keys[self._play_wide_button] = PLAYBACK
 
         row = QHBoxLayout()
         row.addWidget(self._play_button)
+        row.addWidget(self._play_short_button)
         row.addWidget(self._play_wide_button)
         row.addStretch(1)
         layout.addLayout(row)
@@ -2251,15 +2272,21 @@ class ReviewWindow(QMainWindow):
         playback_menu = menu_bar.addMenu("Play&back")
         self._play_action = self._add_action(
             playback_menu,
-            "Play the &Word Again",
+            "Play the &Word",
             QKeySequence(Qt.Key.Key_F5),
-            lambda: self.play_span(False),
+            lambda: self.play_span(),
+        )
+        self._play_short_action = self._add_action(
+            playback_menu,
+            "Play with &Some Context",
+            QKeySequence("Shift+F5"),
+            lambda: self.play_span(SHORT_CONTEXT_SECONDS),
         )
         self._play_wide_action = self._add_action(
             playback_menu,
             "Play with &More Context",
-            QKeySequence("Shift+F5"),
-            lambda: self.play_span(True),
+            QKeySequence("Ctrl+F5"),
+            lambda: self.play_span(WIDE_CONTEXT_SECONDS),
         )
         playback_menu.addSeparator()
         self._auto_play_action = self._add_toggle(
@@ -2366,8 +2393,9 @@ class ReviewWindow(QMainWindow):
         self._show_everything_button.clicked.connect(self.show_everything)
 
         self._use_candidate_button.clicked.connect(self.use_selected_candidate)
-        self._play_button.clicked.connect(lambda: self.play_span(False))
-        self._play_wide_button.clicked.connect(lambda: self.play_span(True))
+        self._play_button.clicked.connect(lambda: self.play_span())
+        self._play_short_button.clicked.connect(lambda: self.play_span(SHORT_CONTEXT_SECONDS))
+        self._play_wide_button.clicked.connect(lambda: self.play_span(WIDE_CONTEXT_SECONDS))
         self._apply_word_button.clicked.connect(self.apply_replacement_to_word)
         self._replacement_edit.returnPressed.connect(self.apply_replacement_to_word)
         self._apply_occurrence_button.clicked.connect(self.apply_replacement_to_occurrence)
@@ -2617,7 +2645,9 @@ class ReviewWindow(QMainWindow):
         self._detected_edit.setFocus(Qt.FocusReason.TabFocusReason)
 
     def _focus_playback(self) -> None:
-        self._focus_first_enabled([self._play_button, self._play_wide_button, self._span_edit])
+        self._focus_first_enabled(
+            [self._play_button, self._play_short_button, self._play_wide_button, self._span_edit]
+        )
 
     def _focus_corrections(self) -> None:
         self._focus_first_enabled(
@@ -3785,6 +3815,7 @@ class ReviewWindow(QMainWindow):
         widgets: list[tuple[QWidget, bool]] = [
             (self._occurrences, has_occurrences),
             (self._play_button, playable),
+            (self._play_short_button, playable),
             (self._play_wide_button, playable),
             (self._use_candidate_button, enabled),
             (self._replacement_edit, enabled),
@@ -3803,6 +3834,7 @@ class ReviewWindow(QMainWindow):
         # does nothing is worse than either on its own.
         actions: list[tuple[QAction, bool]] = [
             (self._play_action, playable),
+            (self._play_short_action, playable),
             (self._play_wide_action, playable),
             (self._apply_word_action, enabled),
             (self._apply_occurrence_action, enabled),
@@ -3872,14 +3904,15 @@ class ReviewWindow(QMainWindow):
 
     # -- Playback ----------------------------------------------------------
 
-    def span_to_play(self, wide: bool = False) -> AudioSpan | None:
+    def span_to_play(self, padding: float = WORD_MARGIN_SECONDS) -> AudioSpan | None:
         """The region that playing would cover, padding included.
 
-        The word's own span is used where it has one, and the wider
-        containing span where it does not, which is exactly when a person
-        most needs to hear it. The padding is clamped to the recording, so
-        a word in the first seconds does not ask for audio from before the
-        beginning.
+        The padding defaults to the small margin that plays the word alone,
+        which is what F5 and automatic playback both play. The word's own
+        span is used where it has one, and the wider containing span where it
+        does not, which is exactly when a person most needs to hear it. The
+        padding is clamped to the recording, so a word in the first seconds
+        does not ask for audio from before the beginning.
         """
         token = self.current_token()
         if token is None:
@@ -3887,7 +3920,6 @@ class ReviewWindow(QMainWindow):
         span = token.audible_span
         if span is None:
             return None
-        padding = WIDE_CONTEXT_SECONDS if wide else CONTEXT_SECONDS
         transcript = self.current_transcript
         audio = transcript.canonical_audio if transcript is not None else None
         return span.padded(padding, padding, limit=audio.duration if audio else None)
@@ -3970,10 +4002,14 @@ class ReviewWindow(QMainWindow):
         self._play_timer.start(self._state.settings.auto_play_delay_seconds * 1000)
 
     def _play_after_waiting(self) -> None:
-        self.play_span(False, automatic=True)
+        self.play_span(automatic=True)
 
-    def play_span(self, wide: bool = False, automatic: bool = False) -> bool:
+    def play_span(self, padding: float = WORD_MARGIN_SECONDS, automatic: bool = False) -> bool:
         """Play the audio around the selected word. Returns whether it started.
+
+        ``padding`` is how many seconds go either side of the word. The
+        default plays the word alone, with only the margin that keeps its
+        edges from being cut off.
 
         Returning True does not mean a sound has come out of the speakers
         yet. The recording changes as the person moves between occurrences,
@@ -3988,12 +4024,15 @@ class ReviewWindow(QMainWindow):
         if path is None:
             self._set_status(NO_CANONICAL_AUDIO, alert=True, urgent=True)
             return False
-        span = self.span_to_play(wide)
+        span = self.span_to_play(padding)
         if span is None:
             self._set_status(NO_AUDIO, alert=True, urgent=True)
             return False
-        start = int(span.start * 1000)
-        self._stop_at_ms = int(span.end * 1000)
+        # Rounded rather than truncated. A margin of 0.15 seconds leaves
+        # fractions that floating point holds a hair under the true value, and
+        # truncating them stopped the clip a millisecond early.
+        start = round(span.start * 1000)
+        self._stop_at_ms = round(span.end * 1000)
         description = f"{_seconds_phrase(span.duration)} from {spoken_duration(span.start)}"
 
         if path != self._loaded_path:

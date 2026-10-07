@@ -21,11 +21,14 @@ from PySide6.QtWidgets import QAbstractButton, QApplication, QDialog, QLabel, QW
 from vox_verbatim.audio.player import AudioPlayer
 from vox_verbatim.session import SessionStore
 from vox_verbatim.transcription import grouping
-from vox_verbatim.transcription.calibration import ProviderStatistics
+from vox_verbatim.transcription.calibration import CalibrationStore, ProviderStatistics
+from vox_verbatim.transcription.learning import StatisticsChange
 from vox_verbatim.transcription.model import (
     FinalToken,
+    Provider,
     ReviewReason,
     ReviewStatus,
+    StatisticsNote,
     Transcript,
 )
 from vox_verbatim.transcription.normalise import normalise
@@ -756,8 +759,12 @@ def fake_review_window(monkeypatch) -> list:
             player,
             save_correction=None,
             parent=None,
+            record_statistics=None,
+            vocabulary=None,
         ):
             super().__init__(parent)
+            self.record_statistics = record_statistics
+            self.vocabulary = vocabulary
             self.folder = folder
             self.recording_names = list(recording_names)
             self.load_transcript = load_transcript
@@ -1989,5 +1996,24 @@ def test_every_mnemonic_in_the_main_window_is_its_own(qapp, store):
         duplicates = sorted({key for key in keys if keys.count(key) > 1})
         assert duplicates == []
         assert "n" in keys and "m" in keys
+    finally:
+        close_window(window)
+
+
+def test_the_review_window_records_its_statistics_in_the_shared_file(
+    qapp, monkeypatch, store, audio_folder, tmp_path
+):
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        window._calibration_store = CalibrationStore(tmp_path / "calibration.json")
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a"))
+        window.show_review()
+        note = StatisticsNote(provider=Provider.OPENAI, counted=True, text_corrected=True)
+
+        assert opened[-1].record_statistics(StatisticsChange(added=(note,))) is True
+
+        counts = window._calibration_store.load().counts_for(Provider.OPENAI)
+        assert (counts.chosen, counts.corrected) == (1, 1)
     finally:
         close_window(window)

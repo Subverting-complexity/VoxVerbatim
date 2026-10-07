@@ -396,6 +396,12 @@ and is invisible in every other folder. That isolation is deliberate: a
 surname that is almost certain in one client's recordings is a distraction
 in somebody else's.
 
+There is one exception. Each time you correct or confirm a word, the
+application counts whether the service it believed got that word right.
+These service statistics are kept for you across every folder, so they keep
+growing wherever you work. They hold counts only: no words, no client names
+and no speaker labels. Everything else a review learns stays in its folder.
+
 Transcribe a new file into a folder you have already reviewed and the
 project answers it with what it already knows. Every replacement you have
 accepted is applied automatically, and anything the project cannot answer
@@ -583,16 +589,18 @@ Five files live there:
 | --- | --- |
 | `settings.json` | What you chose in the Settings and Enhance Audio dialogs |
 | `session.json` | Where you were: folder, checked files, highlighted file, window layout |
-| `vocabulary.json` | Your vocabulary profiles, and the corrections you have made |
-| `calibration.json` | How each service has done on your own recordings |
+| `vocabulary.json` | Your vocabulary profiles |
+| `calibration.json` | The service statistics: how each service has done on your own recordings |
 | `vox-verbatim.log` | What went wrong, if anything did |
 
 They are separate on purpose. Your settings are decisions you made and
 expect to keep; the session is only where you happened to be. The vocabulary
-and the statistics are per user rather than per folder, because the same
-client's surname is worth knowing in every folder you will ever open, and
-because statistics built up one correction at a time over months should not
-start again when you work somewhere new. Deleting any of them costs you what
+holds the profiles you write yourself in Settings, and a review never adds
+to it. The service statistics are per user rather than per folder, because
+counts built up one correction at a time over months should not start again
+when you work somewhere new, and they hold no client names or speaker
+labels. Everything else a review learns stays in its folder, as "A folder
+is a project" describes. Deleting any of them costs you what
 that file held and nothing else; none of it stops the application from
 starting. They are all plain JSON you can read or edit by hand, and a
 damaged one is ignored rather than being fatal.

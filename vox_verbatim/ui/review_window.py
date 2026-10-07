@@ -142,6 +142,11 @@ from vox_verbatim.transcription.grouping import (
     note_rule_applied,
     reprocess,
 )
+from vox_verbatim.transcription.learning import (
+    StatisticsChange,
+    count_settled_words,
+    note_settled_words,
+)
 from vox_verbatim.transcription.model import (
     AlignmentStatus,
     AudioSpan,
@@ -163,6 +168,7 @@ from vox_verbatim.transcription.project import (
     ReplacementRule,
     WordGroup,
 )
+from vox_verbatim.transcription.vocabulary import VocabularyIndex
 from vox_verbatim.ui.accessibility import announce, describe
 from vox_verbatim.ui.review_lists import (
     GroupRow,
@@ -205,6 +211,16 @@ NO_AUTO_PLAY_DELAY = "The audio starts as soon as you arrive."
 
 NOT_ATTRIBUTED = "Not attributed to a service"
 NOT_REPORTED = "Not reported"
+
+#: Said after a change was saved but the service statistics were not. The
+#: change itself is safe, and the sentence says so before saying what was
+#: lost, because that is the order a person needs to hear it in.
+STATISTICS_FAILURE_TEXT = (
+    "The service statistics could not be saved, so they have not learned from "
+    "this change yet. Your change is saved, and the statistics will catch up the "
+    "next time they can be saved."
+)
+
 NO_SPEAKER = "No speaker attributed"
 NO_RISK = "None recorded"
 NO_LLM_DECISION = "The language model was not consulted."
@@ -1198,6 +1214,8 @@ class ReviewWindow(QMainWindow):
         player: AudioPlayer,
         save_correction: Callable[[str, Transcript], bool] | None = None,
         parent: QWidget | None = None,
+        record_statistics: Callable[[StatisticsChange], bool] | None = None,
+        vocabulary: VocabularyIndex | None = None,
     ) -> None:
         super().__init__(parent)
         self._folder = Path(folder)
@@ -1222,6 +1240,13 @@ class ReviewWindow(QMainWindow):
         # taken as every save working, which is what a window with nowhere to
         # write to has always meant; see _hand_on.
         self._save_correction = save_correction
+        # Saves what a change taught the service statistics, and answers
+        # whether that worked. Nothing given means nothing is counted.
+        self._record_statistics = record_statistics
+        self._vocabulary = vocabulary
+        # A sentence saying the statistics could not be saved, waiting to be
+        # added to the next status announcement; see _hand_on.
+        self._statistics_warning: str | None = None
 
         self._note_keys: dict[QWidget, str] = {}
         self._showing_note: str | None = None
@@ -4696,9 +4721,24 @@ class ReviewWindow(QMainWindow):
         ask for quiet and say it themselves, in the one sentence that also
         says what did work, because a second announcement would wipe out the
         first. No callback at all counts as a save that worked.
+
+        The same save is where the service statistics learn from the change.
+        Each word the person newly settled is noted and counted once; see
+        :func:`~vox_verbatim.transcription.learning.count_settled_words`. The
+        words a folder rule answered are left out, because nobody listened to
+        them. The transcript is written first, with its notes saying the
+        words were counted, and the statistics after it, so a correction is
+        never lost to a statistics failure. If the statistics then cannot be
+        saved, the transcript is written again with the words uncounted, so
+        the next save that works counts them, and the failure is added to the
+        next status announcement rather than announced on its own: the caller
+        is about to announce what it did, and a second announcement would cut
+        across it.
         """
+        noted, change, counted = self._statistics_for(recording_name, transcript)
+        kept = noted if change is None or change.is_empty else counted
         if self._save_correction is not None and not self._save_correction(
-            recording_name, transcript
+            recording_name, kept
         ):
             if not quiet:
                 self._set_status(
@@ -4707,6 +4747,16 @@ class ReviewWindow(QMainWindow):
                     urgent=True,
                 )
             return False
+        if (
+            change is not None
+            and not change.is_empty
+            and self._record_statistics is not None
+            and not self._record_statistics(change)
+        ):
+            if self._save_correction is None or self._save_correction(recording_name, noted):
+                kept = noted
+            self._statistics_warning = STATISTICS_FAILURE_TEXT
+        transcript = kept
         self._cached_name = recording_name
         self._cached_transcript = transcript
         # The flagged words of this recording have changed: a confirmed word
@@ -4721,6 +4771,30 @@ class ReviewWindow(QMainWindow):
         self._note_uncertainties(recording_name, transcript)
         self.transcriptChanged.emit(recording_name, transcript)
         return True
+
+    def _statistics_for(
+        self, recording_name: str, transcript: Transcript
+    ) -> tuple[Transcript, StatisticsChange | None, Transcript]:
+        """Note and count the settled words of a transcript about to be saved.
+
+        Returns the transcript with its new notes, the change to the
+        statistics, and the transcript with its notes saying that change was
+        counted. With nowhere to record statistics, or no saved version of
+        this recording in hand to compare with, nothing is counted.
+        """
+        if self._record_statistics is None or recording_name != self._cached_name:
+            return transcript, None, transcript
+        before = self._cached_transcript
+        if before is None:
+            return transcript, None, transcript
+        excluded = frozenset(
+            occurrence.token_id
+            for occurrence in self._state.occurrences
+            if occurrence.recording_name == recording_name and occurrence.auto_applied
+        )
+        noted = note_settled_words(before, transcript, excluded, self._vocabulary)
+        change, counted = count_settled_words(noted)
+        return noted, change, counted
 
     @staticmethod
     def _correction_failure_text(recording_names: list[str]) -> str:
@@ -4851,7 +4925,16 @@ class ReviewWindow(QMainWindow):
     # -- Status ------------------------------------------------------------
 
     def _set_status(self, message: str, alert: bool = False, urgent: bool = False) -> None:
-        """Show a message in the status bar, and read it out if it matters."""
+        """Show a message in the status bar, and read it out if it matters.
+
+        A statistics failure waiting from the last save is added to the end
+        and read out with it, so that the person hears both what happened to
+        their change and that the statistics did not learn from it.
+        """
+        if self._statistics_warning is not None:
+            message = f"{message} {self._statistics_warning}"
+            self._statistics_warning = None
+            alert = True
         self._status_label.setText(message)
         if alert:
             announce(self._status_label, message, urgent=urgent)

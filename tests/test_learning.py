@@ -512,6 +512,21 @@ def test_a_rejected_candidate_is_counted_once():
     assert statistics.counts_for(Provider.DEEPGRAM).rejected == 1
 
 
+def test_a_note_dropped_by_an_older_copy_is_carried_forward():
+    before = sentence("We", "met", "Fermeulen", "yesterday.")
+    statistics = ProviderStatistics()
+    saved = save(before, confirmed(before, "met"), statistics)
+
+    # A caller that changes another word on a copy that has lost the notes.
+    stripped = replace(saved, tokens=[replace(token) for token in saved.tokens])
+    for token in stripped.tokens:
+        token.statistics_note = None
+    later = save(saved, corrected(stripped, "Fermeulen", "Vermeulen"), statistics)
+
+    assert later.tokens[1].statistics_note is not None
+    assert statistics.counts_for(Provider.OPENAI).chosen == 2
+
+
 def test_a_speaker_mistake_is_one_total_with_no_label():
     before = sentence("Yes", "of", "course")
     after = before.with_correction(before.tokens[0].id, speaker="Mrs Smith")

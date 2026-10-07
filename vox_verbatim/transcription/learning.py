@@ -577,13 +577,20 @@ def note_settled_words(
     tokens = list(after.tokens)
     changed = False
     for position, token in enumerate(tokens):
-        if (
-            token.statistics_note is not None
-            or token.review_status not in _SETTLED
-            or token.id in excluded
-        ):
+        if token.statistics_note is not None:
             continue
         original = before_tokens.get(token.id)
+        if original is not None and original.statistics_note is not None:
+            # A caller that built ``after`` from a copy older than the last
+            # save would otherwise drop the note, and the word would then be
+            # neither counted again nor ever taken back out.
+            carried = replace(token)
+            carried.statistics_note = original.statistics_note
+            tokens[position] = carried
+            changed = True
+            continue
+        if token.review_status not in _SETTLED or token.id in excluded:
+            continue
         if original is None or original.review_status in _SETTLED:
             continue
         noted = replace(token)
@@ -640,6 +647,11 @@ def count_settled_words(transcript: Transcript) -> tuple[StatisticsChange, Trans
         changed = True
     change = StatisticsChange(removed=tuple(removed), added=tuple(added))
     return change, (replace(transcript, tokens=tokens) if changed else transcript)
+
+
+def user_terms_index(vocabulary: Vocabulary) -> VocabularyIndex:
+    """The lookup that gives a settled word the category the user chose for it."""
+    return VocabularyIndex(_profile_terms(vocabulary))
 
 
 def _note_for(

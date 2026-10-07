@@ -283,6 +283,10 @@ def transcribe_recording(
     transcript.tokens = tokens
 
     # -- Ask a second service about the places that are still in doubt
+    # Where AssemblyAI made the full pass, its second opinions are numbered
+    # after its full-pass words, and only those later words are a second
+    # opinion. Worked out now, before the answers are added.
+    answers_from = _first_answer_index(transcript)
     _guarded(
         transcript,
         "second opinions",
@@ -296,14 +300,18 @@ def transcribe_recording(
     _guarded(
         transcript,
         "adjudication",
-        lambda: _adjudicate(tokens, transcript, settings, context, reporter, cancelled),
+        lambda: _adjudicate(
+            tokens, transcript, settings, context, reporter, cancelled, answers_from
+        ),
     )
 
     # -- Check the speakers, then correct the timing of what changed
     _guarded(
         transcript,
         "the speaker check",
-        lambda: _check_speakers(tokens, transcript, outcome.results, configuration),
+        lambda: _check_speakers(
+            tokens, transcript, outcome.results, configuration, backbone_provider
+        ),
     )
     _guarded(
         transcript,
@@ -510,12 +518,8 @@ def _escalate(
     # words are what the transcript's words point back to. The answers are
     # numbered after them and added to them, because replacing that result
     # would leave every reference pointing at a word that is not there.
-    full_pass = transcript.provider_results.get(Provider.ASSEMBLYAI)
-    if full_pass is not None and not full_pass.tokens:
-        full_pass = None
-    first_index = (
-        0 if full_pass is None else 1 + max(token.index for token in full_pass.tokens)
-    )
+    first_index = _first_answer_index(transcript)
+    full_pass = transcript.provider_results.get(Provider.ASSEMBLYAI) if first_index else None
     applied = escalation.apply_answers(tokens, result, first_index=first_index)
     if applied.evidence is not None:
         if full_pass is not None and full_pass.provider is applied.evidence.provider:
@@ -534,6 +538,7 @@ def _adjudicate(
     context,
     reporter: "_Reporter",
     cancelled: CancelCheck | None,
+    answers_from: int = 0,
 ) -> list[FinalToken]:
     """Let the configured OpenAI model decide the few still unsettled.
 
@@ -551,7 +556,7 @@ def _adjudicate(
         # still finishes, and the words it would have been asked about wait
         # for review. The warning is only given where there was something to
         # ask about, so a clean recording does not mention it.
-        if _build_disputes(tokens, transcript):
+        if _build_disputes(tokens, transcript, answers_from):
             transcript.warnings.append(
                 "Adjudication was not used, because OpenAI adjudication is "
                 "switched off in Settings. The words it would have settled are "
@@ -571,7 +576,7 @@ def _adjudicate(
     if not adjudicator.is_configured():
         return tokens
 
-    disputes = _build_disputes(tokens, transcript)
+    disputes = _build_disputes(tokens, transcript, answers_from)
     if not disputes:
         return tokens
 
@@ -637,7 +642,9 @@ _ADJUDICATION_BATCH_SIZE = 30
 _ADJUDICATION_CONTEXT_WORDS = 12
 
 
-def _build_disputes(tokens: list[FinalToken], transcript: Transcript) -> list:
+def _build_disputes(
+    tokens: list[FinalToken], transcript: Transcript, answers_from: int = 0
+) -> list:
     """Gather the words still in doubt into the regions to ask about.
 
     Adjacent unsettled words become one dispute rather than several. They
@@ -674,7 +681,9 @@ def _build_disputes(tokens: list[FinalToken], transcript: Transcript) -> list:
             Dispute(
                 tokens=tuple(group),
                 backbone_tokens=tuple(backbone),
-                escalation_tokens=tuple(_escalation_tokens_for(group, transcript)),
+                escalation_tokens=tuple(
+                    _escalation_tokens_for(group, transcript, answers_from)
+                ),
                 preceding_text=_words_before(tokens, position),
                 following_text=_words_after(tokens, end),
                 note="; ".join(reasons),
@@ -719,8 +728,28 @@ def _text_in_doubt(token: FinalToken) -> bool:
     return len(readings) > 1
 
 
-def _escalation_tokens_for(group: Sequence[FinalToken], transcript: Transcript):
-    """What the escalation service heard across these words, where it was asked."""
+def _first_answer_index(transcript: Transcript) -> int:
+    """The number the escalation answers start from.
+
+    Zero, unless AssemblyAI already made a full pass as the timing fallback.
+    Then its full-pass words hold the low numbers, and the answers follow.
+    """
+    full_pass = transcript.provider_results.get(Provider.ASSEMBLYAI)
+    if full_pass is None or not full_pass.tokens:
+        return 0
+    return 1 + max(token.index for token in full_pass.tokens)
+
+
+def _escalation_tokens_for(
+    group: Sequence[FinalToken], transcript: Transcript, answers_from: int = 0
+):
+    """What the escalation service heard across these words, where it was asked.
+
+    Only the answers count, numbered from ``answers_from``. Where AssemblyAI
+    also made the full pass, its full-pass words are the backbone, and
+    giving them to the language model as a second opinion would put the
+    same service on both sides of the question.
+    """
     result = transcript.provider_results.get(Provider.ASSEMBLYAI)
     if result is None or not result.tokens:
         return []
@@ -731,7 +760,8 @@ def _escalation_tokens_for(group: Sequence[FinalToken], transcript: Transcript):
     return [
         word
         for word in result.tokens
-        if word.start is not None
+        if word.index >= answers_from
+        and word.start is not None
         and word.end is not None
         and AudioSpan(word.start, max(word.start, word.end)).overlaps(region)
     ]
@@ -765,6 +795,7 @@ def _check_speakers(
     transcript: Transcript,
     results: dict[Provider, ProviderResult],
     configuration: RecordingConfiguration,
+    backbone_provider: Provider | None = None,
 ) -> list[FinalToken]:
     """Compare the speaker labels against a second service where there is one.
 
@@ -772,6 +803,10 @@ def _check_speakers(
     three separate answers with three separate sources, which is the whole
     idea the design rests on.
     """
+    if backbone_provider is Provider.ASSEMBLYAI:
+        # AssemblyAI gave the speakers in the first place, as the timing
+        # fallback. Checking them against itself would confirm every one.
+        return tokens
     second = results.get(Provider.ASSEMBLYAI)
     if second is None or not second.succeeded:
         return tokens

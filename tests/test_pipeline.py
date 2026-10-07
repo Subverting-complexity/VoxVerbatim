@@ -952,6 +952,50 @@ def test_with_assemblyai_timing_the_words_disputes_still_get_a_second_opinion(tr
                 assert full_pass.token_at(reference.index) is not None
 
 
+def test_with_assemblyai_timing_the_words_its_speakers_are_not_checked_against_itself(
+    transcribe, monkeypatch
+):
+    """AssemblyAI gave the speakers, so it cannot also be the second opinion on them."""
+    from vox_verbatim.transcription import diarisation
+
+    checked: list = []
+    monkeypatch.setattr(
+        diarisation, "reconcile_speakers", lambda *args, **kwargs: checked.append(args) or []
+    )
+    services = three_services(
+        elevenlabs=FakeService(Provider.ELEVENLABS, error="The API key was refused.")
+    )
+
+    run = transcribe(services, timing_fallback=timed_assemblyai())
+
+    assert run.transcript.tokens[0].timing_source is Provider.ASSEMBLYAI
+    assert checked == []
+
+
+def test_the_language_model_is_given_only_the_second_opinions_not_the_full_pass():
+    """With AssemblyAI as both backbone and second opinion, only its answers count."""
+    from vox_verbatim.transcription.model import ProviderToken
+
+    full_pass = [
+        ProviderToken(Provider.ASSEMBLYAI, index, text, 0.2 * index, 0.2 * index + 0.15)
+        for index, text in enumerate(["we", "met", "Peter"])
+    ]
+    answer = ProviderToken(Provider.ASSEMBLYAI, 3, "Pieter", 0.38, 0.56)
+    transcript = Transcript(
+        recording_name="a",
+        provider_results={
+            Provider.ASSEMBLYAI: ProviderResult(
+                provider=Provider.ASSEMBLYAI, tokens=[*full_pass, answer]
+            )
+        },
+    )
+    disputed = FinalToken(text="Peter", start=0.4, end=0.55)
+
+    heard = pipeline._escalation_tokens_for([disputed], transcript, answers_from=3)
+
+    assert [word.text for word in heard] == ["Pieter"]
+
+
 def test_the_escalation_settings_and_the_recording_reach_the_second_service(transcribe):
     """The speaker count, the context and the vocabulary are not decoration."""
     second = SecondOpinion(hears="Pieter")

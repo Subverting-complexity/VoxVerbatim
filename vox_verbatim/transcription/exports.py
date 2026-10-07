@@ -403,7 +403,7 @@ def _report_untimed(transcript: Transcript) -> str:
     else:
         lines.append(
             "None of the services that time their words "
-            f"({_service_list(_TIMING_SERVICES)}) answered for this recording."
+            f"({_service_list(_TIMING_SERVICES)}) gave word times for this recording."
         )
         lines.append("")
     lines.append(

@@ -604,6 +604,19 @@ def test_a_failed_forced_alignment_is_named_as_a_failed_source_of_times():
     assert "- **Forced alignment**: it could not measure 1 word." in report
 
 
+def test_an_elevenlabs_answer_without_times_is_not_called_a_failure():
+    transcript = _transcript_with_no_times()
+    transcript.provider_results[Provider.ELEVENLABS] = ProviderResult(
+        provider=Provider.ELEVENLABS,
+        tokens=[ProviderToken(Provider.ELEVENLABS, 0, "we")],
+    )
+
+    report = render_review_report(transcript)
+
+    assert "gave word times for this recording" in report
+    assert "The sources of word times that failed" not in report
+
+
 def test_a_few_words_with_no_time_are_still_listed_one_by_one():
     transcript = _contested_transcript()
     floating = transcript.token_by_id("floating")

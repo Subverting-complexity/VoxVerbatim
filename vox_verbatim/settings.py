@@ -97,6 +97,35 @@ DEFAULT_OPENAI_ADJUDICATION_MODEL = "gpt-6.1-sol"
 #: GPT-6.1 Sol accepts: it takes neither none nor minimal.
 DEFAULT_OPENAI_REASONING_EFFORT = "low"
 
+#: The OpenAI model that edits a finished transcript into the smooth copy,
+#: and how hard it thinks. Free text, for the same reason as the
+#: adjudication model above.
+DEFAULT_SMOOTHING_MODEL = "gpt-6.1-sol"
+DEFAULT_SMOOTHING_REASONING_EFFORT = "low"
+
+#: The style prompt the smooth transcript is made with. A person may edit
+#: it in Settings. It describes only the style: the format the application
+#: depends on is added by the smoothing stage itself and cannot be edited.
+DEFAULT_SMOOTHING_PROMPT = """\
+You are editing the transcript of a recorded conversation into clean text that is easy to read. The transcript is literal. It contains every filler, stutter, repeat and false start.
+
+Do:
+- Remove fillers such as "um", "uh", "er" and "ah", and remove "you know" or "like" when they carry no meaning.
+- Remove stutters, repeated words and false starts. "We, we, we were" becomes "We were". Remove a sentence the speaker started and dropped, unless it tells the reader something.
+- Fix punctuation and capital letters. Join pieces of one sentence that a pause broke apart.
+- Keep the speaker's own words, word order, dialect and way of speaking. Change grammar only where a reader would otherwise stumble.
+- Leave out a turn that is only a short reply such as "Mm-hmm", "Yeah" or "Okay" and adds nothing. Keep it when it answers a question.
+- Keep words in Afrikaans, German or any other language as they were spoken, and put an English translation in square brackets after them, for example: "Ek wil, ek gaan, ek sal, ek kan [I want to, I am going to, I will, I can]".
+- Keep every marker such as [UNCERTAIN: board / place] exactly as it is. Never choose between its alternatives.
+- Keep sounds such as [laughs] where they show the tone.
+
+Do not:
+- Add, guess or explain anything the speaker did not say.
+- Summarise, shorten a story or change the order of what was said.
+- Change names, places, dates, numbers or amounts.
+- Make the speaker sound more formal than they are.
+"""
+
 #: ElevenLabs Scribe v2, the structural backbone: word timings, speaker
 #: labels and log probabilities all come from it.
 DEFAULT_ELEVENLABS_TRANSCRIPTION_MODEL = "scribe_v2"
@@ -360,6 +389,45 @@ class OpenAiAdjudicationSettings:
         )
         settings.parameters = _clean_parameters(data.get("parameters"))
         settings.enabled = _clean_flag(data.get("enabled"), settings.enabled)
+        return settings
+
+
+@dataclass
+class SmoothingSettings:
+    """How the smooth transcript is made from the literal one.
+
+    The smooth transcript is an edited copy that is easy to read: fillers,
+    stutters and false starts removed. It uses the OpenAI API key already
+    entered for adjudication, so it holds no key of its own.
+    """
+
+    run_after_transcription: bool = True
+    """Whether the smooth copy is made as soon as a transcription finishes."""
+
+    model: str = DEFAULT_SMOOTHING_MODEL
+    reasoning_effort: str = DEFAULT_SMOOTHING_REASONING_EFFORT
+    """How hard the model should think, or empty to leave it out of the request."""
+
+    prompt: str = DEFAULT_SMOOTHING_PROMPT
+    """The style prompt. Blank text falls back to the default prompt."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SmoothingSettings":
+        settings = cls()
+        settings.run_after_transcription = _clean_flag(
+            data.get("run_after_transcription"), settings.run_after_transcription
+        )
+        settings.model = _clean_text(data.get("model"), settings.model)
+        # Read through the default, as for adjudication: a missing value
+        # takes the default, and a saved empty one means "do not send it".
+        settings.reasoning_effort = _clean_optional_text(
+            data.get("reasoning_effort", settings.reasoning_effort), settings.reasoning_effort
+        )
+        prompt = data.get("prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            # Kept as typed rather than stripped, because line breaks and
+            # indentation are part of how a person laid the prompt out.
+            settings.prompt = prompt
         return settings
 
 
@@ -775,6 +843,7 @@ class TranscriptionSettings:
     deepgram: DeepgramSettings = field(default_factory=DeepgramSettings)
     processing: ProcessingSettings = field(default_factory=ProcessingSettings)
     cost: CostSettings = field(default_factory=CostSettings)
+    smoothing: SmoothingSettings = field(default_factory=SmoothingSettings)
 
     def for_provenance(self) -> dict[str, Any]:
         """Return these settings with every secret taken out.
@@ -913,6 +982,7 @@ class TranscriptionSettings:
             ("deepgram", DeepgramSettings),
             ("processing", ProcessingSettings),
             ("cost", CostSettings),
+            ("smoothing", SmoothingSettings),
         ):
             section = data.get(name)
             if isinstance(section, dict):

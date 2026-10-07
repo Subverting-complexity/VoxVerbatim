@@ -1106,6 +1106,9 @@ class TranscribeDialog(QDialog):
                 return False
 
         self._fill_learned_names()
+        # The removed name must no longer count towards the cost estimate.
+        self._folder_terms = self._read_folder_terms()[0]
+        self._show_cost()
         self._learned_list.setCurrentRow(max(0, min(row, self._learned_list.count() - 1)))
         self._update_remove_name_button()
         self._learned_list.setFocus(Qt.FocusReason.OtherFocusReason)

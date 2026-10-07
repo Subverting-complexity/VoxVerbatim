@@ -167,6 +167,8 @@ def test_remove_takes_the_name_out_of_the_file_and_the_list(
             ("Bosch removed. It will be learned again if you correct it in a review.", False)
         ]
         assert "Bosch removed" in dialog._learned_status.text()
+        # The removed name no longer counts towards the cost estimate.
+        assert [found.text for found in dialog._folder_terms] == ["Vermeulen"]
     finally:
         dialog.close()
 

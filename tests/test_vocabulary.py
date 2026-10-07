@@ -682,3 +682,19 @@ def test_a_profile_term_that_is_also_a_folder_name_is_sent_once_in_the_folder_pl
     assert [found.text for found in ordered] == ["Bosch", "Acme"]
     assert ordered[0].common_misrecognitions == ("Bosh", "Bush")
     assert ordered[0].confirmation_count == 4
+
+
+def test_a_profile_term_is_not_folded_into_a_folder_name_of_another_language():
+    # A profile term with no language belongs to every language. Folding it
+    # into an Afrikaans folder name would make it Afrikaans, and a run with
+    # Afrikaans off would then drop a term it sends today.
+    ordered = folder_terms_first(
+        [term("Bosch", 1, language=Language.AFRIKAANS)],
+        [term("Bosch", 2)],
+    )
+
+    assert [(found.text, found.language) for found in ordered] == [
+        ("Bosch", Language.AFRIKAANS),
+        ("Bosch", None),
+    ]
+    assert ordered[1].confirmation_count == 2

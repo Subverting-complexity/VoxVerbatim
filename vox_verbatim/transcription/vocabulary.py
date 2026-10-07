@@ -740,11 +740,19 @@ def folder_terms_first(
     typed into a list in case it came up. A profile term that is the same
     word as a folder name is folded into the folder's entry rather than
     sent twice, which would spend one of the few places a service offers.
+
+    Two terms are folded together only when their languages agree. A profile
+    term with no language belongs to every language, and folding it into an
+    Afrikaans folder name would give it that name's language, so a run with
+    Afrikaans off would drop a term it sends today.
     """
     merged: dict[str, tuple[int, int, VocabularyTerm]] = {}
     for position, term in enumerate([*folder_terms, *profile_terms]):
         key = _key_for(term.text, merged)
         existing = merged.get(key)
+        if existing is not None and existing[2].language != term.language:
+            key = f"{key}|{term.language}"
+            existing = merged.get(key)
         if existing is None:
             merged[key] = (0, position, term)
         else:

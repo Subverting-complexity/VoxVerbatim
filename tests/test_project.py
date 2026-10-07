@@ -99,6 +99,7 @@ def test_a_saved_project_comes_back_unchanged(tmp_path):
             show_other_uncertainties=False,
             show_reviewed=True,
             play_automatically=False,
+            show_details=True,
             auto_play_delay_seconds=5,
         ),
         groups=[
@@ -267,6 +268,7 @@ def test_every_field_of_the_wrong_type_falls_back_to_its_default(tmp_path):
                 "show_other_uncertainties": "yes",
                 "show_reviewed": 1,
                 "play_automatically": [],
+                "show_details": "yes",
                 "auto_play_delay_seconds": "two",
             },
             "groups": "not a list",

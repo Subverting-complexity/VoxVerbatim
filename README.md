@@ -363,6 +363,15 @@ the whole folder rather than one recording, because the same name is
 usually got wrong in the same way in every recording of the same client,
 and deciding it once is the whole point.
 
+The window opens in a simple form. It shows the words that need you, each
+with the time it was said and why it is in the list, then the choices for
+the word you are on, then playback. There is one button for each different
+word the services heard: the first keeps the word as it was detected, and
+the others replace it with what another service heard. A text box takes a
+word you type yourself, and `Enter` applies it. **View** then **Show
+Details**, or `Ctrl+D`, brings back everything described below. The folder
+remembers which form you last used.
+
 It holds two lists. The first holds groups of words that need you, and a
 group gathers the occurrences of what looks like one intended word from
 across every recording in the folder: `Bosch`, `Bosh` and `Bosche` arrive
@@ -378,11 +387,12 @@ pulls that one word out and leaves the rest of the group intact; separate
 words can be gathered into a group of your own the same way. `Correct as
 Detected` says the word was right all along.
 
-For each occurrence you can still hear it with several seconds either side,
-see what every service heard there, and correct the text, the speaker or the
-timing separately, exactly as before. `F3` and `Shift+F3` move between
-occurrences, `Ctrl+F3` between groups, `F5` plays again, and `F4` confirms an
-item as correct and moves on.
+For each occurrence you can hear the word alone, or with some context either
+side, see what every service heard there, and correct the text, the speaker or
+the timing separately, exactly as before. `F3` and `Shift+F3` move between
+occurrences, `Ctrl+F3` between groups, `F5` plays the word alone, `Shift+F5`
+plays it with 1.5 seconds either side, `Ctrl+F5` with 12 seconds, and `F4`
+confirms an item as correct and moves on.
 
 Nothing here has a Save button. Every change is written as you make it, and
 a folder reopens on the group and the occurrence you were last on.

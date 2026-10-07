@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAccessible, QKeySequence
 from PySide6.QtTest import QTest
@@ -5151,6 +5153,31 @@ def test_the_apply_menu_items_use_the_replacement_box_with_the_details_shown(qap
 
         assert "Bausch" in folder.texts(RECORDING)
         assert "Ignored" not in folder.texts(RECORDING)
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("show_details", [False, True])
+def test_the_occurrence_summary_is_spoken_from_a_visible_list(
+    qapp, tmp_path, monkeypatch, show_details
+):
+    """A screen reader may not read an announcement raised from a hidden widget."""
+    speakers: list[object] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: speakers.append(widget),
+    )
+    window = open_window(tmp_path, two_file_folder(), process=True, show_details=show_details)
+    try:
+        window.show()
+        select_word(window, "Bosch")
+        speakers.clear()
+
+        window.go_to_next_item()
+
+        expected = window._occurrences if show_details else window._groups
+        assert speakers and all(widget is expected for widget in speakers)
     finally:
         window.close()
 

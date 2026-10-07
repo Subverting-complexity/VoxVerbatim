@@ -528,6 +528,108 @@ def test_the_report_repeats_the_warnings_from_the_run():
     assert "- Microsoft MAI did not answer, so this run had one fewer opinion." in report
 
 
+def _untimed(text: str, *reasons: ReviewReason) -> FinalToken:
+    """A word no service placed in the recording, flagged as the pipeline flags it."""
+    return FinalToken(
+        text=text,
+        text_source=Provider.OPENAI,
+        text_confidence=Confidence.REVIEW_SUGGESTED,
+        timing_status=TimingStatus.UNALIGNED,
+        review_status=ReviewStatus.PENDING,
+        review_reasons=[ReviewReason.UNALIGNED_WORD, *reasons],
+    )
+
+
+def _transcript_with_no_times() -> Transcript:
+    """ElevenLabs failed, so every word came from a service that does not time them."""
+    return Transcript(
+        recording_name="interview.m4a",
+        tokens=[
+            _untimed("we"),
+            _untimed("met"),
+            _untimed("Pieter", ReviewReason.PROPER_NAME_DISAGREEMENT),
+            _untimed("today"),
+        ],
+        provider_results={
+            Provider.ELEVENLABS: ProviderResult(
+                provider=Provider.ELEVENLABS, error="The API key was refused (401)."
+            ),
+            Provider.OPENAI: ProviderResult(
+                provider=Provider.OPENAI,
+                tokens=[ProviderToken(Provider.OPENAI, 0, "we")],
+            ),
+        },
+        warnings=["ElevenLabs Scribe did not answer."],
+    )
+
+
+def test_a_transcript_with_no_times_says_so_once_before_the_list():
+    report = render_review_report(_transcript_with_no_times())
+
+    statement = report.index("## No word could be placed in the recording")
+    assert statement < report.index("## What still needs you")
+    assert statement < report.index("## Things worth knowing")
+    assert report.count("## No word could be placed in the recording") == 1
+    assert "None of the 4 words in this transcript can be played back" in report
+    assert "- **ElevenLabs Scribe**: The API key was refused (401)." in report
+    assert "transcribe the recording again" in report
+
+
+def test_a_transcript_with_no_times_lists_only_the_words_with_another_reason():
+    report = render_review_report(_transcript_with_no_times())
+    queue = report[report.index("## What still needs you"):]
+
+    assert "One place needs a decision" in queue
+    assert "| Pieter |" in queue
+    assert "| met |" not in queue
+    assert "| today |" not in queue
+
+
+def test_a_transcript_whose_only_flags_are_missing_times_says_nothing_else_needs_you():
+    transcript = _transcript_with_no_times()
+    transcript.tokens = [_untimed("we"), _untimed("met")]
+
+    report = render_review_report(transcript)
+
+    assert "Nothing else." in report
+    assert "| we |" not in report
+
+
+def test_a_failed_forced_alignment_is_named_as_a_failed_source_of_times():
+    transcript = _transcript_with_no_times()
+    transcript.tokens.append(_untimed("again", ReviewReason.FORCED_ALIGNMENT_FAILED))
+
+    report = render_review_report(transcript)
+
+    assert "- **Forced alignment**: it could not measure 1 word." in report
+
+
+def test_an_elevenlabs_answer_without_times_is_not_called_a_failure():
+    transcript = _transcript_with_no_times()
+    transcript.provider_results[Provider.ELEVENLABS] = ProviderResult(
+        provider=Provider.ELEVENLABS,
+        tokens=[ProviderToken(Provider.ELEVENLABS, 0, "we")],
+    )
+
+    report = render_review_report(transcript)
+
+    assert "gave word times for this recording" in report
+    assert "The sources of word times that failed" not in report
+
+
+def test_a_few_words_with_no_time_are_still_listed_one_by_one():
+    transcript = _contested_transcript()
+    floating = transcript.token_by_id("floating")
+    floating.source_audio_span = None
+    assert floating.audible_span is None
+
+    report = render_review_report(transcript)
+
+    assert "## No word could be placed in the recording" not in report
+    assert ReviewReason.UNALIGNED_WORD.display_name in report
+    assert "3 places need a decision" in report
+
+
 def test_a_vertical_bar_in_the_transcript_does_not_tear_the_table_apart():
     transcript = Transcript(
         recording_name="talk.m4a",

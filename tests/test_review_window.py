@@ -19,6 +19,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAccessible, QKeySequence
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -60,6 +61,8 @@ from vox_verbatim.ui.review_lists import (
     GROUP_COLUMN_CONFIDENCE,
     GROUP_COLUMN_COUNT,
     GROUP_COLUMN_REVIEWED,
+    GROUP_COLUMN_TITLES,
+    GROUP_COLUMN_WHEN,
     GROUP_COLUMN_WHY,
     GROUP_COLUMN_WORD,
     NOT_REVIEWED,
@@ -273,15 +276,26 @@ def open_window(
     player: FakePlayer | None = None,
     store: ProjectStore | None = None,
     process: bool = False,
+    show_details: bool = False,
 ) -> ReviewWindow:
-    """Open the window on a folder, optionally having processed it first."""
+    """Open the window on a folder, optionally having processed it first.
+
+    ``show_details`` opens it with the details on, as a folder whose person
+    turned them on last time would. Without it the window opens simple, as
+    every new folder does.
+    """
     folder = folder or Folder({RECORDING: make_transcript()})
+    store = store or ProjectStore(tmp_path)
+    if show_details:
+        state = store.load()
+        state.settings.show_details = True
+        store.save(state)
     window = ReviewWindow(
         tmp_path,
         folder.names,
         folder.load,
         {name: Path(f"C:/Audio/{name}") for name in folder.names},
-        store or ProjectStore(tmp_path),
+        store,
         player or FakePlayer(),
         folder.save,
     )
@@ -691,6 +705,7 @@ def test_every_column_of_both_lists_is_a_word_or_a_number(qapp, tmp_path):
         select_word(window, "Bosch")
         groups = window._group_model
         assert groups.data(groups.index(0, GROUP_COLUMN_WORD)) == "Bosch"
+        assert groups.data(groups.index(0, GROUP_COLUMN_WHEN)) == "0:10 and 2 more"
         assert groups.data(groups.index(0, GROUP_COLUMN_COUNT)) == "3"
         assert groups.data(groups.index(0, GROUP_COLUMN_CONFIDENCE)) == "42% to 45%"
         assert groups.data(groups.index(0, GROUP_COLUMN_WHY)) == "Low confidence"
@@ -704,6 +719,10 @@ def test_every_column_of_both_lists_is_a_word_or_a_number(qapp, tmp_path):
         assert groups.data(
             groups.index(0, GROUP_COLUMN_CONFIDENCE), Qt.ItemDataRole.AccessibleTextRole
         ) == "42 percent to 45 percent"
+        # The time is said in words, and so is how many more there are.
+        assert groups.data(
+            groups.index(0, GROUP_COLUMN_WHEN), Qt.ItemDataRole.AccessibleTextRole
+        ) == "10 seconds, and 2 more"
 
         items = window._occurrence_model
         assert items.data(items.index(0, OCCURRENCE_COLUMN_REPLACEMENT)) == "None set"
@@ -1136,9 +1155,15 @@ def make_candidate_transcript() -> Transcript:
     return transcript
 
 
-def candidate_window(tmp_path, player: FakePlayer | None = None) -> ReviewWindow:
+def candidate_window(
+    tmp_path, player: FakePlayer | None = None, show_details: bool = False
+) -> ReviewWindow:
     return open_window(
-        tmp_path, Folder({RECORDING: make_candidate_transcript()}), player, process=True
+        tmp_path,
+        Folder({RECORDING: make_candidate_transcript()}),
+        player,
+        process=True,
+        show_details=show_details,
     )
 
 
@@ -3053,7 +3078,7 @@ def test_each_field_is_reached_by_its_own_label(qapp, tmp_path):
 
 def test_the_panel_key_lands_on_a_control_rather_than_a_container(qapp, tmp_path):
     """F6 must not strand the focus on a container that answers no keys."""
-    window = candidate_window(tmp_path)
+    window = candidate_window(tmp_path, show_details=True)
     try:
         landed = []
         for _ in range(7):
@@ -4767,5 +4792,301 @@ def test_a_correction_after_accepting_the_timing_is_counted(qapp, tmp_path):
 
         counts = store.load().counts_for(Provider.ELEVENLABS)
         assert (counts.chosen, counts.corrected) == (1, 1)
+    finally:
+        window.close()
+
+
+# -- The simple window, and the switch that shows the details ------------
+
+
+def detail_panels(window: ReviewWindow) -> list:
+    return [
+        window._occurrences_holder,
+        window._settings_group,
+        window._details_group,
+        window._corrections_group,
+        window._notes_group,
+    ]
+
+
+def shown_choices(window: ReviewWindow) -> list[str]:
+    return [
+        button.accessibleName()
+        for button in window._choice_buttons
+        if button.isVisibleTo(window)
+    ]
+
+
+def capture_announcements(monkeypatch) -> list[str]:
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    return said
+
+
+def test_a_new_window_opens_simple(qapp, tmp_path):
+    """The words, the choices for one of them, and playback. Nothing else."""
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        assert window.state.settings.show_details is False
+        for panel in detail_panels(window):
+            assert not panel.isVisibleTo(window)
+        for panel in (window._groups, window._choices_group, window._playback_group):
+            assert panel.isVisibleTo(window)
+        assert window._show_details_action.isCheckable()
+        assert not window._show_details_action.isChecked()
+        assert window._show_details_action.shortcut() == QKeySequence("Ctrl+D")
+    finally:
+        window.close()
+
+
+def test_the_simple_word_list_shows_the_word_its_time_and_why(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        def visible_titles() -> list[str]:
+            return [
+                GROUP_COLUMN_TITLES[column]
+                for column in range(window._group_model.columnCount())
+                if not window._groups.isColumnHidden(column)
+            ]
+
+        assert visible_titles() == ["Word", "Time", "Why it needs review"]
+
+        window.set_show_details(True)
+
+        assert visible_titles() == list(GROUP_COLUMN_TITLES)
+    finally:
+        window.close()
+
+
+def test_a_word_said_once_gives_its_time_alone(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        groups = window._group_model
+        position = groups.row_for_key(group_row(window, "15,000").key)
+
+        assert groups.data(groups.index(position, GROUP_COLUMN_WHEN)) == "1:10"
+        assert groups.data(
+            groups.index(position, GROUP_COLUMN_WHEN), Qt.ItemDataRole.AccessibleTextRole
+        ) == "1 minute 10 seconds"
+    finally:
+        window.close()
+
+
+def test_there_is_one_choice_for_each_different_word_the_services_heard(qapp, tmp_path):
+    """Two services heard 50,000, so that is one button naming both."""
+    window = candidate_window(tmp_path)
+    try:
+        assert shown_choices(window) == [
+            f"Keep 50,000, said by {Provider.OPENAI.display_name} and "
+            f"{Provider.MICROSOFT.display_name}",
+            f"Use 15,000, said by {Provider.ELEVENLABS.display_name}",
+        ]
+        # The words are on the buttons as well, not only in their names.
+        assert window._choice_buttons[1].text().startswith("Use 15,000")
+        for button in window._choice_buttons:
+            assert "&" not in button.text().replace("&&", "")
+    finally:
+        window.close()
+
+
+def test_a_word_is_kept_as_detected_without_opening_the_details(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        group = window.state.group(window.current_row().group_id)
+        assert shown_choices(window)[0] == "Keep Bosch"
+
+        window._choice_buttons[0].click()
+
+        assert group.reviewed is True
+        assert group.correct_as_detected is True
+    finally:
+        window.close()
+
+
+def test_another_services_word_replaces_it_without_opening_the_details(qapp, tmp_path):
+    folder = Folder({RECORDING: make_candidate_transcript()})
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        window._choice_buttons[1].click()
+
+        assert folder.texts(RECORDING) == ["15,000"]
+    finally:
+        window.close()
+
+
+def test_a_typed_word_is_applied_with_enter(qapp, tmp_path):
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        window._typed_edit.setText("Bausch")
+
+        QTest.keyClick(window._typed_edit, Qt.Key.Key_Return)
+
+        assert "Bausch" in folder.texts(RECORDING)
+        assert "Bausch" in folder.texts(OTHER_RECORDING)
+        assert window._typed_edit.text() == ""
+    finally:
+        window.close()
+
+
+def test_an_empty_typed_word_is_refused_out_loud(qapp, tmp_path, monkeypatch):
+    said = capture_announcements(monkeypatch)
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "Bosch")
+        said.clear()
+        window._typed_edit.setText("   ")
+
+        assert window.apply_typed_word() is False
+
+        assert said == ["Type the word that was said first. The box is empty."]
+        assert folder.saved == []
+    finally:
+        window.close()
+
+
+def test_the_switch_shows_and_hides_the_details_and_says_so(qapp, tmp_path, monkeypatch):
+    said = capture_announcements(monkeypatch)
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        window._show_details_action.trigger()
+
+        assert window._show_details_action.isChecked()
+        for panel in detail_panels(window):
+            assert panel.isVisibleTo(window)
+        # The Corrections panel does the job of the choices when it is on show.
+        assert not window._choices_group.isVisibleTo(window)
+        assert said[-1] == "The details are now shown."
+
+        window._show_details_action.trigger()
+
+        assert not window._show_details_action.isChecked()
+        for panel in detail_panels(window):
+            assert not panel.isVisibleTo(window)
+        assert said[-1] == "The details are now hidden."
+    finally:
+        window.close()
+
+
+def test_the_switch_is_remembered_with_the_folder(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        window.set_show_details(True)
+    finally:
+        window.close()
+
+    assert ProjectStore(tmp_path).load().settings.show_details is True
+    window = open_window(tmp_path, two_file_folder())
+    try:
+        assert window._show_details_action.isChecked()
+        assert window._occurrences_holder.isVisibleTo(window)
+    finally:
+        window.close()
+
+
+def test_hiding_the_details_takes_the_focus_somewhere_visible(qapp, tmp_path, monkeypatch):
+    said = capture_announcements(monkeypatch)
+    window = open_window(tmp_path, two_file_folder(), process=True, show_details=True)
+    try:
+        window.focus_occurrence_list()
+        assert window.focusWidget() is window._occurrences
+
+        window.set_show_details(False)
+
+        assert window.focusWidget() is window._groups
+        assert said[-1] == (
+            "The details are now hidden. The focus has moved to the word groups."
+        )
+    finally:
+        window.close()
+
+
+def test_showing_the_details_from_a_choice_moves_to_the_replacement(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        window._choice_buttons[0].setFocus()
+
+        window.set_show_details(True)
+
+        assert window.focusWidget() is window._replacement_edit
+    finally:
+        window.close()
+
+
+def test_tab_moves_through_the_simple_window_in_reading_order(qapp, tmp_path):
+    window = candidate_window(tmp_path)
+    try:
+        def reachable(widget) -> bool:
+            return bool(
+                widget.isVisibleTo(window)
+                and widget.isEnabled()
+                and widget.focusPolicy() & Qt.FocusPolicy.TabFocus
+            )
+
+        chain = [window._groups]
+        widget = window._groups.nextInFocusChain()
+        while widget is not window._groups:
+            if reachable(widget):
+                chain.append(widget)
+            widget = widget.nextInFocusChain()
+
+        expected = [
+            window._groups,
+            window._choice_buttons[0],
+            window._choice_buttons[1],
+            window._typed_edit,
+            window._apply_typed_button,
+            window._span_edit,
+            window._play_button,
+            window._play_short_button,
+            window._play_wide_button,
+        ]
+        assert [widget for widget in chain if widget in expected] == expected
+        # Only the word list, the choices and playback are on the way.
+        assert set(chain) <= set(expected)
+    finally:
+        window.close()
+
+
+def test_the_panel_key_skips_the_hidden_panels(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        window.focus_word_list()
+        names = []
+        for _ in range(3):
+            window.focus_next_panel()
+            names.append(window._status_label.text())
+
+        assert names == ["Decide this word", "Playback", "Word Groups"]
+    finally:
+        window.close()
+
+
+def test_f2_in_the_simple_window_goes_to_the_typed_word(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        window.focus_replacement()
+
+        assert window.focusWidget() is window._typed_edit
+    finally:
+        window.close()
+
+
+def test_setting_a_threshold_from_the_menu_shows_the_details_first(qapp, tmp_path):
+    """The menu entry must never send the focus to a control nobody can see."""
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        window._minimum_action.trigger()
+
+        assert window.state.settings.show_details is True
+        assert window._settings_group.isVisibleTo(window)
+        assert window._holds_focus(window._minimum_spin)
     finally:
         window.close()

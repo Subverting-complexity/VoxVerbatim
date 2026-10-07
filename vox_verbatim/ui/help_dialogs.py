@@ -74,6 +74,14 @@ In the review window
   moment that word was said, in every recording in the folder. Deciding a
   word once settles all of its occurrences.
 
+  The window opens in a simple form: the words, the choices for the word
+  you are on, and playback. Each choice button keeps the word or uses what
+  one service heard. Type a different word in the box and press Enter to
+  use it instead.
+
+  Ctrl+D              Show or hide the details: the occurrences, the
+                      corrections, the review settings and the notes.
+
   Ctrl+F3             Go to the next word.
   Ctrl+Shift+F3       Go to the previous word.
   F3 and Shift+F3     Go to the next and previous occurrence of that word.

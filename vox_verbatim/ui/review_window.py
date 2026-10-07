@@ -213,6 +213,11 @@ SHORT_CONTEXT_SECONDS = 1.5
 #: was being talked about.
 WIDE_CONTEXT_SECONDS = 12.0
 
+#: How many choice buttons the simple window keeps for one word. There are
+#: five services, so this is more than one word ever needs. A word with more
+#: different answers than this still has every one of them in the details.
+CHOICE_BUTTON_COUNT = 8
+
 #: Said when the wait is set to nothing at all, which is a real choice and not
 #: a mistake: somebody working by eye, with no screen reader running, has
 #: nothing for the clip to talk over and wants the audio the moment they
@@ -332,6 +337,13 @@ def _counted(count: int, noun: str) -> str:
     on before changing files they have not opened.
     """
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _listed(names: list[str]) -> str:
+    """"A", "A and B", "A, B and C"."""
+    if len(names) < 2:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _seconds_phrase(seconds: float) -> str:
@@ -1304,6 +1316,9 @@ class ReviewWindow(QMainWindow):
         # Cleared whenever the word changes, because arriving at a word is when
         # the whole sentence is wanted.
         self._previous_occurrence: Occurrence | None = None
+        # The occurrence the choice buttons were last filled for, so the typed
+        # word is kept while the same occurrence is shown again.
+        self._choices_for: str | None = None
 
         # What each of the three numbers was when the person last finished with
         # it. Qt raises editingFinished for a box that was merely visited as
@@ -1365,6 +1380,7 @@ class ReviewWindow(QMainWindow):
         self._build_ui()
         self._build_menus()
         self._connect_signals()
+        self._apply_details_visibility()
         self.refresh(
             word_key=self._remembered_word_key(),
             occurrence_id=self._state.last_occurrence_id,
@@ -1486,6 +1502,8 @@ class ReviewWindow(QMainWindow):
         self._occurrences_label.setBuddy(self._occurrences)
         layout.addWidget(self._occurrences_label)
         layout.addWidget(self._occurrences, 1)
+        # Kept, so the details switch can hide the list with its label.
+        self._occurrences_holder = holder
         return holder
 
     def _build_settings(self, parent: QWidget) -> QWidget:
@@ -1747,7 +1765,12 @@ class ReviewWindow(QMainWindow):
         inner = QVBoxLayout(contents)
         inner.setContentsMargins(0, 0, 0, 0)
         inner.addWidget(self._build_details(), 3)
-        for group in (self._build_playback(), self._build_corrections(), self._build_notes()):
+        for group in (
+            self._build_choices(),
+            self._build_playback(),
+            self._build_corrections(),
+            self._build_notes(),
+        ):
             # Minimum rather than Fixed: each of these takes the height it asks
             # for and no more, because the stretch below soaks up what is left,
             # but it is now allowed to grow when what is inside it grows. Fixed
@@ -1902,6 +1925,68 @@ class ReviewWindow(QMainWindow):
         rest_form.addRow(decision_label, self._decision_text)
         layout.addWidget(rest)
         return self._details_group
+
+    def _build_choices(self) -> QWidget:
+        """The simple window's way to decide a word, without the details.
+
+        One button for each different word the services heard, and a box for
+        a word none of them heard. The buttons are a fixed set, built once
+        and filled in for each word, rather than made new for every word.
+        Deleting a button that has the focus throws the focus away, and the
+        person is then nowhere with nothing said.
+
+        No button here has an Alt letter. The words on them change with every
+        word in the list, so a letter could not be promised, and a letter
+        that came and went would collide with the menus.
+
+        Every choice goes through the same Replacement box the details use,
+        so there is one place that says what the word will become.
+        """
+        self._choices_group = QGroupBox("Decide this word", self)
+        layout = QVBoxLayout(self._choices_group)
+
+        # (text, keep) for each button on show, in the order they are shown.
+        self._choices: list[tuple[str, bool]] = []
+        self._choice_buttons: list[QPushButton] = []
+        for index in range(CHOICE_BUTTON_COUNT):
+            button = QPushButton(self._choices_group)
+            # Named even while hidden and unused, so no control in the window
+            # is ever without a name.
+            describe(button, "Unused choice")
+            button.setVisible(False)
+            button.clicked.connect(lambda _checked=False, i=index: self.use_choice(i))
+            self._note_keys[button] = REPLACEMENT
+            self._choice_buttons.append(button)
+            layout.addWidget(button)
+
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        typed_label = QLabel("Different word", self._choices_group)
+        self._typed_edit = QLineEdit(self._choices_group)
+        describe(
+            self._typed_edit,
+            "Different word",
+            "Type what was said when no button above has it, then press Enter to "
+            "change every occurrence of this word. F2 comes here.",
+        )
+        self._note_keys[self._typed_edit] = REPLACEMENT
+        typed_label.setBuddy(self._typed_edit)
+        form.addRow(typed_label, self._typed_edit)
+        layout.addLayout(form)
+
+        self._apply_typed_button = QPushButton("Use the typed word", self._choices_group)
+        describe(
+            self._apply_typed_button,
+            "Use the typed word",
+            "Changes every occurrence of this word to the word in the box. The speaker "
+            "and the timing are left alone.",
+        )
+        self._note_keys[self._apply_typed_button] = REPLACEMENT
+        row = QHBoxLayout()
+        row.addWidget(self._apply_typed_button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        return self._choices_group
 
     def _add_field(
         self,
@@ -2323,6 +2408,15 @@ class ReviewWindow(QMainWindow):
             lambda: self.adjust_divider(-1),
         )
         view_menu.addSeparator()
+        # T, because D belongs to Widen the Details. Ctrl+D is free everywhere
+        # else in the window.
+        self._show_details_action = self._add_toggle(
+            view_menu,
+            "Show De&tails",
+            self._state.settings.show_details,
+            self.set_show_details,
+        )
+        self._show_details_action.setShortcut(QKeySequence("Ctrl+D"))
         self._show_reviewed_action = self._add_toggle(
             view_menu,
             "Show &Reviewed Words",
@@ -2398,6 +2492,8 @@ class ReviewWindow(QMainWindow):
         self._play_wide_button.clicked.connect(lambda: self.play_span(WIDE_CONTEXT_SECONDS))
         self._apply_word_button.clicked.connect(self.apply_replacement_to_word)
         self._replacement_edit.returnPressed.connect(self.apply_replacement_to_word)
+        self._apply_typed_button.clicked.connect(self.apply_typed_word)
+        self._typed_edit.returnPressed.connect(self.apply_typed_word)
         self._apply_occurrence_button.clicked.connect(self.apply_replacement_to_occurrence)
         self._correct_as_detected_button.clicked.connect(self.correct_word_as_detected)
         self._isolate_button.clicked.connect(self.isolate_occurrence)
@@ -2542,15 +2638,19 @@ class ReviewWindow(QMainWindow):
         answers no keys, while a group box passes it to a child that is not
         always the first one.
         """
-        return [
+        # Only the panels on show. A hidden panel cannot take the focus, so
+        # F6 would otherwise say it had moved somewhere it had not.
+        panels = [
             ("Word Groups", self._groups, self._focus_groups),
             ("Occurrences", self._occurrences, self._focus_occurrences),
             ("Review settings", self._settings_group, self._focus_settings),
             ("Item details", self._details_group, self._focus_details),
+            ("Decide this word", self._choices_group, self._focus_choices),
             ("Playback", self._playback_group, self._focus_playback),
             ("Corrections", self._corrections_group, self._focus_corrections),
             ("About this control", self._notes_group, self._focus_notes),
         ]
+        return [panel for panel in panels if panel[1].isVisibleTo(self)]
 
     def focus_next_panel(self) -> None:
         """Move the focus to the panel after this one."""
@@ -2629,7 +2729,8 @@ class ReviewWindow(QMainWindow):
         self._focus_groups()
 
     def focus_occurrence_list(self) -> None:
-        """Put the focus on the second list, Occurrences."""
+        """Put the focus on the second list, Occurrences, showing it first."""
+        self.set_show_details(True)
         self._focus_occurrences()
 
     def _focus_groups(self) -> None:
@@ -2643,6 +2744,11 @@ class ReviewWindow(QMainWindow):
 
     def _focus_details(self) -> None:
         self._detected_edit.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _focus_choices(self) -> None:
+        self._focus_first_enabled(
+            [*self._choice_buttons, self._typed_edit, self._apply_typed_button]
+        )
 
     def _focus_playback(self) -> None:
         self._focus_first_enabled(
@@ -2665,27 +2771,45 @@ class ReviewWindow(QMainWindow):
         otherwise leave the focus wherever it was and say it had moved.
         """
         for widget in widgets:
-            if widget.isEnabled():
+            # Visible as well as enabled: a hidden control takes no focus
+            # either, and the choice buttons not in use are hidden.
+            if widget.isEnabled() and widget.isVisibleTo(self):
                 widget.setFocus(Qt.FocusReason.TabFocusReason)
                 return
         self._focus_groups()
 
     def focus_replacement(self) -> None:
-        """Put the focus in the replacement box, with the word ready to replace."""
-        if not self._replacement_edit.isEnabled():
+        """Put the focus in the replacement box, with the word ready to replace.
+
+        In the simple window that is the box for a different word, which is
+        the one on show and does the same job.
+        """
+        edit = (
+            self._replacement_edit
+            if self._state.settings.show_details
+            else self._typed_edit
+        )
+        if not edit.isEnabled():
             return
-        self._replacement_edit.setFocus(Qt.FocusReason.OtherFocusReason)
-        self._replacement_edit.selectAll()
+        edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        edit.selectAll()
+
+    # The three numbers live in the review settings, which the simple window
+    # hides. Each of these shows the details first, so the menu entry never
+    # sends the focus to a control nobody can reach.
 
     def focus_minimum_confidence(self) -> None:
+        self.set_show_details(True)
         self._minimum_spin.setFocus(Qt.FocusReason.OtherFocusReason)
         self._minimum_spin.selectAll()
 
     def focus_grouping_tolerance(self) -> None:
+        self.set_show_details(True)
         self._tolerance_spin.setFocus(Qt.FocusReason.OtherFocusReason)
         self._tolerance_spin.selectAll()
 
     def focus_auto_play_delay(self) -> None:
+        self.set_show_details(True)
         self._delay_spin.setFocus(Qt.FocusReason.OtherFocusReason)
         self._delay_spin.selectAll()
 
@@ -3301,6 +3425,59 @@ class ReviewWindow(QMainWindow):
             else "Occurrences no longer play by themselves. F5 plays the one you are on."
         )
 
+    def set_show_details(self, shown: bool) -> None:
+        """Show or hide the details, and remember which for this folder.
+
+        The details are the occurrence list, the item details, the
+        corrections, the review settings and the notes. Without them the
+        window is the word list, the choices for the selected word, and
+        playback, which is all most words need.
+        """
+        if self._setting_toggles or shown == self._state.settings.show_details:
+            return
+        self._state.settings.show_details = shown
+        self._setting_toggles = True
+        try:
+            self._show_details_action.setChecked(shown)
+        finally:
+            self._setting_toggles = False
+        self._apply_details_visibility()
+        self._save_and_say(
+            f"The details are now {'shown' if shown else 'hidden'}.{self._take_focus_note()}"
+        )
+
+    def _apply_details_visibility(self) -> None:
+        """Show or hide the detail panels to match the setting.
+
+        The focus is moved first when it is in a panel about to be hidden. A
+        hidden control can keep the focus in Qt's eyes while nobody can see
+        or reach it, so the person would be typing into nothing. It goes to
+        the word list, and the sentence about the switch says so.
+
+        The choices are shown only when the details are not. With the details
+        on, the Corrections panel does the same job and more, and two ways of
+        doing one thing side by side is one too many.
+        """
+        shown = self._state.settings.show_details
+        details = [
+            self._occurrences_holder,
+            self._settings_group,
+            self._details_group,
+            self._corrections_group,
+            self._notes_group,
+        ]
+        if not shown and any(self._holds_focus(panel) for panel in details):
+            self._focus_groups()
+            self._focus_caught = True
+        leaving_choices = shown and self._holds_focus(self._choices_group)
+        for panel in details:
+            panel.setVisible(shown)
+        self._groups.set_simple(not shown)
+        if leaving_choices:
+            # The Corrections panel is on show by now, and does the same job.
+            self._focus_corrections()
+        self._choices_group.setVisible(not shown)
+
     def _match_toggle(self, box: QCheckBox, action: QAction, value: bool) -> None:
         """Keep a check box and its menu entry saying the same thing.
 
@@ -3634,6 +3811,7 @@ class ReviewWindow(QMainWindow):
             )
         else:
             self._set_value(self._candidate_text, "")
+        self._fill_choices(occurrence, self._candidates_model.rows())
 
         if occurrence is None:
             for edit in (
@@ -3729,6 +3907,95 @@ class ReviewWindow(QMainWindow):
         self._speaker_box.setCurrentText(self._speaker_box_text(transcript, token))
         self._set_item_controls_enabled(True)
 
+    def _fill_choices(self, occurrence: Occurrence | None, rows: list[CandidateRow]) -> None:
+        """Put one button on show for each different word the services heard.
+
+        The first keeps the word as it was detected, and settles it. Each of
+        the others replaces it with what another service heard. A word heard
+        by several services is one button, which names all of them.
+
+        The typed word is cleared when the occurrence changes, so a word typed
+        for one occurrence is never applied to the next by mistake.
+        """
+        if occurrence is None or occurrence.id != self._choices_for:
+            self._typed_edit.clear()
+        self._choices_for = occurrence.id if occurrence is not None else None
+
+        heard: dict[str, list[str]] = {}
+        if occurrence is not None and occurrence.detected_text:
+            heard[occurrence.detected_text] = []
+        for row in rows:
+            if not row.text:
+                continue
+            services = heard.setdefault(row.text, [])
+            # Only real services are named. "Said by the application's
+            # choice" names nobody, and the word is offered all the same.
+            if row.service in (THE_APPLICATIONS_CHOICE, NOT_ATTRIBUTED):
+                continue
+            if row.service not in services:
+                services.append(row.service)
+        detected = occurrence.detected_text if occurrence is not None else ""
+        self._choices = [(text, text == detected) for text in heard][:CHOICE_BUTTON_COUNT]
+
+        # A button about to be hidden cannot keep the focus. It goes to the
+        # first choice, which is still in the same panel, or to the word list
+        # when there are no choices at all.
+        focus_lost = any(
+            self._holds_focus(button)
+            for button in self._choice_buttons[len(self._choices):]
+        )
+        for index, button in enumerate(self._choice_buttons):
+            if index >= len(self._choices):
+                button.setVisible(False)
+                continue
+            text, keep = self._choices[index]
+            services = heard[text]
+            said_by = f", said by {_listed(services)}" if services else ""
+            name = f"{'Keep' if keep else 'Use'} {text}{said_by}"
+            # An ampersand in a word would otherwise become an Alt letter.
+            button.setText(name.replace("&", "&&"))
+            describe(
+                button,
+                name,
+                "Says this word is right as detected, and settles every occurrence of it."
+                if keep
+                else "Changes every occurrence of this word to this one. The speaker and "
+                "the timing are left alone.",
+            )
+            button.setVisible(True)
+        if focus_lost:
+            if self._choices:
+                self._choice_buttons[0].setFocus(Qt.FocusReason.OtherFocusReason)
+            else:
+                self._focus_groups()
+                self._focus_caught = True
+
+    def use_choice(self, index: int) -> bool:
+        """Keep the word, or replace it with what one service heard."""
+        if not 0 <= index < len(self._choices):
+            return False
+        text, keep = self._choices[index]
+        if keep:
+            return self.correct_word_as_detected()
+        self._replacement_edit.setText(text)
+        return self.apply_replacement_to_word()
+
+    def apply_typed_word(self) -> bool:
+        """Replace the word with what was typed in the simple window."""
+        text = self._typed_edit.text().strip()
+        if not text:
+            self._set_status(
+                "Type the word that was said first. The box is empty.",
+                alert=True,
+                urgent=True,
+            )
+            return False
+        self._replacement_edit.setText(text)
+        if not self.apply_replacement_to_word():
+            return False
+        self._typed_edit.clear()
+        return True
+
     def _replacement_for(self, occurrence: Occurrence) -> str:
         """What the replacement box should hold for an occurrence.
 
@@ -3818,6 +4085,9 @@ class ReviewWindow(QMainWindow):
             (self._play_short_button, playable),
             (self._play_wide_button, playable),
             (self._use_candidate_button, enabled),
+            *((button, enabled) for button in self._choice_buttons),
+            (self._typed_edit, enabled),
+            (self._apply_typed_button, enabled),
             (self._replacement_edit, enabled),
             (self._speaker_box, enabled),
             (self._apply_word_button, enabled),

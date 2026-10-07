@@ -363,6 +363,15 @@ the whole folder rather than one recording, because the same name is
 usually got wrong in the same way in every recording of the same client,
 and deciding it once is the whole point.
 
+The window opens in a simple form. It shows the words that need you, each
+with the time it was said and why it is in the list, then the choices for
+the word you are on, then playback. There is one button for each different
+word the services heard: the first keeps the word as it was detected, and
+the others replace it with what another service heard. A text box takes a
+word you type yourself, and `Enter` applies it. **View** then **Show
+Details**, or `Ctrl+D`, brings back everything described below. The folder
+remembers which form you last used.
+
 It holds two lists. The first holds groups of words that need you, and a
 group gathers the occurrences of what looks like one intended word from
 across every recording in the folder: `Bosch`, `Bosh` and `Bosche` arrive

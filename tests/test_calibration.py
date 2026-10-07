@@ -362,3 +362,21 @@ def test_reliability_weights_move_a_service_by_its_learned_weight():
     assert weights.for_provider(Provider.MICROSOFT) == expected
     assert weights.for_provider(Provider.MICROSOFT) < DEFAULT_PROVIDER_RELIABILITY[Provider.MICROSOFT]
     assert weights.for_provider(Provider.OPENAI) == DEFAULT_PROVIDER_RELIABILITY[Provider.OPENAI]
+
+
+def test_a_file_that_cannot_be_read_is_not_overwritten_by_one_change(tmp_path):
+    path = tmp_path / CALIBRATION_FILE_NAME
+    path.write_text('{"providers": {"openai": {"overall": {"chosen": 400', encoding="utf-8")
+    store = CalibrationStore(path)
+
+    saved = store.apply(lambda statistics: statistics.record_choice(word(Provider.OPENAI)))
+
+    assert saved is False
+    assert path.read_text(encoding="utf-8") == '{"providers": {"openai": {"overall": {"chosen": 400'
+
+
+def test_a_missing_file_is_created_by_the_first_change(tmp_path):
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+
+    assert store.apply(lambda statistics: statistics.record_choice(word(Provider.OPENAI)))
+    assert store.load().counts_for(Provider.OPENAI).chosen == 1

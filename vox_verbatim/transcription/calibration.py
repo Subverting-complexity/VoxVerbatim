@@ -636,8 +636,19 @@ class CalibrationStore:
         copy and saved it would each wipe out the other's figures; reading
         immediately before writing narrows that to the moment between the
         two, where losing one count is acceptable.
+
+        A file that exists but cannot be read is left alone, and the answer
+        is ``False``. :meth:`load` reads such a file as empty statistics,
+        which is right for showing them, but writing that back would replace
+        every count gathered so far with this one change. The file may only
+        be held open for a moment by a backup or virus scanner, or have a
+        mistake in a hand edit; either way the caller keeps the words
+        uncounted, and a later save that can read the file counts them.
         """
-        statistics = self.load()
+        data = read_json_object(self._path)
+        if data is None and self._path.exists():
+            return False
+        statistics = ProviderStatistics() if data is None else ProviderStatistics.from_dict(data)
         change(statistics)
         return self.save(statistics)
 

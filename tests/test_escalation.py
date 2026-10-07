@@ -960,6 +960,76 @@ def test_a_value_that_must_not_be_guessed_is_never_settled_by_a_second_opinion()
     assert ReviewReason.ESCALATION_UNRESOLVED in token.review_reasons
 
 
+def _agreed_amount() -> FinalToken:
+    """An amount every service heard the same way, sent only as a precaution."""
+    token = word(
+        "fifteen",
+        10.0,
+        10.5,
+        candidates=(("fifteen", (Provider.ELEVENLABS, Provider.OPENAI)),),
+        risks=(RiskCategory.MONEY,),
+    )
+    token.text_confidence = Confidence.HIGH
+    return token
+
+
+def test_a_second_opinion_that_agrees_on_an_agreed_amount_confirms_it_quietly():
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _agreed_amount()
+    outcome = EscalationOutcome(results=(_answered(token, (("fifteen", 10.0, 10.5),)),))
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.confirmed == 1
+    assert ReviewReason.ESCALATION_UNRESOLVED not in token.review_reasons
+    assert token.text_confidence is Confidence.HIGH
+    assert token.needs_review is False
+
+
+def test_a_second_opinion_that_agrees_on_a_disputed_amount_is_not_why_it_is_held():
+    """The services' own dispute keeps the amount for a person, and nothing else."""
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    token.risk_categories = [RiskCategory.MONEY]
+    token.flag(ReviewReason.HIGH_RISK_ENTITY)
+    outcome = EscalationOutcome(results=(_answered(token, (("fifteen", 10.0, 10.5),)),))
+
+    applied = apply_answers([token], outcome)
+
+    assert applied.unsettled == 1
+    assert token.text == "fifteen"
+    assert ReviewReason.ESCALATION_UNRESOLVED not in token.review_reasons
+    assert ReviewReason.HIGH_RISK_ENTITY in token.review_reasons
+    assert token.needs_review is True
+
+
+def test_an_agreed_amount_the_second_opinion_never_reached_is_not_flagged():
+    transcript = Transcript(recording_name="talk")
+    amount = _agreed_amount()
+    transcript.tokens = [amount]
+    windows = [
+        EscalationWindow(
+            span=AudioSpan(9.0, 11.5),
+            target=AudioSpan(10.0, 10.5),
+            disputes=(Dispute(AudioSpan(10.0, 10.5), (EscalationReason.NUMBER_DIFFERS,),
+                              token_ids=(amount.id,)),),
+        )
+    ]
+    outcome = escalate(
+        windows,
+        StubProvider(error="AssemblyAI could not be reached"),
+        CanonicalAudio("a.wav", "a.wav", 60.0, 16000, 1, 100, "wav"),
+        TIGHT,
+    )
+
+    apply_outcome(transcript, outcome)
+
+    assert amount.review_reasons == []
+    assert amount.needs_review is False
+
+
 def test_a_second_opinion_clears_only_the_reasons_that_are_about_the_text():
     from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
 

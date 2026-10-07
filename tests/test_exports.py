@@ -476,6 +476,19 @@ def test_the_report_warns_about_values_that_must_not_be_guessed():
 
     assert "One of these is a value that must never be settled by what sounds plausible" in report
     assert "money" in report
+    assert "mostly agreed" not in report
+    assert "flagged whenever any service heard a different value" in report
+
+
+def test_a_flagged_value_says_what_kind_of_value_it_is():
+    transcript = _contested_transcript()
+    next(token for token in transcript.tokens if token.id == "amount").flag(
+        ReviewReason.HIGH_RISK_ENTITY
+    )
+
+    report = render_review_report(transcript)
+
+    assert "An amount of money that the services heard differently" in report
 
 
 def test_counts_of_one_are_written_as_english_rather_than_as_output():

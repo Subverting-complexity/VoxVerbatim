@@ -68,6 +68,7 @@ from vox_verbatim.transcription.model import (
     Language,
     ReviewReason,
     ReviewStatus,
+    RiskCategory,
     Transcript,
 )
 from vox_verbatim.transcription.normalise import normalise
@@ -234,6 +235,7 @@ def flagged_in(recording_name: str, transcript: Transcript) -> list[FlaggedItem]
                 start=token.start,
                 reasons=[reason.value for reason in token.review_reasons],
                 confidence=token.confidence.value,
+                risk_categories=[category.value for category in token.risk_categories],
                 settled=settled,
             )
         )
@@ -334,6 +336,7 @@ def restored_token(item: FlaggedItem) -> FinalToken:
         speaker_confidence=confidence,
         review_status=ReviewStatus.SETTLED if item.settled else ReviewStatus.PENDING,
         review_reasons=[] if item.settled else _reason_values(item.reasons),
+        risk_categories=_risk_values(item.risk_categories),
     )
 
 
@@ -365,6 +368,21 @@ def _reason_values(values: list[str]) -> list[ReviewReason]:
         except ValueError:
             continue
     return reasons
+
+
+def _risk_values(values: list[str]) -> list[RiskCategory]:
+    """The saved kinds of value this version understands, in their saved order.
+
+    One it does not understand is dropped, as an unknown reason is, and the
+    reason then reads in its general wording.
+    """
+    categories: list[RiskCategory] = []
+    for value in values:
+        try:
+            categories.append(RiskCategory(value))
+        except ValueError:
+            continue
+    return categories
 
 
 def group_key(group_id: str) -> str:

@@ -421,6 +421,14 @@ class FlaggedItem:
     actually had, so it is what the confidence column falls back to.
     """
 
+    risk_categories: list[str] = field(default_factory=list)
+    """:class:`~vox_verbatim.transcription.model.RiskCategory` values.
+
+    Kept so that the window can say what kind of value a flagged word is,
+    such as a date, without opening its transcript. Plain strings for the
+    reason :attr:`reasons` is.
+    """
+
     settled: bool = False
     """Somebody has finished with this word: they corrected it or confirmed it.
 
@@ -466,6 +474,7 @@ class FlaggedItem:
             reasons=_string_list(data.get("reasons")),
             confidence=_text(data.get("confidence"), _UNRESOLVED_CONFIDENCE)
             or _UNRESOLVED_CONFIDENCE,
+            risk_categories=_string_list(data.get("risk_categories")),
             settled=_flag(data.get("settled")),
         )
 

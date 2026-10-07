@@ -57,6 +57,7 @@ from vox_verbatim.transcription.project import ProjectStore, remove_learned_name
 from vox_verbatim.transcription.vocabulary import VocabularyStore
 from vox_verbatim.ui import review_lists
 from vox_verbatim.ui import review_window as review_window_module
+from vox_verbatim.ui import review_queue
 from vox_verbatim.ui.review_lists import (
     GROUP_COLUMN_CONFIDENCE,
     GROUP_COLUMN_COUNT,
@@ -434,7 +435,7 @@ def test_the_flagged_words_come_back_from_the_project_without_a_read(qapp, tmp_p
     try:
         assert [row.word for row in second._group_model.rows()] == ["15,000", "Jurgen"]
         assert folder.reads == [RECORDING]
-        assert group_row(second, "Jurgen").why == "A value that must not be guessed"
+        assert group_row(second, "Jurgen").why == "A value that the services heard differently"
         assert group_row(second, "Jurgen").reviewed == NOT_REVIEWED
     finally:
         second.close()
@@ -1046,7 +1047,7 @@ def test_a_word_that_is_both_weak_and_flagged_appears_once_and_says_both(qapp, t
         assert len(rows) == 1
         assert rows[0].why == review_lists.WHY_LOW_CONFIDENCE
         # And the reason it was flagged for is still on the screen.
-        assert window._reasons_edit.text() == "A value that must not be guessed"
+        assert window._reasons_edit.text() == "A value that the services heard differently"
         # The count must not report it as a second item being kept back,
         # since it is in fact on the screen.
         assert window._count_label.text() == "Showing 1 word group."
@@ -4740,6 +4741,19 @@ def test_flagged_in_leaves_out_a_word_in_doubt_only_for_its_speaker():
     items = review_lists.flagged_in(RECORDING, transcript)
 
     assert [item.text for item in items] == ["15,000"]
+
+
+def test_a_saved_flagged_word_still_says_what_kind_of_value_it_is():
+    """The project file keeps the kind, so the list can name it without a read."""
+    amount = make_token("15,000", reasons=(ReviewReason.HIGH_RISK_ENTITY,))
+    amount.risk_categories = [RiskCategory.MONEY]
+
+    [item] = review_lists.flagged_in(RECORDING, make_transcript([amount]))
+    item.risk_categories.append("a kind this version has never heard of")
+    restored = review_lists.restored_token(item)
+
+    assert restored.risk_categories == [RiskCategory.MONEY]
+    assert review_queue.reason_text(restored) == "An amount of money that the services heard differently"
 
 
 def test_a_word_in_doubt_for_its_text_and_its_speaker_is_still_flagged():

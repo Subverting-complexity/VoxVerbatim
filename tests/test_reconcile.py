@@ -36,6 +36,7 @@ from vox_verbatim.transcription.model import (
     ReviewStatus,
     RiskCategory,
     TimingStatus,
+    review_reason_text,
 )
 from vox_verbatim.transcription.reconcile import (
     DEFAULT_OPTIONS,
@@ -1003,6 +1004,86 @@ def test_a_filler_another_service_heard_as_a_word_is_still_a_disagreement() -> N
     )
 
     assert ReviewReason.PROVIDER_DISAGREEMENT in tokens[1].review_reasons
+
+
+# -- High-risk values the services agree on ------------------------------
+
+
+def test_a_date_every_service_heard_the_same_way_is_settled() -> None:
+    words = ["we", "met", "on", "15", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, words, timed=False),
+            spoken(Provider.MICROSOFT, words, timed=False),
+        )
+    )
+
+    date = token_at(tokens, "15")
+    assert RiskCategory.DATE in date.risk_categories
+    assert date.text_confidence is Confidence.HIGH
+    assert date.review_reasons == []
+    assert not date.needs_review
+
+
+def test_a_date_three_services_agree_on_and_one_left_out_is_settled() -> None:
+    """A service that heard nothing there did not hear a different date."""
+    words = ["we", "met", "on", "15", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.DEEPGRAM, words),
+            spoken(Provider.OPENAI, words, timed=False),
+            spoken(
+                Provider.ASSEMBLYAI,
+                ["we", "met", "on", "March", "last", "year"],
+                timed=False,
+            ),
+        )
+    )
+
+    date = token_at(tokens, "15")
+    assert RiskCategory.DATE in date.risk_categories
+    assert date.text_confidence is Confidence.HIGH
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in date.review_reasons
+    assert not date.needs_review
+
+
+def test_a_date_only_one_service_heard_is_still_flagged() -> None:
+    """Nobody corroborated it, so the silence of the others still counts."""
+    words = ["we", "met", "on", "15", "March", "last", "year"]
+    tidied = ["we", "met", "on", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    date = token_at(tokens, "15")
+    assert ReviewReason.PROVIDER_DISAGREEMENT in date.review_reasons
+    assert date.needs_review
+
+
+def test_a_date_a_service_heard_differently_names_the_kind_of_value() -> None:
+    backbone = spoken(Provider.ELEVENLABS, ["we", "met", "on", "15", "March", "last", "year"])
+    other = ["we", "met", "on", "16", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            backbone,
+            spoken(Provider.OPENAI, other, timed=False),
+            spoken(Provider.MICROSOFT, other, timed=False),
+        )
+    )
+
+    date = tokens[3]
+    assert date.text_confidence is Confidence.UNRESOLVED
+    assert ReviewReason.HIGH_RISK_ENTITY in date.review_reasons
+    assert (
+        review_reason_text(date, ReviewReason.HIGH_RISK_ENTITY)
+        == "A date that the services heard differently"
+    )
 
 
 # -- The risk window ----------------------------------------------------------

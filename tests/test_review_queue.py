@@ -16,6 +16,7 @@ from vox_verbatim.transcription.model import (
     SPEAKER_ONLY_REASONS,
     ReviewReason,
     ReviewStatus,
+    RiskCategory,
 )
 from vox_verbatim.ui.review_queue import (
     COLUMN_CONFIDENCE,
@@ -27,6 +28,7 @@ from vox_verbatim.ui.review_queue import (
     ReviewQueueModel,
     ReviewQueueView,
     count_text,
+    reason_text,
     spoken_summary,
 )
 
@@ -370,7 +372,20 @@ def test_the_whole_row_is_said_in_one_sentence_when_the_highlight_moves(qapp):
     token = make_token(text="15,000", start=92.0, reasons=(ReviewReason.HIGH_RISK_ENTITY,))
 
     assert spoken_summary(token) == (
-        "1 minute 32 seconds. 15,000. A value that must not be guessed. Review required."
+        "1 minute 32 seconds. 15,000. A value that the services heard differently. "
+        "Review required."
+    )
+
+
+def test_a_value_the_services_heard_differently_says_what_kind_of_value_it_is(qapp):
+    token = make_token(
+        text="16th",
+        reasons=(ReviewReason.HIGH_RISK_ENTITY, ReviewReason.NUMERIC_DISAGREEMENT),
+    )
+    token.risk_categories = [RiskCategory.DATE]
+
+    assert reason_text(token) == (
+        "A date that the services heard differently; A number differs between services"
     )
 
 

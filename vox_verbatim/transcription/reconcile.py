@@ -1323,7 +1323,8 @@ def _settle(
     statement about what a wrong answer would cost: the specification is
     explicit that a two-to-one result on a monetary amount is meaningful
     evidence and still not a reason to write the amount down as though it
-    were known.
+    were known. Where no service heard a different value there is nothing
+    to decide between, so a high-risk value alone does not stop it settling.
     """
     reasons: list[ReviewReason] = []
     if languages.is_uncertain(position):
@@ -1448,13 +1449,21 @@ def _contesting_silence(
     a disagreement even when every service that wrote it agreed. Where no
     service heard a different word, the silence is set aside.
 
+    The same holds for a high-risk value such as a date or an amount that
+    at least two services heard the same way. A service that heard nothing
+    there did not hear a different value, so its silence is not a dispute
+    about which value was said. A value only one service heard keeps every
+    silence against it, because nobody corroborated it.
+
     Only the confidence of the word uses this. Removing a word that nobody
     else heard still counts every silent service; see
-    :func:`_is_hallucination`. ``risk`` is not consulted yet.
+    :func:`_is_hallucination`.
     """
     if runner_up is not None:
         return deletions
     if is_filler(winner.display) or _is_repeated_beside(scope, backbone_texts, winner.display):
+        return ()
+    if risk and len(winner.providers) >= 2:
         return ()
     return deletions
 

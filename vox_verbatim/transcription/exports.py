@@ -49,6 +49,7 @@ from vox_verbatim.transcription.model import (
     ReviewReason,
     Transcript,
     _attaches_to_previous,
+    review_reason_text,
 )
 
 #: What the two exports are called inside the transcript folder.
@@ -604,18 +605,18 @@ def _report_review_queue(transcript: Transcript) -> str:
         return "\n".join(lines)
     if not pending and transcript.review_tokens:
         lines.append(
-            "Nothing about the words. The services agreed on the text everywhere "
-            "and nothing fell into a category that must not be guessed at. Only "
-            "who said some of it is in doubt, which the next section lists."
+            "Nothing about the words. The services agreed on the text everywhere, "
+            "including every value that must not be guessed at. Only who said "
+            "some of it is in doubt, which the next section lists."
         )
         lines.append("")
         return "\n".join(lines)
     if not pending:
         lines.append(
             "Nothing. No word in this transcript was flagged for review, which "
-            "means the services agreed everywhere and nothing fell into a "
-            "category that must not be guessed at. You can read the transcript "
-            "as it stands."
+            "means the services agreed everywhere, including on every value "
+            "that must not be guessed at. You can read the transcript as it "
+            "stands."
         )
         lines.append("")
         return "\n".join(lines)
@@ -653,7 +654,8 @@ def _report_review_queue(transcript: Transcript) -> str:
             f"{opening} that must never be settled by what sounds plausible "
             f"({', '.join(kinds).lower()}). Getting one of those wrong is invisible "
             "afterwards, because the wrong value reads perfectly well, so they are "
-            "flagged even when the services mostly agreed."
+            "flagged whenever any service heard a different value, and settled "
+            "only when every service that heard them agreed."
         )
         lines.append("")
     return "\n".join(lines)
@@ -706,12 +708,12 @@ def _doubted_speakers_in_words(transcript: Transcript, speakers: Sequence[str]) 
 def _reasons_in_words(token: FinalToken) -> str:
     if not token.review_reasons:
         return "Waiting for a decision"
-    return "; ".join(_reason_text(reason) for reason in token.review_reasons)
+    return "; ".join(_reason_text(token, reason) for reason in token.review_reasons)
 
 
-def _reason_text(reason: ReviewReason) -> str:
+def _reason_text(token: FinalToken, reason: ReviewReason) -> str:
     try:
-        return reason.display_name
+        return review_reason_text(token, reason)
     except KeyError:
         # A reason added to the model without a description should still be
         # readable rather than crashing the report somebody is waiting on.

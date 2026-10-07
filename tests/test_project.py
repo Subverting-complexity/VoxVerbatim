@@ -130,6 +130,7 @@ def test_a_saved_project_comes_back_unchanged(tmp_path):
                 start=70.0,
                 reasons=["numeric_disagreement"],
                 confidence="review_required",
+                risk_categories=["money"],
             ),
             FlaggedItem(
                 recording_name="Interview 02.m4a",
@@ -450,6 +451,8 @@ def test_a_flagged_word_falls_back_field_by_field(tmp_path):
     # word in front of the person rather than hiding it.
     assert item.confidence == "unresolved"
     assert item.settled is False
+    # Written before the kind of value was kept: it is simply not known.
+    assert item.risk_categories == []
 
 
 def test_one_word_flagged_twice_keeps_the_first(tmp_path):

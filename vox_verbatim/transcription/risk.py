@@ -544,11 +544,15 @@ def find_risks(words: Sequence[str]) -> tuple[RiskFinding, ...]:
     # Anything with a digit in it counts, whether or not it can be read as
     # one number: "1/2", "3/4" and "24/7" could not be read and used to slip
     # through here, and a wrong fraction is as wrong as a wrong integer.
+    # A number written as a word does not count on its own. "One" in "the
+    # one who taught me" or "That one" is a pronoun, not a measurement, and
+    # flagging every such word buried the real values in the review list. A
+    # number word next to a unit or a currency is claimed above already.
     claimed = {position for finding in findings for position in finding.positions}
     for index, word in enumerate(cleaned):
         if index in claimed or not numeric[index]:
             continue
-        if any(character.isdigit() for character in word) or read_number(word) is not None:
+        if any(character.isdigit() for character in word):
             findings.append(RiskFinding(RiskCategory.QUANTITY, (index,), "a number"))
     return tuple(findings)
 

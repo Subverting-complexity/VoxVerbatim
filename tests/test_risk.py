@@ -94,8 +94,27 @@ def test_a_measured_amount_is_a_quantity() -> None:
     assert RiskCategory.QUANTITY in _categories("about", "thirty", "kilograms")
 
 
-def test_a_bare_number_is_still_a_quantity() -> None:
-    assert RiskCategory.QUANTITY in risk_at(["we", "need", "twelve", "more"], 2)
+def test_a_bare_number_in_digits_is_still_a_quantity() -> None:
+    assert RiskCategory.QUANTITY in risk_at(["we", "need", "12", "more"], 2)
+
+
+def test_a_number_word_beside_a_unit_is_still_a_quantity() -> None:
+    assert RiskCategory.QUANTITY in risk_at(["about", "one", "kilogram", "left"], 1)
+
+
+@pytest.mark.parametrize(
+    ("words", "position"),
+    [
+        (["the", "one", "who", "taught", "me"], 1),
+        (["Not", "one."], 1),
+        (["That", "one", "is", "mine"], 1),
+    ],
+)
+def test_a_number_word_with_nothing_to_measure_is_not_a_quantity(
+    words: list[str], position: int
+) -> None:
+    """"One" as a pronoun is not a value anybody could get wrong in a contract."""
+    assert RiskCategory.QUANTITY not in risk_at(words, position)
 
 
 def test_a_case_number_is_a_legal_identifier() -> None:

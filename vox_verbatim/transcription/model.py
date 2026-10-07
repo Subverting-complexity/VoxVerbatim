@@ -275,7 +275,7 @@ _REVIEW_REASON_DISPLAY_NAMES: dict[ReviewReason, str] = {
     ReviewReason.PROVIDER_DISAGREEMENT: "The services disagree",
     ReviewReason.PROPER_NAME_DISAGREEMENT: "A name differs between services",
     ReviewReason.NUMERIC_DISAGREEMENT: "A number differs between services",
-    ReviewReason.HIGH_RISK_ENTITY: "A value that must not be guessed",
+    ReviewReason.HIGH_RISK_ENTITY: "A value that the services heard differently",
     ReviewReason.LOW_ACOUSTIC_CONFIDENCE: "The service was unsure of what it heard",
     ReviewReason.SPEAKER_UNCERTAIN: "The speaker is uncertain",
     ReviewReason.OVERLAPPING_SPEECH: "People are speaking over each other",
@@ -286,6 +286,19 @@ _REVIEW_REASON_DISPLAY_NAMES: dict[ReviewReason, str] = {
     ReviewReason.ESCALATION_UNRESOLVED: "A second opinion did not settle it",
     ReviewReason.ADJUDICATION_DECLINED: "The language model would not decide",
 }
+
+
+def review_reason_text(token: FinalToken, reason: ReviewReason) -> str:
+    """Why this word was flagged, naming the kind of value where it is one.
+
+    "A date that the services heard differently" tells a person what to
+    listen for; the general wording only tells them something is wrong. The
+    first kind of value the word was found to be is named, which is the one
+    its strongest rule found.
+    """
+    if reason is ReviewReason.HIGH_RISK_ENTITY and token.risk_categories:
+        return f"{token.risk_categories[0].noun_phrase} that the services heard differently"
+    return reason.display_name
 
 
 SPEAKER_ONLY_REASONS: frozenset[ReviewReason] = frozenset({ReviewReason.SPEAKER_UNCERTAIN})
@@ -326,6 +339,27 @@ class RiskCategory(str, Enum):
     @property
     def display_name(self) -> str:
         return self.value.replace("_", " ").capitalize()
+
+    @property
+    def noun_phrase(self) -> str:
+        """The kind of value as the start of a sentence, such as "A date"."""
+        return _RISK_NOUN_PHRASES[self]
+
+
+_RISK_NOUN_PHRASES: dict[RiskCategory, str] = {
+    RiskCategory.MONEY: "An amount of money",
+    RiskCategory.DATE: "A date",
+    RiskCategory.TIME: "A time of day",
+    RiskCategory.PERCENTAGE: "A percentage",
+    RiskCategory.TELEPHONE: "A telephone number",
+    RiskCategory.ACCOUNT_NUMBER: "An account number",
+    RiskCategory.VERSION_NUMBER: "A version number",
+    RiskCategory.ADDRESS: "An address",
+    RiskCategory.QUANTITY: "A quantity",
+    RiskCategory.LEGAL_IDENTIFIER: "A legal identifier",
+    RiskCategory.MEDICAL_MEASUREMENT: "A medical measurement",
+    RiskCategory.PRODUCT_CODE: "A product code",
+}
 
 
 class ReviewStatus(str, Enum):

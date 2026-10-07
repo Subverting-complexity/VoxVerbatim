@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 from vox_verbatim.transcription.calibration import Dimension, ProviderStatistics
 from vox_verbatim.transcription.learning import (
     LEARNED_PROFILE_ID,
     MistakeCategory,
+    count_settled_words,
     extract_corrections,
     learn_from_review,
+    note_settled_words,
     repeated_mistakes,
     teaches_a_term,
     term_for,
-    update_statistics,
 )
 from vox_verbatim.transcription.model import (
     Confidence,
@@ -387,32 +391,140 @@ def test_a_word_the_user_already_categorised_keeps_that_category():
     assert [term.category for term in result.taught] == [TermCategory.PERSON]
 
 
-def test_a_review_feeds_the_provider_statistics():
+def save(
+    before: Transcript,
+    after: Transcript,
+    statistics: ProviderStatistics,
+    excluded: frozenset[str] = frozenset(),
+) -> Transcript:
+    """Count one save the way the review window does, and return what it saves."""
+    noted = note_settled_words(before, after, excluded)
+    change, counted = count_settled_words(noted)
+    change.apply(statistics)
+    return counted
+
+
+def confirmed(before: Transcript, text: str) -> Transcript:
+    """The same transcript with one word confirmed as it stands."""
+    tokens = []
+    for token in before.tokens:
+        if token.text == text:
+            token = replace(token)
+            token.review_status = ReviewStatus.CONFIRMED
+        tokens.append(token)
+    return replace(before, tokens=tokens)
+
+
+def test_a_correction_counts_the_settled_word_against_the_service_that_said_it():
     before = sentence("We", "met", "Fermeulen", "yesterday.")
     rate(before.tokens[2], Confidence.REVIEW_REQUIRED)
-    after = corrected(before, "Fermeulen", "Vermeulen")
     statistics = ProviderStatistics()
 
-    update_statistics(statistics, extract_corrections(before, after))
+    save(before, corrected(before, "Fermeulen", "Vermeulen"), statistics)
 
     counts = statistics.counts_for(Provider.OPENAI)
-    assert (counts.chosen, counts.corrected) == (4, 1)
-    assert statistics.counts_for(Provider.OPENAI, Dimension.SPEAKER, "speaker_0").chosen == 4
+    # Only the word a person settled is counted. The other three were never
+    # looked at, so they are not evidence that the service was right.
+    assert (counts.chosen, counts.corrected) == (1, 1)
+    assert statistics.counts_for(Provider.OPENAI, Dimension.PROPER_NOUN).corrected == 1
     assert statistics.confidence[Confidence.REVIEW_REQUIRED].corrected == 1
 
 
-def test_a_speaker_mistake_is_counted_as_a_speaker_mistake():
-    before = sentence("Yes", "of", "course")
-    after = before.with_correction(before.tokens[0].id, speaker="speaker_2")
+def test_saving_the_same_transcript_again_changes_nothing():
+    before = sentence("We", "met", "Fermeulen", "yesterday.")
+    statistics = ProviderStatistics()
+    saved = save(before, corrected(before, "Fermeulen", "Vermeulen"), statistics)
+    first = statistics.to_dict()
+
+    saved_again = save(saved, saved, statistics)
+
+    assert statistics.to_dict() == first
+    assert saved_again is saved
+
+
+def test_a_word_changed_back_to_what_the_service_said_counts_as_right():
+    before = sentence("We", "met", "Fermeulen", "yesterday.")
+    statistics = ProviderStatistics()
+    saved = save(before, corrected(before, "Fermeulen", "Vermeulen"), statistics)
+
+    save(saved, corrected(saved, "Vermeulen", "Fermeulen"), statistics)
+
+    counts = statistics.counts_for(Provider.OPENAI)
+    assert (counts.chosen, counts.corrected) == (1, 0)
+    assert statistics.confidence[Confidence.UNRESOLVED].reviewed == 1
+    assert statistics.confidence[Confidence.UNRESOLVED].corrected == 0
+
+
+def test_a_confirmed_word_counts_as_right():
+    before = sentence("We", "met", "Fermeulen", "yesterday.")
     statistics = ProviderStatistics()
 
-    update_statistics(statistics, extract_corrections(before, after))
+    save(before, confirmed(before, "met"), statistics)
 
-    assert statistics.repeated_speaker_mistakes(minimum=1) == {
-        Provider.OPENAI: {"speaker_0": 1}
-    }
+    counts = statistics.counts_for(Provider.OPENAI)
+    assert (counts.chosen, counts.corrected) == (1, 0)
+
+
+def test_pending_words_and_words_a_folder_rule_answered_add_nothing():
+    before = sentence("We", "met", "Fermeulen", "yesterday.")
+    before.tokens[0].review_status = ReviewStatus.PENDING
+    after = corrected(before, "Fermeulen", "Vermeulen")
+    statistics = ProviderStatistics()
+
+    saved = save(before, after, statistics, excluded=frozenset({before.tokens[2].id}))
+
+    assert statistics.to_dict() == ProviderStatistics().to_dict()
+    assert all(token.statistics_note is None for token in saved.tokens)
+
+
+def test_a_word_settled_before_notes_existed_stays_uncounted():
+    before = sentence("We", "met", "Fermeulen", "yesterday.")
+    earlier = corrected(before, "Fermeulen", "Vermeulen")
+    statistics = ProviderStatistics()
+
+    # The word was already corrected in the transcript last saved, and it has
+    # no note, so which service said it is no longer known.
+    save(earlier, earlier, statistics)
+
+    assert statistics.total_words == 0
+
+
+def test_a_word_sent_back_to_the_queue_has_its_count_taken_out():
+    before = sentence("We", "met", "Fermeulen", "yesterday.")
+    statistics = ProviderStatistics()
+    saved = save(before, confirmed(before, "met"), statistics)
+    reopened = replace(saved, tokens=[replace(token) for token in saved.tokens])
+    reopened.tokens[1].review_status = ReviewStatus.PENDING
+
+    save(saved, reopened, statistics)
+
+    assert statistics.counts_for(Provider.OPENAI).chosen == 0
+
+
+def test_a_rejected_candidate_is_counted_once():
+    before = sentence("We", "met")
+    before.tokens[1].rejected_tokens = [TokenReference(Provider.DEEPGRAM, 0)]
+    statistics = ProviderStatistics()
+
+    saved = save(before, confirmed(before, "met"), statistics)
+    save(saved, saved, statistics)
+
+    assert statistics.counts_for(Provider.DEEPGRAM).rejected == 1
+
+
+def test_a_speaker_mistake_is_one_total_with_no_label():
+    before = sentence("Yes", "of", "course")
+    after = before.with_correction(before.tokens[0].id, speaker="Mrs Smith")
+    statistics = ProviderStatistics()
+
+    save(before, after, statistics)
+
+    assert statistics.repeated_speaker_mistakes(minimum=1) == {Provider.OPENAI: 1}
     # It is not counted as a misheard word, because no word was misheard.
     assert statistics.counts_for(Provider.OPENAI).corrected == 0
+    written = json.dumps(statistics.to_dict())
+    assert "speaker_0" not in written
+    assert "Mrs Smith" not in written
 
 
 def test_the_recurring_corrections_are_grouped_the_way_section_23_asks():

@@ -518,6 +518,59 @@ class Candidate:
 # -- What the application decided ----------------------------------------
 
 
+@dataclass(frozen=True)
+class StatisticsNote:
+    """What the service statistics were told about one settled word.
+
+    The statistics are updated every time the review window saves, and a
+    save carries the whole transcript. Without a note on each word, every
+    save would count every settled word again. The note is what lets a save
+    count only what changed: a word with no note is new, a word whose result
+    differs from its note has its old result taken out and the new one put
+    in, and a word that matches its note is left alone.
+
+    The facts are written once, the first time a person settles the word,
+    and never again. They have to be taken then, because a correction
+    clears :attr:`FinalToken.text_source`: afterwards the transcript no
+    longer says which service was believed, and the statistics are about
+    exactly that.
+
+    The vocabulary category is kept as its stored value rather than as the
+    vocabulary module's enumeration, because that module imports this one.
+    """
+
+    provider: Provider | None = None
+    """The service whose word was believed, where one was."""
+
+    language: Language = Language.UNKNOWN
+    is_proper_noun: bool = False
+    is_numeric: bool = False
+    vocabulary_category: str | None = None
+    confidence: Confidence = Confidence.UNRESOLVED
+    """The word's category before the person looked at it."""
+
+    service_text: str = ""
+    """What the services said, which a correction is measured against."""
+
+    rejected_providers: tuple[Provider, ...] = ()
+    speaker_provider: Provider | None = None
+    service_speaker: str | None = None
+    """The speaker label before review, to tell a changed speaker from an unchanged one.
+
+    It stays in the transcript, which already carries every speaker label,
+    and is never copied into the statistics.
+    """
+
+    counted: bool = False
+    """Whether this word's result is in the statistics now."""
+
+    text_corrected: bool = False
+    """The counted result: the text was changed from what the services said."""
+
+    speaker_corrected: bool = False
+    """The counted result: the speaker was changed from what the service said."""
+
+
 @dataclass
 class FinalToken:
     """One word of the finished transcript.
@@ -657,6 +710,9 @@ class FinalToken:
 
     original_text: str | None = None
     """What the word said before a person changed it."""
+
+    statistics_note: StatisticsNote | None = None
+    """What the service statistics have counted for this word, if anything."""
 
     @property
     def confidence(self) -> Confidence:

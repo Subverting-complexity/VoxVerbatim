@@ -25,6 +25,11 @@ import pytest
 
 from vox_verbatim.settings import TranscriptionSettings
 from vox_verbatim.transcription import exports, pipeline
+from vox_verbatim.transcription.calibration import (
+    CalibrationStore,
+    Observation,
+    ProviderStatistics,
+)
 from vox_verbatim.transcription.model import (
     Candidate,
     Confidence,
@@ -115,6 +120,7 @@ def transcribe(recording, monkeypatch):
         progress=None,
         escalation_provider=None,
         aligner=None,
+        calibration_path=None,
     ) -> Run:
         services = three_services() if services is None else services
         settings = settings or offline_settings()
@@ -141,6 +147,7 @@ def transcribe(recording, monkeypatch):
             pipeline.PipelineOptions(
                 configuration=configuration or RecordingConfiguration(),
                 settings=settings,
+                calibration_path=calibration_path,
             ),
             progress=progress,
             cancelled=cancelled,
@@ -152,6 +159,55 @@ def transcribe(recording, monkeypatch):
 
 
 # -- A whole run, with everything working --------------------------------
+
+
+def _reliability_used(transcript: Transcript, provider: Provider) -> set[float]:
+    key = f"{provider.value}.provider_reliability"
+    return {
+        candidate.components[key]
+        for token in transcript.tokens
+        for candidate in token.candidates
+        if key in candidate.components
+    }
+
+
+def test_with_no_statistics_file_a_run_produces_the_same_transcript(transcribe, tmp_path):
+    plain = transcribe().transcript
+    learned = transcribe(calibration_path=tmp_path / "missing" / "calibration.json").transcript
+
+    assert learned.verbatim_text == plain.verbatim_text
+    assert [token.candidates for token in learned.tokens] == [
+        token.candidates for token in plain.tokens
+    ]
+    assert _reliability_used(learned, Provider.OPENAI) == {1.0}
+
+
+def test_statistics_that_mark_a_service_down_lower_its_weight(transcribe, tmp_path):
+    path = tmp_path / "calibration.json"
+    statistics = ProviderStatistics()
+    for index in range(200):
+        statistics.record_choice(Observation(provider=Provider.OPENAI), corrected=index % 2 == 0)
+    CalibrationStore(path).save(statistics)
+
+    run = transcribe(calibration_path=path)
+
+    used = _reliability_used(run.transcript, Provider.OPENAI)
+    assert len(used) == 1
+    assert used.pop() < 1.0
+    # A service with no evidence keeps its default.
+    assert _reliability_used(run.transcript, Provider.ELEVENLABS) == {0.95}
+
+
+def test_a_damaged_statistics_file_does_not_stop_a_run(transcribe, tmp_path):
+    path = tmp_path / "calibration.json"
+    path.write_text("{ this is not json", encoding="utf-8")
+
+    run = transcribe(calibration_path=path)
+
+    assert run.transcript.verbatim_text == SENTENCE
+    assert not run.transcript.warnings
+    assert _reliability_used(run.transcript, Provider.OPENAI) == {1.0}
+
 
 
 def test_a_run_where_every_service_agrees_produces_a_finished_transcript(transcribe):

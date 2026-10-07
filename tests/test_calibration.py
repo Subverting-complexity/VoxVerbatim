@@ -13,8 +13,10 @@ from vox_verbatim.transcription.calibration import (
     Observation,
     ProviderStatistics,
     evidence_phrase,
+    reliability_weights,
 )
 from vox_verbatim.transcription.model import Confidence, Language, Provider
+from vox_verbatim.transcription.reconcile import DEFAULT_PROVIDER_RELIABILITY
 from vox_verbatim.transcription.vocabulary import TermCategory
 
 
@@ -155,12 +157,12 @@ def test_the_confidence_categories_are_measured_against_what_happened():
 def test_repeated_speaker_mistakes_are_kept_as_their_own_category():
     statistics = ProviderStatistics()
 
-    statistics.record_speaker_correction(Provider.ELEVENLABS, "speaker_0")
-    statistics.record_speaker_correction(Provider.ELEVENLABS, "speaker_0")
-    statistics.record_speaker_correction(Provider.ELEVENLABS, "speaker_3")
+    statistics.record_speaker_correction(Provider.ELEVENLABS)
+    statistics.record_speaker_correction(Provider.ELEVENLABS)
+    statistics.record_speaker_correction(Provider.OPENAI)
 
     repeated = statistics.repeated_speaker_mistakes()
-    assert repeated == {Provider.ELEVENLABS: {"speaker_0": 2}}
+    assert repeated == {Provider.ELEVENLABS: 2}
     # A speaker mistake is not a misheard word and does not pretend to be one.
     assert statistics.counts_for(Provider.ELEVENLABS).corrected == 0
 
@@ -218,7 +220,7 @@ def test_the_statistics_survive_being_written_and_read_back(tmp_path):
     statistics = ProviderStatistics()
     record_words(statistics, chosen=40, corrected=4, observation=word(is_proper_noun=True))
     statistics.record_rejection(word(Provider.DEEPGRAM))
-    statistics.record_speaker_correction(Provider.ELEVENLABS, "speaker_1")
+    statistics.record_speaker_correction(Provider.ELEVENLABS)
     statistics.record_review(Confidence.REVIEW_SUGGESTED, corrected=True)
     store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
 
@@ -228,7 +230,7 @@ def test_the_statistics_survive_being_written_and_read_back(tmp_path):
     assert loaded.counts_for(Provider.OPENAI).chosen == 40
     assert loaded.counts_for(Provider.OPENAI, Dimension.PROPER_NOUN).corrected == 4
     assert loaded.counts_for(Provider.DEEPGRAM).rejected == 1
-    assert loaded.repeated_speaker_mistakes(minimum=1) == {Provider.ELEVENLABS: {"speaker_1": 1}}
+    assert loaded.repeated_speaker_mistakes(minimum=1) == {Provider.ELEVENLABS: 1}
     assert loaded.confidence[Confidence.REVIEW_SUGGESTED].corrected == 1
     assert loaded.weight_for(Provider.OPENAI) == statistics.weight_for(Provider.OPENAI)
 
@@ -284,3 +286,97 @@ def test_a_file_claiming_more_corrections_than_words_is_brought_back_to_earth(tm
 
     assert statistics.counts_for(Provider.OPENAI).corrected == 5
     assert 0.0 <= statistics.weight_for(Provider.OPENAI) <= 1.0
+
+
+def test_a_count_can_be_taken_back_out_without_going_below_zero():
+    statistics = ProviderStatistics()
+    statistics.record_choice(word(is_numeric=True), corrected=True)
+
+    statistics.record_choice(word(is_numeric=True), corrected=True, amount=-1)
+    statistics.record_choice(word(is_numeric=True), corrected=True, amount=-1)
+
+    counts = statistics.counts_for(Provider.OPENAI)
+    assert (counts.chosen, counts.corrected) == (0, 0)
+    assert statistics.counts_for(Provider.OPENAI, Dimension.NUMERIC).chosen == 0
+
+
+def test_an_older_file_loses_its_speaker_labels_and_keeps_the_total(tmp_path):
+    path = tmp_path / CALIBRATION_FILE_NAME
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "providers": {
+                    "elevenlabs": {
+                        "overall": {"chosen": 3, "corrected": 1, "rejected": 0},
+                        "dimensions": {
+                            "speaker:Mrs Smith": {"chosen": 3, "corrected": 1, "rejected": 0},
+                            "language:en": {"chosen": 3, "corrected": 1, "rejected": 0},
+                        },
+                        "speaker_mistakes": {"Mrs Smith": 2, "speaker_1": 1},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = CalibrationStore(path)
+
+    loaded = store.load()
+    store.save(loaded)
+
+    assert loaded.repeated_speaker_mistakes(minimum=1) == {Provider.ELEVENLABS: 3}
+    assert loaded.counts_for(Provider.ELEVENLABS, Dimension.LANGUAGE, "en").chosen == 3
+    written = path.read_text(encoding="utf-8")
+    assert "Mrs Smith" not in written
+    assert "speaker_1" not in written
+
+
+def test_two_stores_writing_to_one_file_keep_both_changes(tmp_path):
+    path = tmp_path / CALIBRATION_FILE_NAME
+    first = CalibrationStore(path)
+    second = CalibrationStore(path)
+
+    assert first.apply(lambda statistics: statistics.record_choice(word(Provider.OPENAI)))
+    assert second.apply(lambda statistics: statistics.record_choice(word(Provider.DEEPGRAM)))
+
+    loaded = first.load()
+    assert loaded.counts_for(Provider.OPENAI).chosen == 1
+    assert loaded.counts_for(Provider.DEEPGRAM).chosen == 1
+
+
+def test_reliability_weights_keep_the_defaults_where_there_is_no_evidence():
+    weights = reliability_weights(ProviderStatistics())
+
+    assert dict(weights.by_provider) == DEFAULT_PROVIDER_RELIABILITY
+
+
+def test_reliability_weights_move_a_service_by_its_learned_weight():
+    statistics = ProviderStatistics()
+    record_words(statistics, chosen=100, corrected=50, observation=word(Provider.MICROSOFT))
+
+    weights = reliability_weights(statistics)
+
+    learned = statistics.weight_for(Provider.MICROSOFT)
+    expected = DEFAULT_PROVIDER_RELIABILITY[Provider.MICROSOFT] * learned / DEFAULT_WEIGHT
+    assert weights.for_provider(Provider.MICROSOFT) == expected
+    assert weights.for_provider(Provider.MICROSOFT) < DEFAULT_PROVIDER_RELIABILITY[Provider.MICROSOFT]
+    assert weights.for_provider(Provider.OPENAI) == DEFAULT_PROVIDER_RELIABILITY[Provider.OPENAI]
+
+
+def test_a_file_that_cannot_be_read_is_not_overwritten_by_one_change(tmp_path):
+    path = tmp_path / CALIBRATION_FILE_NAME
+    path.write_text('{"providers": {"openai": {"overall": {"chosen": 400', encoding="utf-8")
+    store = CalibrationStore(path)
+
+    saved = store.apply(lambda statistics: statistics.record_choice(word(Provider.OPENAI)))
+
+    assert saved is False
+    assert path.read_text(encoding="utf-8") == '{"providers": {"openai": {"overall": {"chosen": 400'
+
+
+def test_a_missing_file_is_created_by_the_first_change(tmp_path):
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+
+    assert store.apply(lambda statistics: statistics.record_choice(word(Provider.OPENAI)))
+    assert store.load().counts_for(Provider.OPENAI).chosen == 1

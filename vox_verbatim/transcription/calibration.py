@@ -10,13 +10,19 @@ into a weight the reconciliation rules can use.
 Section 24 of the specification lists many dimensions a service's
 performance might vary over. Only some of them can be observed by this
 application, and only those are recorded here: the language of the word,
-the speaker it was attributed to, whether it was a proper noun, whether it
-was numeric, and which vocabulary category it belongs to. Audio quality,
+whether it was a proper noun, whether it was numeric, and which vocabulary
+category it belongs to. Audio quality,
 recording environment, microphone and speaker accent are deliberately left
 out. Nothing in the application measures any of them today, so a column for
 them would hold nothing but zeros while looking exactly like knowledge. If
 a way to observe one of them arrives later, it becomes another
 :class:`Dimension` and the file grows a key; nothing else has to change.
+
+The speaker is left out too, for a different reason. A speaker label such
+as ``speaker_0`` means a different person in every recording, so a
+breakdown by label measures nothing, and a label a person has replaced with
+a name would put a client's name into a file that every folder shares.
+Speaker mistakes are therefore kept as one total for each service.
 
 The same section is explicit about the order of work in version 1: start
 with explicit rules, collect real correction data, and only then calibrate.
@@ -62,6 +68,7 @@ on its own.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -69,6 +76,11 @@ from typing import Any
 
 from vox_verbatim.json_store import read_json_object, write_json_object
 from vox_verbatim.transcription.model import Confidence, Language, Provider
+from vox_verbatim.transcription.reconcile import (
+    DEFAULT_PROVIDER_RELIABILITY,
+    DEFAULT_RELIABILITY,
+    ReliabilityWeights,
+)
 from vox_verbatim.transcription.vocabulary import TermCategory
 
 CALIBRATION_FILE_NAME = "calibration.json"
@@ -113,7 +125,6 @@ class Dimension(str, Enum):
     looks for the most specific answer that has evidence behind it.
     """
 
-    SPEAKER = "speaker"
     VOCABULARY = "vocabulary"
     NUMERIC = "numeric"
     PROPER_NOUN = "proper_noun"
@@ -125,7 +136,6 @@ class Dimension(str, Enum):
 
 
 _DIMENSION_DISPLAY_NAMES: dict[Dimension, str] = {
-    Dimension.SPEAKER: "Speaker",
     Dimension.VOCABULARY: "Vocabulary category",
     Dimension.NUMERIC: "Numbers",
     Dimension.PROPER_NOUN: "Names",
@@ -137,6 +147,10 @@ _DIMENSION_DISPLAY_NAMES: dict[Dimension, str] = {
 #: every recording, so a bucket for it would double the file to say the
 #: same thing the overall record already says.
 _YES = "yes"
+
+#: The key prefix an older file used for its speaker breakdown, which is
+#: dropped on load. See the module docstring for why.
+_SPEAKER_PREFIX = "speaker:"
 
 
 def dimension_key(dimension: Dimension, value: str) -> str:
@@ -156,7 +170,6 @@ class Observation:
 
     provider: Provider
     language: Language = Language.UNKNOWN
-    speaker: str | None = None
     is_proper_noun: bool = False
     is_numeric: bool = False
     vocabulary_category: TermCategory | None = None
@@ -165,12 +178,9 @@ class Observation:
         """The buckets this word belongs to, narrowest first.
 
         A dimension that says nothing is left out entirely. An unknown
-        language is not a language, and a word with no speaker is not
-        evidence about any speaker, so neither gets a bucket.
+        language is not a language, so it gets no bucket.
         """
         keys: list[str] = []
-        if self.speaker:
-            keys.append(dimension_key(Dimension.SPEAKER, self.speaker))
         if self.vocabulary_category is not None:
             keys.append(dimension_key(Dimension.VOCABULARY, self.vocabulary_category.value))
         if self.is_numeric:
@@ -285,10 +295,10 @@ class ProviderRecord:
     provider: Provider
     overall: OutcomeCounts = field(default_factory=OutcomeCounts)
     dimensions: dict[str, OutcomeCounts] = field(default_factory=dict)
-    speaker_mistakes: dict[str, int] = field(default_factory=dict)
-    """How often this service put the wrong name to a speaker, by label.
+    speaker_mistakes: int = 0
+    """How often a person changed the speaker this service gave a word.
 
-    Kept apart from the word counts because a diarisation mistake is a
+    One total, with no labels; the module docstring says why. Kept apart from the word counts because a diarisation mistake is a
     different kind of mistake. Section 23 names repeated speaker mistakes as
     their own category, and folding them in with misheard words would make
     both numbers mean less than they do now.
@@ -302,20 +312,11 @@ class ProviderRecord:
             self.dimensions[key] = found
         return found
 
-    def repeated_speaker_mistakes(
-        self, minimum: int = REPEATED_MISTAKE_THRESHOLD
-    ) -> dict[str, int]:
-        return {
-            speaker: count
-            for speaker, count in self.speaker_mistakes.items()
-            if count >= minimum
-        }
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "overall": self.overall.to_dict(),
             "dimensions": {key: counts.to_dict() for key, counts in self.dimensions.items()},
-            "speaker_mistakes": dict(self.speaker_mistakes),
+            "speaker_mistakes": self.speaker_mistakes,
         }
 
     @classmethod
@@ -327,13 +328,15 @@ class ProviderRecord:
         raw_dimensions = data.get("dimensions")
         if isinstance(raw_dimensions, dict):
             for key, counts in raw_dimensions.items():
-                if isinstance(key, str) and key.strip():
+                if isinstance(key, str) and key.strip() and not key.startswith(_SPEAKER_PREFIX):
                     record.dimensions[key] = OutcomeCounts.from_dict(counts)
         raw_speakers = data.get("speaker_mistakes")
         if isinstance(raw_speakers, dict):
-            for speaker, count in raw_speakers.items():
-                if isinstance(speaker, str) and speaker.strip():
-                    record.speaker_mistakes[speaker] = _clean_count(count)
+            # An older file kept the mistakes by speaker label. The total is
+            # kept and the labels are dropped, so the next save writes none.
+            record.speaker_mistakes = sum(_clean_count(count) for count in raw_speakers.values())
+        else:
+            record.speaker_mistakes = _clean_count(raw_speakers)
         return record
 
 
@@ -389,7 +392,15 @@ class ProviderStatistics:
             self.providers[provider] = found
         return found
 
-    def record_choice(self, observation: Observation, corrected: bool = False) -> None:
+    # Every method here takes an ``amount``. A negative amount takes back a
+    # result counted earlier, which is how a word whose result changed has
+    # its old result removed before the new one goes in. No count goes
+    # below zero: a file that lost a count in a race between two windows
+    # must not end up describing a negative number of words.
+
+    def record_choice(
+        self, observation: Observation, corrected: bool = False, amount: int = 1
+    ) -> None:
         """Note that this service's candidate became the final word.
 
         ``corrected`` says whether a person then changed it. Both cases are
@@ -398,32 +409,33 @@ class ProviderStatistics:
         mistakes and no idea what to divide it by.
         """
         record = self.record_for(observation.provider)
-        _add_choice(record.overall, corrected)
+        _add_choice(record.overall, corrected, amount)
         for key in observation.dimension_keys():
-            _add_choice(record.counts_for(key), corrected)
+            _add_choice(record.counts_for(key), corrected, amount)
 
-    def record_rejection(self, observation: Observation) -> None:
+    def record_rejection(self, observation: Observation, amount: int = 1) -> None:
         """Note that this service's candidate lost to another one."""
         record = self.record_for(observation.provider)
-        record.overall.rejected += 1
+        record.overall.rejected = max(0, record.overall.rejected + amount)
         for key in observation.dimension_keys():
-            record.counts_for(key).rejected += 1
+            counts = record.counts_for(key)
+            counts.rejected = max(0, counts.rejected + amount)
 
-    def record_speaker_correction(self, provider: Provider, wrong_speaker: str | None) -> None:
+    def record_speaker_correction(self, provider: Provider, amount: int = 1) -> None:
         """Note that a person changed who this service said was talking."""
         record = self.record_for(provider)
-        label = (wrong_speaker or "").strip() or "Unattributed"
-        record.speaker_mistakes[label] = record.speaker_mistakes.get(label, 0) + 1
+        record.speaker_mistakes = max(0, record.speaker_mistakes + amount)
 
-    def record_review(self, category: Confidence, corrected: bool) -> None:
+    def record_review(self, category: Confidence, corrected: bool, amount: int = 1) -> None:
         """Note that a person looked at a word in this confidence category."""
         counts = self.confidence.get(category)
         if counts is None:
             counts = ConfidenceCounts()
             self.confidence[category] = counts
-        counts.reviewed += 1
+        counts.reviewed = max(0, counts.reviewed + amount)
         if corrected:
-            counts.corrected += 1
+            counts.corrected = max(0, counts.corrected + amount)
+        counts.corrected = min(counts.corrected, counts.reviewed)
 
     # -- Reading it back ------------------------------------------------
 
@@ -464,8 +476,8 @@ class ProviderStatistics:
         :data:`MINIMUM_DIMENSION_EVIDENCE` words behind it is used. The
         alternative, multiplying the weights of every dimension a word
         belongs to, would be arithmetic rather than evidence: the dimensions
-        overlap heavily, so a German name spoken by a known speaker would be
-        marked down three times for what is one observation.
+        overlap heavily, so a German name that is also one of the user's
+        terms would be marked down three times for what is one observation.
         """
         record = self.providers.get(observation.provider)
         if record is None:
@@ -478,14 +490,13 @@ class ProviderStatistics:
 
     def repeated_speaker_mistakes(
         self, minimum: int = REPEATED_MISTAKE_THRESHOLD
-    ) -> dict[Provider, dict[str, int]]:
-        """The speakers each service keeps getting wrong."""
-        found: dict[Provider, dict[str, int]] = {}
-        for provider, record in self.providers.items():
-            repeated = record.repeated_speaker_mistakes(minimum)
-            if repeated:
-                found[provider] = repeated
-        return found
+    ) -> dict[Provider, int]:
+        """How many speaker mistakes each service has made, where it keeps happening."""
+        return {
+            provider: record.speaker_mistakes
+            for provider, record in self.providers.items()
+            if record.speaker_mistakes >= minimum
+        }
 
     def repeated_numeric_mistakes(
         self, minimum: int = REPEATED_MISTAKE_THRESHOLD
@@ -545,14 +556,10 @@ class ProviderStatistics:
         for reliability in self.confidence_reliability():
             if reliability.reviewed > 0:
                 sentences.append(reliability.summary)
-        repeated_speakers = self.repeated_speaker_mistakes()
-        for provider, mistakes in repeated_speakers.items():
-            listed = ", ".join(
-                f"{speaker} ({_times(count)})" for speaker, count in sorted(mistakes.items())
-            )
+        for provider, count in self.repeated_speaker_mistakes().items():
             sentences.append(
-                f"{provider.display_name} keeps putting the wrong name to the same "
-                f"speakers: {listed}."
+                f"{provider.display_name} has given the wrong speaker to a word "
+                f"{_times(count)}."
             )
         for provider, count in self.repeated_numeric_mistakes().items():
             sentences.append(
@@ -621,6 +628,55 @@ class CalibrationStore:
     def save(self, statistics: ProviderStatistics) -> bool:
         return write_json_object(self._path, statistics.to_dict())
 
+    def apply(self, change: Callable[[ProviderStatistics], None]) -> bool:
+        """Read the file fresh, make one change to it, and write it back.
+
+        Every review window saves through this rather than through a copy it
+        loaded earlier. Two windows that each loaded the file, changed their
+        copy and saved it would each wipe out the other's figures; reading
+        immediately before writing narrows that to the moment between the
+        two, where losing one count is acceptable.
+
+        A file that exists but cannot be read is left alone, and the answer
+        is ``False``. :meth:`load` reads such a file as empty statistics,
+        which is right for showing them, but writing that back would replace
+        every count gathered so far with this one change. The file may only
+        be held open for a moment by a backup or virus scanner, or have a
+        mistake in a hand edit; either way the caller keeps the words
+        uncounted, and a later save that can read the file counts them.
+        """
+        data = read_json_object(self._path)
+        if data is None and self._path.exists():
+            return False
+        statistics = ProviderStatistics() if data is None else ProviderStatistics.from_dict(data)
+        change(statistics)
+        return self.save(statistics)
+
+
+def reliability_weights(statistics: ProviderStatistics) -> ReliabilityWeights:
+    """The reliability table reconcile uses, moved by what the statistics show.
+
+    Reconcile starts each service at its own default reliability, which
+    differ between services, while every learned weight here starts at the
+    same :data:`DEFAULT_WEIGHT`. So the learned weight is used as a ratio to
+    that starting point rather than in place of the default: a service whose
+    weight has fallen ten per cent below where it started is believed ten
+    per cent less than its default. Used directly, a learned 0.9 would mark
+    OpenAI down from 1.0 before a single word of evidence had been seen.
+
+    A service with no evidence keeps its default exactly, and the prior in
+    :attr:`OutcomeCounts.weight` keeps a few corrections from moving any
+    service far. Only each service's overall weight is used; the finer
+    breakdown by language, names, numbers and vocabulary category is not.
+    """
+    by_provider = dict(DEFAULT_PROVIDER_RELIABILITY)
+    for provider, record in statistics.providers.items():
+        if record.overall.chosen <= 0:
+            continue
+        default = by_provider.get(provider, DEFAULT_RELIABILITY.unknown_provider)
+        by_provider[provider] = default * record.overall.weight / DEFAULT_WEIGHT
+    return ReliabilityWeights(by_provider=by_provider)
+
 
 # -- Saying it in words --------------------------------------------------
 
@@ -686,10 +742,11 @@ def _percentage(part: int, whole: int) -> str:
 # -- Reading loaded values -----------------------------------------------
 
 
-def _add_choice(counts: OutcomeCounts, corrected: bool) -> None:
-    counts.chosen += 1
+def _add_choice(counts: OutcomeCounts, corrected: bool, amount: int = 1) -> None:
+    counts.chosen = max(0, counts.chosen + amount)
     if corrected:
-        counts.corrected += 1
+        counts.corrected = max(0, counts.corrected + amount)
+    counts.corrected = min(counts.corrected, counts.chosen)
 
 
 def _clean_count(value: Any, default: int = 0) -> int:

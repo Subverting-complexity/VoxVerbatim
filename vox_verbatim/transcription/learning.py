@@ -13,7 +13,9 @@ language it was in, whether it was a name or a number, and whether it was
 one of the values that must never be guessed at. The second is handing that
 to the two places that can use it: the learned corrections the vocabulary
 module already keeps, and the provider statistics that the weighting is
-built from. The third, and the only one that involves a judgement, is
+built from. The statistics are fed by :func:`note_settled_words` and
+:func:`count_settled_words`, which count each word a person settles once
+however many times the transcript is saved. The third, and the only one that involves a judgement, is
 deciding which corrections should be taught back to the services as terms
 to listen out for.
 
@@ -82,7 +84,7 @@ on its own.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from vox_verbatim.transcription.calibration import Observation, ProviderStatistics
@@ -94,6 +96,7 @@ from vox_verbatim.transcription.model import (
     ReviewReason,
     ReviewStatus,
     RiskCategory,
+    StatisticsNote,
     Transcript,
 )
 from vox_verbatim.transcription.normalise import read_number
@@ -239,7 +242,6 @@ class TextCorrection:
         return Observation(
             provider=self.provider,
             language=self.language,
-            speaker=self.speaker,
             is_proper_noun=self.is_proper_noun,
             is_numeric=self.is_numeric,
             vocabulary_category=self.vocabulary_category,
@@ -393,7 +395,6 @@ def extract_corrections(
                 Observation(
                     provider=reference.provider,
                     language=language,
-                    speaker=original.speaker,
                     is_proper_noun=_looks_like_a_name(original.text, at_sentence_start),
                     is_numeric=_is_numeric(original.text),
                     vocabulary_category=category,
@@ -472,7 +473,6 @@ def learn_from_review(
     before: Transcript,
     after: Transcript,
     vocabulary: Vocabulary,
-    statistics: ProviderStatistics | None = None,
     when: str | None = None,
     profile_id: str = LEARNED_PROFILE_ID,
 ) -> LearningResult:
@@ -489,6 +489,11 @@ def learn_from_review(
     recurring correction to the services on its own, grammar fixes included,
     which is the behaviour this module exists to improve on; taking both
     would put back exactly what the rule above filtered out.
+
+    It does not touch the provider statistics. It compares two whole
+    transcripts, so it would count every word in them, including the ones
+    nobody looked at; :func:`count_settled_words` counts only what a person
+    settled.
     """
     index = VocabularyIndex(_profile_terms(vocabulary))
     report = extract_corrections(before, after, index)
@@ -505,27 +510,198 @@ def learn_from_review(
             recorded.append(stored)
 
     taught = _teach(vocabulary, report, profile_id)
-    if statistics is not None:
-        update_statistics(statistics, report)
     return LearningResult(report=report, recorded=tuple(recorded), taught=tuple(taught))
 
 
-def update_statistics(statistics: ProviderStatistics, report: CorrectionReport) -> None:
-    """Fold one review into the provider statistics.
+# -- Counting each settled word once -------------------------------------
 
-    This is the only place the two halves meet. Learning knows what a
-    transcript is and the statistics do not, which is why the crossing
-    happens here rather than in the store.
+#: The review states in which a person has decided about a word.
+_SETTLED = (ReviewStatus.CORRECTED, ReviewStatus.CONFIRMED)
+
+
+@dataclass(frozen=True)
+class StatisticsChange:
+    """What one save adds to and takes out of the provider statistics.
+
+    It is a change rather than a finished set of statistics, so that it can
+    be applied to the file as it stands on disk at the moment of writing.
+    See :meth:`~vox_verbatim.transcription.calibration.CalibrationStore.apply`.
     """
-    for choice in report.choices:
-        statistics.record_choice(choice.observation, corrected=choice.corrected)
-    for observation in report.rejections:
-        statistics.record_rejection(observation)
-    for correction in report.speaker_corrections:
-        if correction.provider is not None:
-            statistics.record_speaker_correction(correction.provider, correction.wrong_speaker)
-    for word in report.reviewed:
-        statistics.record_review(word.confidence, word.corrected)
+
+    removed: tuple[StatisticsNote, ...] = ()
+    """Results counted earlier that no longer hold, to be taken out."""
+
+    added: tuple[StatisticsNote, ...] = ()
+    """Results to be counted now."""
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.removed or self.added)
+
+    def apply(self, statistics: ProviderStatistics) -> None:
+        for note in self.removed:
+            _count(statistics, note, -1)
+        for note in self.added:
+            _count(statistics, note, 1)
+
+
+def note_settled_words(
+    before: Transcript,
+    after: Transcript,
+    excluded: frozenset[str] | set[str] = frozenset(),
+    vocabulary: VocabularyIndex | None = None,
+) -> Transcript:
+    """Return ``after`` with a statistics note on each newly settled word.
+
+    ``before`` is the transcript as it was saved last time and ``after`` the
+    one about to be saved. A word gets a note in the save where it goes from
+    unsettled to corrected or confirmed. That is the one moment both facts
+    the statistics need are still available: ``before`` says which service
+    was believed and how confident the word was, and ``after`` says what
+    the person decided.
+
+    Three kinds of word get no note, and so are never counted:
+
+    * a word that is not settled, such as one still pending;
+    * a word whose identifier is in ``excluded``, which the caller uses for
+      the words a folder replacement rule answered: nobody listened to them,
+      and the decision behind the rule was counted when it was made;
+    * a word already settled in ``before`` with no note, which is a word
+      settled before notes existed. Its service is no longer known, and a
+      guess would be counted as evidence.
+
+    A word keeps its note from then on. :func:`count_settled_words` reads it.
+    """
+    before_tokens = {token.id: token for token in before.tokens}
+    sentence_starts = _sentence_starts(before.tokens)
+    tokens = list(after.tokens)
+    changed = False
+    for position, token in enumerate(tokens):
+        if (
+            token.statistics_note is not None
+            or token.review_status not in _SETTLED
+            or token.id in excluded
+        ):
+            continue
+        original = before_tokens.get(token.id)
+        if original is None or original.review_status in _SETTLED:
+            continue
+        noted = replace(token)
+        noted.statistics_note = _note_for(
+            original, token, sentence_starts.get(token.id, False), vocabulary
+        )
+        tokens[position] = noted
+        changed = True
+    return replace(after, tokens=tokens) if changed else after
+
+
+def count_settled_words(transcript: Transcript) -> tuple[StatisticsChange, Transcript]:
+    """Work out what the statistics must change to match this transcript.
+
+    Each noted word is compared with what its note says was counted. A word
+    not counted yet is added. A word whose result has changed has its old
+    result taken out and the new one put in, so a word corrected and then
+    changed back to what the service said ends up counted once, as right.
+    A word that is no longer settled has its result taken out. A word whose
+    result is unchanged is left alone, which is why saving the same
+    transcript twice changes nothing.
+
+    Returns the change and the transcript with every note brought up to
+    date. The caller saves that transcript only if the change was saved:
+    otherwise it saves the one it passed in, and the words stay uncounted
+    until a save that works.
+    """
+    removed: list[StatisticsNote] = []
+    added: list[StatisticsNote] = []
+    tokens = list(transcript.tokens)
+    changed = False
+    for position, token in enumerate(tokens):
+        note = token.statistics_note
+        if note is None:
+            continue
+        if token.review_status in _SETTLED:
+            current = replace(
+                note,
+                counted=True,
+                text_corrected=_text_changed(note.service_text, token.text),
+                speaker_corrected=(token.speaker or None) != (note.service_speaker or None),
+            )
+        else:
+            current = replace(note, counted=False, text_corrected=False, speaker_corrected=False)
+        if current == note:
+            continue
+        if note.counted:
+            removed.append(note)
+        if current.counted:
+            added.append(current)
+        updated = replace(token)
+        updated.statistics_note = current
+        tokens[position] = updated
+        changed = True
+    change = StatisticsChange(removed=tuple(removed), added=tuple(added))
+    return change, (replace(transcript, tokens=tokens) if changed else transcript)
+
+
+def _note_for(
+    original: FinalToken,
+    settled: FinalToken,
+    at_sentence_start: bool,
+    vocabulary: VocabularyIndex | None,
+) -> StatisticsNote:
+    """The facts about one word that the statistics are keyed on."""
+    language = settled.language if settled.language is not Language.UNKNOWN else original.language
+    category = _vocabulary_category(vocabulary, settled.text)
+    return StatisticsNote(
+        provider=original.text_source,
+        language=language,
+        is_proper_noun=_looks_like_a_name(settled.text, at_sentence_start),
+        is_numeric=_is_numeric(settled.text) or _is_numeric(original.text),
+        vocabulary_category=category.value if category is not None else None,
+        confidence=original.confidence,
+        service_text=original.original_text or original.text,
+        rejected_providers=tuple(reference.provider for reference in original.rejected_tokens),
+        speaker_provider=original.speaker_source,
+        service_speaker=original.speaker,
+    )
+
+
+def _count(statistics: ProviderStatistics, note: StatisticsNote, amount: int) -> None:
+    """Add one word's counted result to the statistics, or take it out."""
+    category = _term_category(note.vocabulary_category)
+    if note.provider is not None:
+        statistics.record_choice(
+            _note_observation(note, note.provider, category),
+            corrected=note.text_corrected,
+            amount=amount,
+        )
+    for provider in note.rejected_providers:
+        statistics.record_rejection(_note_observation(note, provider, category), amount=amount)
+    if note.speaker_corrected and note.speaker_provider is not None:
+        statistics.record_speaker_correction(note.speaker_provider, amount=amount)
+    statistics.record_review(
+        note.confidence, note.text_corrected or note.speaker_corrected, amount=amount
+    )
+
+
+def _note_observation(
+    note: StatisticsNote, provider: Provider, category: TermCategory | None
+) -> Observation:
+    return Observation(
+        provider=provider,
+        language=note.language,
+        is_proper_noun=note.is_proper_noun,
+        is_numeric=note.is_numeric,
+        vocabulary_category=category,
+    )
+
+
+def _term_category(value: str | None) -> TermCategory | None:
+    if value is None:
+        return None
+    try:
+        return TermCategory(value)
+    except ValueError:
+        return None
 
 
 def repeated_mistakes(
@@ -680,7 +856,6 @@ def _observation(
     return Observation(
         provider=original.text_source,
         language=language,
-        speaker=original.speaker,
         is_proper_noun=_looks_like_a_name(corrected.text, at_sentence_start),
         is_numeric=_is_numeric(corrected.text) or _is_numeric(original.text),
         vocabulary_category=category,

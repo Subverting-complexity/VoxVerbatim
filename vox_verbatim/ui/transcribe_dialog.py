@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
 )
 
 from vox_verbatim.audio.library import AudioFile
+from vox_verbatim.paths import calibration_file_path
 from vox_verbatim.settings import (
     MAXIMUM_EXPECTED_SPEAKER_COUNT,
     MINIMUM_EXPECTED_SPEAKER_COUNT,
@@ -944,6 +945,7 @@ class TranscribeDialog(QDialog):
             configuration=self.chosen_configuration(),
             settings=self._settings,
             vocabulary=self._vocabulary,
+            calibration_path=calibration_file_path(),
         )
 
     # -- What it will cost -------------------------------------------------

@@ -19,6 +19,7 @@ from vox_verbatim.transcription.normalise import (
     EquivalenceKind,
     are_equivalent,
     equivalence_kind,
+    is_filler,
     is_number_word,
     is_punctuation_only,
     normalise,
@@ -632,3 +633,16 @@ def test_a_word_that_can_belong_to_a_spoken_number_is_a_number_word(text):
 @pytest.mark.parametrize("text", ["cost", "rand", "", "data", "often"])
 def test_an_ordinary_word_is_not_a_number_word(text):
     assert not is_number_word(text)
+
+
+# -- Fillers ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", ["Um,", "äh", "uh", "Ähm.", "um uh"])
+def test_a_filler_sound_is_a_filler(text: str) -> None:
+    assert is_filler(text)
+
+
+@pytest.mark.parametrize("text", ["umbrella", "m", "", ",", "um we"])
+def test_a_word_is_not_a_filler(text: str) -> None:
+    assert not is_filler(text)

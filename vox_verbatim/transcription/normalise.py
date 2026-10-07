@@ -441,6 +441,17 @@ _LEFT_ALONE = frozenset(
 #: rules, which know the language spoken at that place.
 _SAME_WORD_ACROSS_LANGUAGES = {"ja": "yeah"}
 
+#: Sounds a speaker makes while thinking, in English, German and Afrikaans.
+#: Some services write them down and others tidy them away, so a service
+#: that left one out has not heard anything different. "m" is not here on
+#: purpose: it is also the unit "metre", and a missing unit is a real loss.
+FILLER_WORDS = frozenset(
+    (
+        "um", "umm", "uh", "uhm", "er", "erm", "ah", "hmm", "mm", "mhm",
+        "äh", "ähm", "öh", "hm",
+    )
+)
+
 
 # -- Building the comparison forms ---------------------------------------
 
@@ -922,6 +933,24 @@ def is_punctuation_only(text: str) -> bool:
     kept, because they carry timing, but they take no part in alignment.
     """
     return not normalise(text)
+
+
+#: :data:`FILLER_WORDS` with case, punctuation and German letters settled,
+#: so "äh" is held here as "aeh".
+_FILLER_FORMS = frozenset(_spelling_form(word, False) for word in FILLER_WORDS)
+
+
+def is_filler(text: str) -> bool:
+    """Whether this text is nothing but filler sounds, such as "um" or "äh".
+
+    Punctuation and case are set aside, so "Um," is a filler. A text with no
+    word in it at all is not.
+
+    The spelling form is used rather than :func:`normalise`, because
+    :func:`normalise` joins words, and "um uh" would come out as "umuh".
+    """
+    words = _spelling_form(text, False).split()
+    return bool(words) and all(word in _FILLER_FORMS for word in words)
 
 
 def read_number(text: str) -> int | None:

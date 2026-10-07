@@ -119,6 +119,7 @@ from vox_verbatim.transcription.normalise import (
     EquivalenceKind,
     are_equivalent,
     equivalence_kind,
+    is_filler,
     normalise,
     spelled_as,
 )
@@ -835,6 +836,7 @@ def _decide_scope(
         return []
 
     risk = _risk_for(scope, backbone_texts, groups)
+    counted = _contesting_silence(deletions, winner, runner_up, scope, backbone_texts, risk)
     unresolved, reasons = _settle(
         winner=winner,
         runner_up=runner_up,
@@ -863,7 +865,7 @@ def _decide_scope(
         acoustic_source=_group_acoustic_source(winner),
         alignment_quality=_group_quality(winner),
         agreeing_providers=len(winner.providers),
-        contesting_providers=len(_contesting(groups, winner)) + len(deletions),
+        contesting_providers=len(_contesting(groups, winner)) + len(counted),
         language_support=_language_support(winner, evidence, languages),
         in_vocabulary=winner.in_vocabulary,
         is_high_risk=bool(risk),
@@ -872,7 +874,7 @@ def _decide_scope(
     assessment = assess_text(signals)
     reasons.extend(assessment.reasons)
     category = assessment.category
-    if _everybody_agreed(groups, winner, deletions) and not assessment.reasons:
+    if _everybody_agreed(groups, winner, counted) and not assessment.reasons:
         # Section 12.1, applied as written: where every service that spoke
         # said the same thing once formatting is set aside, the word is
         # accepted with high confidence. Running unanimous agreement back
@@ -1424,6 +1426,70 @@ def _is_hallucination(
     if measured is None:
         return False
     return measured < options.hallucination_acoustic_ceiling
+
+
+def _contesting_silence(
+    deletions: tuple[Provider, ...],
+    winner: _Group,
+    runner_up: _Group | None,
+    scope: tuple[int, ...],
+    backbone_texts: Sequence[str],
+    risk: tuple[RiskCategory, ...],
+) -> tuple[Provider, ...]:
+    """The silent services that count as arguing against the winning word.
+
+    Normally every one of them. A service that heard nothing where others
+    heard a word is evidence that the word may not be there.
+
+    That stops being true for a filler such as "um" and for a word that
+    repeats the word beside it, as in "we, we". Several services tidy speech
+    and leave both out as a matter of style, so their silence says nothing
+    about the audio. Counting it put every such word in the review list as
+    a disagreement even when every service that wrote it agreed. Where no
+    service heard a different word, the silence is set aside.
+
+    Only the confidence of the word uses this. Removing a word that nobody
+    else heard still counts every silent service; see
+    :func:`_is_hallucination`. ``risk`` is not consulted yet.
+    """
+    if runner_up is not None:
+        return deletions
+    if is_filler(winner.display) or _is_repeated_beside(scope, backbone_texts, winner.display):
+        return ()
+    return deletions
+
+
+def _is_repeated_beside(
+    scope: tuple[int, ...],
+    backbone_texts: Sequence[str],
+    text: str,
+) -> bool:
+    """Whether this text repeats the backbone word just before or after it.
+
+    Both sides are checked because alignment does not choose which copy of
+    a stutter a service left out. Given "so we we should" against "so we
+    should", it puts the gap on the first "we", which only matches the word
+    after it. Punctuation the backbone returned as its own entry is
+    skipped, so "we , we" is still a repeat.
+    """
+    form = normalise(text)
+    if not form:
+        return False
+    before = range(scope[0] - 1, -1, -1)
+    after = range(scope[-1] + 1, len(backbone_texts))
+    return any(
+        _nearest_word(backbone_texts, positions) == form for positions in (before, after)
+    )
+
+
+def _nearest_word(backbone_texts: Sequence[str], positions: range) -> str:
+    """The comparison form of the first real word at these positions, or ""."""
+    for position in positions:
+        if 0 <= position < len(backbone_texts):
+            form = normalise(backbone_texts[position])
+            if form:
+                return form
+    return ""
 
 
 def _apply_adjudication(

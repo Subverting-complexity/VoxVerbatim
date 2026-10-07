@@ -936,6 +936,75 @@ def test_a_service_absent_from_the_whole_neighbourhood_is_not_a_deletion() -> No
     assert "word109" not in kept
 
 
+# -- Words a service tidies away ------------------------------------------
+
+
+def _two_wrote_two_left_out(
+    written: list[str], tidied: list[str], third: list[str] | None = None
+) -> list:
+    """ElevenLabs and Deepgram write ``written``; OpenAI and AssemblyAI tidy it.
+
+    ``third``, where given, is what AssemblyAI wrote instead.
+    """
+    return reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, written),
+            spoken(Provider.DEEPGRAM, written),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.ASSEMBLYAI, third or tidied, timed=False),
+        )
+    )
+
+
+def test_a_filler_some_services_leave_out_is_not_a_disagreement() -> None:
+    """A service that tidies away "um" has not heard anything different."""
+    tokens = _two_wrote_two_left_out(["so", "um", "we", "go"], ["so", "we", "go"])
+
+    filler = token_at(tokens, "um")
+    assert filler.text_confidence is Confidence.HIGH
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in filler.review_reasons
+    assert not filler.needs_review
+
+
+def test_a_stutter_some_services_leave_out_is_not_a_disagreement() -> None:
+    """Either copy of "we, we" may be the one left out.
+
+    Alignment puts the gap on the first "we,", so that copy has only the
+    word after it to match. "so" comes first because a gap on the very
+    first word of a recording is ignored for a different reason.
+    """
+    tokens = _two_wrote_two_left_out(
+        ["so", "we,", "we,", "should", "go"], ["so", "we,", "should", "go"]
+    )
+
+    assert texts_of(tokens) == ["so", "we,", "we,", "should", "go"]
+    for repeat in tokens[1:3]:
+        assert repeat.text_confidence is Confidence.HIGH
+        assert ReviewReason.PROVIDER_DISAGREEMENT not in repeat.review_reasons
+        assert not repeat.needs_review
+
+
+def test_a_real_word_a_service_left_out_is_still_a_disagreement() -> None:
+    tokens = _two_wrote_two_left_out(["we", "should", "sign", "today"], ["we", "sign", "today"])
+
+    assert ReviewReason.PROVIDER_DISAGREEMENT in token_at(tokens, "should").review_reasons
+
+
+def test_a_repeat_with_a_word_between_is_still_a_disagreement() -> None:
+    tokens = _two_wrote_two_left_out(["we", "should", "we", "go"], ["we", "should", "go"])
+
+    assert texts_of(tokens) == ["we", "should", "we", "go"]
+    assert ReviewReason.PROVIDER_DISAGREEMENT in tokens[2].review_reasons
+
+
+def test_a_filler_another_service_heard_as_a_word_is_still_a_disagreement() -> None:
+    tokens = _two_wrote_two_left_out(
+        ["so", "um", "we", "go"], ["so", "we", "go"], third=["so", "on", "we", "go"]
+    )
+
+    assert ReviewReason.PROVIDER_DISAGREEMENT in tokens[1].review_reasons
+
+
 # -- The risk window ----------------------------------------------------------
 
 

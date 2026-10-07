@@ -31,6 +31,12 @@ Treat accessibility failures as functional bugs. Where there is a choice between
 Always fetch https://www.assemblyai.com/docs/llms.txt before writing AssemblyAI code.
 The API has changed — do not rely on memorized parameter names.
 
+## Filing issues
+
+`wf issue-apply` sometimes fails to create issues in this repository. GitHub answers the `createIssue` request that carries the issue fields with a general "Something went wrong" error, and no issue is filed. It happened on 2026-10-07 for every request that created 2 or 3 issues at once; a request that created 1 issue the same day worked. The cause is not known. The same create works in `Subverting-complexity/claude-plugins`, so it is specific to this repository or its field values.
+
+When it happens, create the issue without its fields, then run `wf issue-apply` again with the new issue's `number` on the spec entry. That second run sets the fields and the stage without an error. No issue tracks this fault. To find the cause, first check which field value GitHub refuses during a create.
+
 
 ## Supplementary Files
 

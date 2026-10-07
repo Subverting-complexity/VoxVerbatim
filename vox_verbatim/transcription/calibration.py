@@ -76,6 +76,11 @@ from typing import Any
 
 from vox_verbatim.json_store import read_json_object, write_json_object
 from vox_verbatim.transcription.model import Confidence, Language, Provider
+from vox_verbatim.transcription.reconcile import (
+    DEFAULT_PROVIDER_RELIABILITY,
+    DEFAULT_RELIABILITY,
+    ReliabilityWeights,
+)
 from vox_verbatim.transcription.vocabulary import TermCategory
 
 CALIBRATION_FILE_NAME = "calibration.json"
@@ -635,6 +640,31 @@ class CalibrationStore:
         statistics = self.load()
         change(statistics)
         return self.save(statistics)
+
+
+def reliability_weights(statistics: ProviderStatistics) -> ReliabilityWeights:
+    """The reliability table reconcile uses, moved by what the statistics show.
+
+    Reconcile starts each service at its own default reliability, which
+    differ between services, while every learned weight here starts at the
+    same :data:`DEFAULT_WEIGHT`. So the learned weight is used as a ratio to
+    that starting point rather than in place of the default: a service whose
+    weight has fallen ten per cent below where it started is believed ten
+    per cent less than its default. Used directly, a learned 0.9 would mark
+    OpenAI down from 1.0 before a single word of evidence had been seen.
+
+    A service with no evidence keeps its default exactly, and the prior in
+    :attr:`OutcomeCounts.weight` keeps a few corrections from moving any
+    service far. Only each service's overall weight is used; the finer
+    breakdown by language, names, numbers and vocabulary category is not.
+    """
+    by_provider = dict(DEFAULT_PROVIDER_RELIABILITY)
+    for provider, record in statistics.providers.items():
+        if record.overall.chosen <= 0:
+            continue
+        default = by_provider.get(provider, DEFAULT_RELIABILITY.unknown_provider)
+        by_provider[provider] = default * record.overall.weight / DEFAULT_WEIGHT
+    return ReliabilityWeights(by_provider=by_provider)
 
 
 # -- Saying it in words --------------------------------------------------

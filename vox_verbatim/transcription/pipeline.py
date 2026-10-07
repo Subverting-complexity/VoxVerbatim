@@ -53,6 +53,7 @@ from vox_verbatim.transcription import (
     timing as timing_rules,
 )
 from vox_verbatim.transcription.alignment import build_aligned_table, choose_backbone
+from vox_verbatim.transcription.calibration import CalibrationStore, reliability_weights
 from vox_verbatim.transcription.context import build_context_package
 from vox_verbatim.transcription.model import (
     AudioSpan,
@@ -85,6 +86,13 @@ class PipelineOptions:
     configuration: RecordingConfiguration = field(default_factory=RecordingConfiguration)
     settings: TranscriptionSettings = field(default_factory=TranscriptionSettings)
     vocabulary: Vocabulary = field(default_factory=Vocabulary)
+    calibration_path: Path | None = None
+    """Where the service statistics are kept, or ``None`` to use the defaults.
+
+    The file is read when each recording starts, so a run picks up what the
+    reviews before it taught. Reconcile then believes each service by what
+    it has earned rather than by the fixed defaults alone.
+    """
 
 
 @dataclass(frozen=True)
@@ -233,6 +241,7 @@ def transcribe_recording(
             vocabulary=index,
             languages=languages,
             results=succeeded,
+            weights=_learned_weights(options.calibration_path),
         )
     except Exception as error:  # noqa: BLE001 - the paid answers must still be kept
         # The services have answered and been paid by now. A fault here used
@@ -287,6 +296,23 @@ def transcribe_recording(
 
     transcript.speakers = _speakers_in(tokens, configuration)
     return _finish(transcript, store, started, stopped=_stopped(cancelled))
+
+
+def _learned_weights(path: Path | None) -> reconcile_rules.ReliabilityWeights:
+    """The reliability weights the service statistics support, or the defaults.
+
+    A missing or damaged statistics file gives the defaults. Each candidate
+    records the weight it was given under ``provider_reliability`` beside
+    the other parts of its score, so a result that changed because of what
+    was learned can be explained from the transcript.
+    """
+    if path is None:
+        return reconcile_rules.DEFAULT_RELIABILITY
+    try:
+        return reliability_weights(CalibrationStore(path).load())
+    except Exception:  # noqa: BLE001 - statistics must never stop a run
+        _log.warning("The service statistics could not be used; using the defaults.", exc_info=True)
+        return reconcile_rules.DEFAULT_RELIABILITY
 
 
 def _guarded(transcript: Transcript, stage_name: str, run: Callable[[], object]) -> None:

@@ -13,8 +13,10 @@ from vox_verbatim.transcription.calibration import (
     Observation,
     ProviderStatistics,
     evidence_phrase,
+    reliability_weights,
 )
 from vox_verbatim.transcription.model import Confidence, Language, Provider
+from vox_verbatim.transcription.reconcile import DEFAULT_PROVIDER_RELIABILITY
 from vox_verbatim.transcription.vocabulary import TermCategory
 
 
@@ -341,3 +343,22 @@ def test_two_stores_writing_to_one_file_keep_both_changes(tmp_path):
     loaded = first.load()
     assert loaded.counts_for(Provider.OPENAI).chosen == 1
     assert loaded.counts_for(Provider.DEEPGRAM).chosen == 1
+
+
+def test_reliability_weights_keep_the_defaults_where_there_is_no_evidence():
+    weights = reliability_weights(ProviderStatistics())
+
+    assert dict(weights.by_provider) == DEFAULT_PROVIDER_RELIABILITY
+
+
+def test_reliability_weights_move_a_service_by_its_learned_weight():
+    statistics = ProviderStatistics()
+    record_words(statistics, chosen=100, corrected=50, observation=word(Provider.MICROSOFT))
+
+    weights = reliability_weights(statistics)
+
+    learned = statistics.weight_for(Provider.MICROSOFT)
+    expected = DEFAULT_PROVIDER_RELIABILITY[Provider.MICROSOFT] * learned / DEFAULT_WEIGHT
+    assert weights.for_provider(Provider.MICROSOFT) == expected
+    assert weights.for_provider(Provider.MICROSOFT) < DEFAULT_PROVIDER_RELIABILITY[Provider.MICROSOFT]
+    assert weights.for_provider(Provider.OPENAI) == DEFAULT_PROVIDER_RELIABILITY[Provider.OPENAI]

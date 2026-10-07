@@ -14,8 +14,17 @@ from __future__ import annotations
 import pytest
 
 from vox_verbatim.settings import TranscriptionSettings
+from vox_verbatim.transcription import pipeline
 from vox_verbatim.transcription.adjudication import Adjudicator
-from vox_verbatim.transcription.model import Language, Provider
+from vox_verbatim.transcription.model import (
+    Candidate,
+    Confidence,
+    FinalToken,
+    Language,
+    Provider,
+    ReviewReason,
+    Transcript,
+)
 from vox_verbatim.transcription.providers import registry
 from vox_verbatim.transcription.providers.base import (
     ProviderNotConfigured,
@@ -111,4 +120,34 @@ def test_the_adjudication_model_reports_the_key_too():
 
     problem = adjudicator.describe_configuration_problem()
     assert problem is not None
-    assert_names_the_key_and_hides_it(problem, "OpenAI")
+    assert_names_the_key_and_hides_it(problem, "OpenAI adjudication")
+
+
+def test_a_run_says_why_adjudication_was_not_used():
+    """Skipping adjudication is right; skipping it without a word is not."""
+    disputed = FinalToken(
+        text="w", start=0.0, end=0.5, text_confidence=Confidence.REVIEW_REQUIRED,
+        candidates=[Candidate("w"), Candidate("v")],
+    )
+    disputed.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+    tokens = [disputed, FinalToken(text="and", text_confidence=Confidence.HIGH)]
+    transcript = Transcript(recording_name="a", tokens=tokens)
+    settings = TranscriptionSettings()
+    settings.processing.adjudication_enabled = True
+    settings.openai_adjudication.api_key = BAD_KEY
+
+    result = pipeline._adjudicate(
+        tokens, transcript, settings, _NoContext(), pipeline._Reporter(None), None
+    )
+
+    assert result is tokens
+    assert transcript.requests == []
+    [warning] = transcript.warnings
+    assert warning.startswith("Adjudication was not used: ")
+    assert_names_the_key_and_hides_it(warning, "OpenAI adjudication")
+
+
+class _NoContext:
+    recording_context = ""
+    term_texts = ()
+    languages = ()

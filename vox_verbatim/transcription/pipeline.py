@@ -471,6 +471,14 @@ def _adjudicate(
         timeout_seconds=settings.processing.provider_timeout_seconds,
     )
     if not adjudicator.is_configured():
+        # Said only where there was something to ask about, as above. A key
+        # the request could not even carry, such as one with a pasted dash,
+        # would otherwise leave the words waiting with no reason given.
+        if _build_disputes(tokens, transcript):
+            transcript.warnings.append(
+                f"Adjudication was not used: {adjudicator.describe_configuration_problem()}. "
+                "The words it would have settled are waiting for review."
+            )
         return tokens
 
     disputes = _build_disputes(tokens, transcript)

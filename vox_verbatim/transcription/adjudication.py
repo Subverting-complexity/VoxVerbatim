@@ -477,7 +477,7 @@ class Adjudicator:
         """What is missing, in words a person can act on, or None if nothing is."""
         if not self._api_key.strip():
             return "no API key has been entered for the adjudication model"
-        key_problem = describe_api_key_characters("OpenAI", self._api_key)
+        key_problem = describe_api_key_characters("OpenAI adjudication", self._api_key)
         if key_problem is not None:
             return key_problem
         if not self._model:

@@ -725,9 +725,13 @@ class FinalToken:
         every word of a recording with no word times as unresolved, and hid
         the few real disputes among them. The word still needs review, so it
         stays in the queue, and its text rating still wins when it is worse.
+
+        The test is on the missing start, not on the timing rating alone. A
+        person who rejects a word's time keeps its numbers and marks the
+        timing unresolved, and that judgement must still count in full.
         """
         timing = self.timing_confidence
-        if timing is Confidence.UNRESOLVED:
+        if timing is Confidence.UNRESOLVED and self.start is None:
             timing = Confidence.REVIEW_SUGGESTED
         return Confidence.weakest(self.text_confidence, timing, self.speaker_confidence)
 

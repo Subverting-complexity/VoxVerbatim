@@ -246,11 +246,20 @@ def test_a_word_where_nothing_was_chosen_is_still_unresolved() -> None:
 
 
 def test_a_doubtful_time_still_weighs_on_the_word_in_full() -> None:
-    """Only a missing time is capped; a time that is there but disputed is not."""
+    """Only a missing time is capped; a time that is there but doubtful is not."""
     token = _untimed(Confidence.HIGH)
     token.timing_confidence = Confidence.REVIEW_REQUIRED
 
     assert token.confidence is Confidence.REVIEW_REQUIRED
+
+
+def test_a_time_a_person_rejected_is_not_capped() -> None:
+    """The word keeps its numbers, so its time is rejected rather than missing."""
+    token = _untimed(Confidence.HIGH)
+    token.start = 30.0
+    token.end = 30.5
+
+    assert token.confidence is Confidence.UNRESOLVED
 
 
 def test_the_counts_by_rating_follow_the_capped_rating() -> None:

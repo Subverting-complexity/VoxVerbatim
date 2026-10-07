@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable
 from dataclasses import replace
@@ -1250,9 +1251,10 @@ class MainWindow(QMainWindow):
         holds every occurrence found in those.
 
         So the only recording spared is one whose transcript file is still,
-        exactly, the file that was read. The project wrote down what each
-        transcript said its own age was at the moment it was analysed, and the
-        question here is whether the file still says the same thing. If it does
+        exactly, the file that was read. The project wrote down a mark for each
+        transcript at the moment it was analysed, built from its age, its size
+        and its file ID by :func:`_transcript_mark`, and the question here is
+        whether the file still gives the same mark. If it does
         not, for any reason and in either direction, the recording is read
         again. A recording the project has no note of has never been analysed,
         or was analysed and could not be read, and is read as well.
@@ -1296,7 +1298,7 @@ class MainWindow(QMainWindow):
                 wanted.append(name)
                 continue
             try:
-                now = store.transcript_path.stat().st_mtime_ns
+                now = _transcript_mark(store.transcript_path)
             except OSError:
                 # The file cannot even be asked about. Read it, so that the
                 # trouble is reported by whoever tries rather than becoming a
@@ -2050,12 +2052,11 @@ def _transcript_times(
     recording_names: list[str],
     stores: dict[str, TranscriptStore],
 ) -> dict[str, int]:
-    """What each of these transcript files says its own age is, in nanoseconds.
+    """The mark of each of these transcript files, as :func:`_transcript_mark` gives it.
 
-    The number is whatever the filesystem gives, kept as it is given and never
-    turned into a date. Its only use is being compared with the same
-    filesystem's answer about the same file on a later opening, and for that
-    the exact number matters and its meaning does not.
+    The number is never turned into a date or read for meaning. Its only use
+    is being compared with the same file's mark on a later opening, and for
+    that the exact number matters and its meaning does not.
 
     A file that cannot be asked leaves no entry, and neither does a recording
     with no store behind it. Both come back to the caller as "nothing is known
@@ -2068,10 +2069,38 @@ def _transcript_times(
         if store is None:
             continue
         try:
-            times[name] = store.transcript_path.stat().st_mtime_ns
+            times[name] = _transcript_mark(store.transcript_path)
         except OSError:
             continue
     return times
+
+
+def _transcript_mark(path: Path) -> int:
+    """One number that changes whenever this transcript file is written again.
+
+    The modification time alone is not enough, and the gap is easy to hit. On
+    Windows a file's time comes from a clock that moves in steps of about
+    fifteen milliseconds, so two saves of one transcript inside a single step
+    leave it with exactly the same time. Measured on Windows 11, more than half
+    of a run of back-to-back saves did. A correction written straight after an
+    analysis is that case, and the recording would never be read again.
+
+    So the size and the file's identity go in as well. Every transcript is
+    written to a temporary file that then takes the old one's place, which
+    gives it a new file ID on every save, so a rewrite changes the mark even
+    when its time and its size do not. A filesystem that has no file IDs
+    reports 0 for every file, and the mark then rests on the time and the size.
+
+    The three are folded into one whole number so that the project file keeps
+    the shape it always had. A project written before the size and the ID were
+    part of it holds bare times, which never match, so each recording in it is
+    read once more and noted afresh.
+
+    Raises :class:`OSError` when the file cannot be asked about.
+    """
+    facts = path.stat()
+    key = f"{facts.st_mtime_ns}:{facts.st_size}:{facts.st_ino}".encode("ascii")
+    return int.from_bytes(hashlib.blake2b(key, digest_size=8).digest(), "big")
 
 
 def _times_after(

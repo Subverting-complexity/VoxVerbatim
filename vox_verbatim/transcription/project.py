@@ -676,12 +676,13 @@ class ProjectState:
     """What each recording's transcript file said its own age was when it was analysed.
 
     Keyed on the recording's file name with its extension, as everything else
-    about a recording is, and holding the modification time the filesystem
-    reported for its transcript, in nanoseconds, exactly as it was given. The
-    number is never interpreted here and never compared with a wall clock. It
-    is only ever compared with the same filesystem's answer about the same
-    file later on, and the single question asked of it is whether the two are
-    the same number.
+    about a recording is, and holding one whole number built from the
+    transcript's modification time, size and file ID. The main window makes
+    the number and says why the time alone is not enough; the name of this
+    field is older than that, and is kept so that existing project files still
+    load. The number is never interpreted here and never compared with a wall
+    clock. It is only ever compared with the same file's number later on, and
+    the single question asked of it is whether the two are the same.
 
     That is what makes it trustworthy where a time of day is not. A stamp
     saying when the analysis ran comes from the system clock, and the time a

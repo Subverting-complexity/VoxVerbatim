@@ -24,6 +24,7 @@ from vox_verbatim.transcription.diarisation import (
     find_speaker_concerns,
     map_speaker_labels,
     reconcile_speakers,
+    speaker_doubt_stretches,
     speaker_turns,
     speakers_to_expect,
     turns_from_result,
@@ -407,3 +408,127 @@ def test_applying_a_set_of_decisions_counts_what_really_changed():
     assert first.speaker == "speaker_1"
     assert second.speaker == "speaker_1"
     assert (second.start, second.end) == (2.0, 2.4)
+
+
+# -- Remembering the other speaker, and showing the doubt once -------------
+
+
+def test_a_changed_speaker_keeps_the_one_it_replaced_as_the_alternative():
+    token = final("Yes", 42.18, 42.41, "speaker_0")
+    other = [turn("B", 42.0, 43.0)]
+    mapping = map_speaker_labels([turn("speaker_1", 42.0, 43.0)], other)
+
+    decision, = reconcile_speakers([token], other, mapping)
+    apply_speaker(token, decision)
+
+    assert decision.alternative == "speaker_0"
+    assert token.speaker == "speaker_1"
+    assert token.speaker_alternative == "speaker_0"
+
+
+def test_a_speaker_only_the_second_opinion_heard_is_kept_as_the_alternative():
+    token = final("yes", 42.18, 42.41, "speaker_0")
+    other = [turn("A", 0.0, 10.0), turn("B", 42.0, 43.0)]
+    mapping = map_speaker_labels([turn("speaker_0", 0.0, 10.0)], other)
+
+    decision, = reconcile_speakers([token], other, mapping)
+    apply_speaker(token, decision)
+
+    assert token.speaker == "speaker_0"
+    assert token.speaker_alternative == "B"
+
+
+def test_agreement_records_no_alternative():
+    token = final("yes", 42.18, 42.41, "speaker_1")
+    other = [turn("B", 42.0, 43.0)]
+    mapping = map_speaker_labels([turn("speaker_1", 42.0, 43.0)], other)
+
+    decision, = reconcile_speakers([token], other, mapping)
+    apply_speaker(token, decision)
+
+    assert token.speaker_alternative is None
+
+
+def doubted(text: str, start: float, end: float, speaker: str, alternative: str | None) -> FinalToken:
+    token = final(text, start, end, speaker)
+    token.speaker_alternative = alternative
+    token.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    return token
+
+
+def test_a_run_of_doubted_words_is_one_stretch_from_its_first_start_to_its_last_end():
+    words = [
+        doubted("I", 10.0, 10.2, "speaker_1", "speaker_0"),
+        doubted("think", 10.3, 10.6, "speaker_1", "speaker_0"),
+        doubted("so", 10.7, 11.0, "speaker_1", "speaker_0"),
+    ]
+
+    stretch, = speaker_doubt_stretches(words)
+
+    assert (stretch.start, stretch.end) == (10.0, 11.0)
+    assert stretch.speakers == ("speaker_1", "speaker_0")
+    assert stretch.token_ids == tuple(word.id for word in words)
+
+
+def test_punctuation_and_untimed_words_do_not_split_a_stretch():
+    comma = final(",", 10.6, 10.6, "speaker_1")
+    untimed = FinalToken(text="um", speaker="speaker_1")
+    words = [
+        doubted("I", 10.0, 10.2, "speaker_1", "speaker_0"),
+        comma,
+        untimed,
+        doubted("so", 10.7, 11.0, "speaker_1", "speaker_0"),
+    ]
+
+    stretches = speaker_doubt_stretches(words)
+
+    assert len(stretches) == 1
+    assert stretches[0].token_ids == (words[0].id, words[3].id)
+
+
+def test_a_spoken_word_without_doubt_splits_a_stretch():
+    words = [
+        doubted("I", 10.0, 10.2, "speaker_1", "speaker_0"),
+        final("think", 10.3, 10.6, "speaker_1"),
+        doubted("so", 10.7, 11.0, "speaker_1", "speaker_0"),
+    ]
+
+    assert len(speaker_doubt_stretches(words)) == 2
+
+
+def test_a_change_in_the_two_people_in_doubt_splits_a_stretch():
+    words = [
+        doubted("I", 10.0, 10.2, "speaker_1", "speaker_0"),
+        doubted("so", 10.7, 11.0, "speaker_1", "speaker_2"),
+    ]
+
+    first, second = speaker_doubt_stretches(words)
+
+    assert first.speakers == ("speaker_1", "speaker_0")
+    assert second.speakers == ("speaker_1", "speaker_2")
+
+
+def test_a_word_a_person_corrected_is_not_in_any_stretch():
+    corrected = doubted("I", 10.0, 10.2, "speaker_1", "speaker_0")
+    corrected.human_corrected = True
+
+    assert speaker_doubt_stretches([corrected]) == []
+
+
+def test_a_boundary_word_with_no_alternative_takes_the_nearest_other_speaker():
+    """A disputed boundary is a word that may belong to the turn beside it."""
+    words = [
+        final("Right", 9.0, 9.4, "speaker_0"),
+        doubted("yes", 10.0, 10.3, "speaker_1", None),
+        final("and", 10.4, 10.6, "speaker_1"),
+    ]
+
+    stretch, = speaker_doubt_stretches(words)
+
+    assert stretch.speakers == ("speaker_1", "speaker_0")
+
+
+def test_a_doubt_with_nobody_else_to_name_still_lists_the_one_speaker():
+    stretch, = speaker_doubt_stretches([doubted("yes", 1.0, 1.3, "speaker_0", None)])
+
+    assert stretch.speakers == ("speaker_0",)

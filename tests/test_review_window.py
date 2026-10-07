@@ -19,6 +19,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAccessible, QKeySequence
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -863,14 +864,16 @@ def test_clearing_a_reason_hides_the_words_flagged_for_it(qapp, tmp_path):
             RECORDING: make_transcript(
                 [
                     make_token("one", reasons=(ReviewReason.PROVIDER_DISAGREEMENT,)),
-                    make_token("two", start=40.0, reasons=(ReviewReason.SPEAKER_UNCERTAIN,)),
+                    make_token(
+                        "two", start=40.0, reasons=(ReviewReason.LOW_ACOUSTIC_CONFIDENCE,)
+                    ),
                 ]
             )
         }
     )
     window = open_window(tmp_path, folder, process=True)
     try:
-        window._reason_boxes[ReviewReason.SPEAKER_UNCERTAIN].setChecked(False)
+        window._reason_boxes[ReviewReason.LOW_ACOUSTIC_CONFIDENCE].setChecked(False)
 
         assert [row.word for row in window._group_model.rows()] == ["one"]
     finally:
@@ -4681,5 +4684,202 @@ def test_a_correction_after_accepting_the_timing_is_counted(qapp, tmp_path):
 
         counts = store.load().counts_for(Provider.ELEVENLABS)
         assert (counts.chosen, counts.corrected) == (1, 1)
+    finally:
+        window.close()
+
+
+# -- Doubt about the speaker alone ---------------------------------------
+
+
+def speaker_doubt(text: str, start: float) -> FinalToken:
+    """A word every service agreed on, given to another person by the second opinion."""
+    return make_token(
+        text,
+        start=start,
+        end=start + 0.4,
+        reasons=(ReviewReason.SPEAKER_UNCERTAIN,),
+        confidence=Confidence.HIGH,
+        speaker="speaker_1",
+        speaker_alternative="speaker_0",
+    )
+
+
+def speaker_doubt_folder() -> Folder:
+    """One stretch of three words in doubt for their speaker, and one real text doubt."""
+    return Folder(
+        {
+            RECORDING: make_transcript(
+                [
+                    make_token("15,000", start=10.0, end=10.5),
+                    speaker_doubt("that", 40.0),
+                    speaker_doubt("is", 40.5),
+                    speaker_doubt("fine", 41.0),
+                ]
+            )
+        }
+    )
+
+
+def next_tab_stop(widget):
+    """The control Tab moves to from this one."""
+    candidate = widget.nextInFocusChain()
+    while candidate is not widget:
+        if (
+            candidate.focusPolicy() & Qt.FocusPolicy.TabFocus
+            and candidate.isVisible()
+            and candidate.isEnabled()
+        ):
+            return candidate
+        candidate = candidate.nextInFocusChain()
+    return None
+
+
+def test_flagged_in_leaves_out_a_word_in_doubt_only_for_its_speaker():
+    transcript = speaker_doubt_folder().transcripts[RECORDING]
+
+    items = review_lists.flagged_in(RECORDING, transcript)
+
+    assert [item.text for item in items] == ["15,000"]
+
+
+def test_a_word_in_doubt_for_its_text_and_its_speaker_is_still_flagged():
+    both = make_token(
+        "fifteen",
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT, ReviewReason.SPEAKER_UNCERTAIN),
+    )
+
+    items = review_lists.flagged_in(RECORDING, make_transcript([both]))
+
+    assert [item.text for item in items] == ["fifteen"]
+
+
+def test_speaker_only_words_are_not_rows_of_the_word_list(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        assert [row.word for row in window._group_model.rows()] == ["15,000"]
+    finally:
+        window.close()
+
+
+def test_a_stretch_whose_speaker_is_in_doubt_is_one_row(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        model = window._speaker_doubt_model
+        assert model.rowCount() == 1
+        cells = [model.data(model.index(0, column)) for column in range(model.columnCount())]
+        assert cells == [RECORDING, "0:40", "0:41", "Speaker speaker_1 or Jacques"]
+        assert window._speaker_doubt_count_label.text() == (
+            "1 stretch of speech where the speaker is in doubt."
+        )
+    finally:
+        window.close()
+
+
+def test_the_speaker_doubts_are_saved_in_the_project(qapp, tmp_path):
+    store = ProjectStore(tmp_path)
+    window = open_window(tmp_path, speaker_doubt_folder(), store=store, process=True)
+    try:
+        window._save_project(quiet=True)
+    finally:
+        window.close()
+
+    saved = store.load().speaker_doubts
+    assert [(item.start, item.end, item.speakers) for item in saved] == [
+        (40.0, 41.4, ["Speaker speaker_1", "Jacques"])
+    ]
+
+
+def test_the_speaker_doubt_list_says_so_when_there_are_none(qapp, tmp_path):
+    window = open_window(tmp_path, process=True)
+    try:
+        assert window._speaker_doubt_model.rowCount() == 0
+        assert window._speaker_doubt_count_label.text().startswith("No speaker doubts.")
+    finally:
+        window.close()
+
+
+def test_the_speaker_doubt_list_is_named_as_its_label_reads(qapp, tmp_path):
+    window = open_window(tmp_path)
+    try:
+        label = window._speaker_doubts_label
+        assert label.buddy() is window._speaker_doubts
+        assert label.text().replace("&", "") == window._speaker_doubts.accessibleName()
+        assert window._speaker_doubts.accessibleName() == "Speaker doubts"
+        assert window._speaker_doubts.accessibleDescription()
+    finally:
+        window.close()
+
+
+def test_tab_reaches_the_speaker_doubts_between_the_occurrences_and_the_settings(
+    qapp, tmp_path
+):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        assert next_tab_stop(window._occurrences) is window._speaker_doubts
+        assert next_tab_stop(window._speaker_doubts) is window._process_button
+    finally:
+        window.close()
+
+
+def test_the_panel_key_reaches_the_speaker_doubts(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        window._occurrences.setFocus()
+        window.focus_next_panel()
+
+        assert window._status_label.text() == "Speaker doubts"
+    finally:
+        window.close()
+
+
+def test_a_screen_reader_hears_the_times_and_both_speakers(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        model = window._speaker_doubt_model
+        spoken = [
+            model.data(model.index(0, column), Qt.ItemDataRole.AccessibleTextRole)
+            for column in range(model.columnCount())
+        ]
+        assert spoken[0] == RECORDING
+        assert spoken[1] == review_lists.time_spoken(40.0)
+        assert spoken[2] == review_lists.time_spoken(41.4)
+        assert spoken[3] == "Speaker speaker_1 or Jacques"
+        assert "Speaker speaker_1 or Jacques" in model.data(
+            model.index(0, 2), Qt.ItemDataRole.ToolTipRole
+        )
+    finally:
+        window.close()
+
+
+def test_moving_to_a_stretch_says_what_it_is(qapp, tmp_path, monkeypatch):
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        said.clear()
+        window._speaker_doubts.select_row(0)
+
+        assert any("Speaker speaker_1 or Jacques" in message for message in said)
+    finally:
+        window.close()
+
+
+def test_enter_on_a_stretch_plays_the_whole_stretch(qapp, tmp_path):
+    player = FakePlayer()
+    window = open_window(tmp_path, speaker_doubt_folder(), player=player, process=True)
+    try:
+        window._speaker_doubts.setFocus()
+        window._speaker_doubts.select_row(0)
+        QTest.keyClick(window._speaker_doubts, Qt.Key.Key_Return)
+        player.becomes_ready()
+
+        assert player.seeks[-1] == int((40.0 - CONTEXT_SECONDS) * 1000)
+        assert window._stop_at_ms is not None
+        assert window._stop_at_ms == int((41.4 + CONTEXT_SECONDS) * 1000)
+        assert player.plays >= 1
     finally:
         window.close()

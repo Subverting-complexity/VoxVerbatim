@@ -40,6 +40,7 @@ from typing import Any, Iterable, Sequence
 
 from vox_verbatim.formatting import format_duration, spoken_duration
 from vox_verbatim.transcription.cost import CostEstimate, describe_money
+from vox_verbatim.transcription.diarisation import speaker_doubt_stretches
 from vox_verbatim.transcription.model import (
     Confidence,
     FinalToken,
@@ -305,6 +306,7 @@ def render_review_report(
         _report_services(transcript, cost),
         _report_confidence(transcript),
         _report_review_queue(transcript),
+        _report_speaker_doubts(transcript),
         _report_escalation(transcript),
         _report_warnings(transcript),
     ]
@@ -582,17 +584,29 @@ def _report_confidence(transcript: Transcript) -> str:
 
 def _report_review_queue(transcript: Transcript) -> str:
     lines = ["## What still needs you", ""]
-    pending = transcript.review_tokens
+    # A word held back only for its speaker is not listed here. Its text is
+    # not in doubt, and the section after this one lists the speaker doubts
+    # once for each stretch of speech rather than once for every word.
+    flagged = transcript.word_review_tokens
+    pending = flagged
     if _most_words_are_untimed(transcript):
         # The statement at the top already explains these words, once.
         pending = [
             token for token in pending
             if token.review_reasons != [ReviewReason.UNALIGNED_WORD]
         ]
-    if not pending and transcript.review_tokens:
+    if not pending and flagged:
         lines.append(
             "Nothing else. Every word flagged for review was flagged only because "
             "it has no time, which the start of this report explains."
+        )
+        lines.append("")
+        return "\n".join(lines)
+    if not pending and transcript.review_tokens:
+        lines.append(
+            "Nothing about the words. The services agreed on the text everywhere "
+            "and nothing fell into a category that must not be guessed at. Only "
+            "who said some of it is in doubt, which the next section lists."
         )
         lines.append("")
         return "\n".join(lines)
@@ -643,6 +657,50 @@ def _report_review_queue(transcript: Transcript) -> str:
         )
         lines.append("")
     return "\n".join(lines)
+
+
+def _report_speaker_doubts(transcript: Transcript) -> str:
+    """List each stretch of speech whose speaker is in doubt, once.
+
+    Left out entirely when there is none. The text of these words is not in
+    question, which is why they are not in the table above; what is in
+    question is which of two people said them, and that is one question for
+    a whole stretch rather than one for each word in it.
+    """
+    stretches = speaker_doubt_stretches(transcript.tokens)
+    if not stretches:
+        return ""
+    lines = ["## Where the speaker is in doubt", ""]
+    count = (
+        "One stretch of speech has"
+        if len(stretches) == 1
+        else f"{len(stretches):,} stretches of speech have"
+    )
+    lines.append(
+        f"{count} words the services agree on but heard from different people. "
+        "Each row gives where the stretch starts and ends and the two speakers "
+        "the services heard, so you can play it and decide who was speaking."
+    )
+    lines.append("")
+    lines.append("| From | To | Speakers the services heard |")
+    lines.append("| --- | --- | --- |")
+    for stretch in stretches:
+        lines.append(
+            "| {start} | {end} | {speakers} |".format(
+                start=format_timestamp(stretch.start),
+                end=format_timestamp(stretch.end),
+                speakers=_cell(_doubted_speakers_in_words(transcript, stretch.speakers)),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _doubted_speakers_in_words(transcript: Transcript, speakers: Sequence[str]) -> str:
+    names = [_speaker_name(transcript, label) for label in speakers] or [_UNKNOWN_SPEAKER]
+    if len(names) < 2:
+        names.append("another speaker")
+    return " or ".join(names)
 
 
 def _reasons_in_words(token: FinalToken) -> str:

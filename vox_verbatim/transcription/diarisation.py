@@ -237,6 +237,8 @@ class SpeakerDecision:
     confidence: Confidence
     changed: bool
     review_reason: ReviewReason | None = None
+    alternative: str | None = None
+    """The other speaker heard for this word, where the two services differ."""
 
 
 # -- Reading the speakers out of what a service returned -----------------
@@ -553,6 +555,7 @@ def reconcile_speakers(
                     confidence=Confidence.REVIEW_REQUIRED,
                     changed=False,
                     review_reason=ReviewReason.SPEAKER_UNCERTAIN,
+                    alternative=turn.speaker,
                 )
             )
             continue
@@ -578,6 +581,7 @@ def reconcile_speakers(
                 confidence=Confidence.REVIEW_SUGGESTED,
                 changed=True,
                 review_reason=ReviewReason.SPEAKER_UNCERTAIN,
+                alternative=token.speaker,
             )
         )
     return decisions
@@ -612,6 +616,8 @@ def apply_speaker(token: FinalToken, decision: SpeakerDecision) -> None:
         token.speaker = decision.speaker
     token.speaker_source = decision.source
     token.speaker_confidence = decision.confidence
+    if decision.alternative is not None and decision.alternative != token.speaker:
+        token.speaker_alternative = decision.alternative
     if decision.review_reason is not None:
         token.flag(decision.review_reason)
 
@@ -628,3 +634,144 @@ def apply_speakers(tokens: Sequence[FinalToken], decisions: Sequence[SpeakerDeci
             changed += 1
         apply_speaker(token, decision)
     return changed
+
+
+# -- Showing the doubt to a person ---------------------------------------
+
+
+@dataclass(frozen=True)
+class SpeakerDoubtStretch:
+    """One stretch of speech whose speaker is in doubt, shown once.
+
+    ``speakers`` is the speaker the words were given first and the other
+    speaker the services heard second. It holds one label alone where no
+    other speaker could be found, and is empty where the words carry no
+    speaker at all. ``start`` and ``end`` are ``None`` only where no word in
+    the stretch has any time behind it.
+    """
+
+    start: float | None
+    end: float | None
+    speakers: tuple[str, ...]
+    token_ids: tuple[str, ...]
+
+
+def speaker_doubt_stretches(tokens: Sequence[FinalToken]) -> list[SpeakerDoubtStretch]:
+    """Join the words whose speaker is in doubt into stretches of speech.
+
+    The second opinion disagrees about whole passages, not single words, and
+    listing every word of a passage on its own row filled the review list
+    with hundreds of rows that all said the same thing. So consecutive
+    doubted words that are in doubt between the same two people become one
+    stretch. A punctuation mark or a word with no time between them does
+    not split the stretch, because neither is speech a person could hear as
+    a break. A spoken word with no speaker doubt does split it, and so does
+    a change in the two people the doubt is between.
+
+    A word a person has already corrected is left out: their decision has
+    settled who said it.
+    """
+    stretches: list[SpeakerDoubtStretch] = []
+    speakers: tuple[str, ...] | None = None
+    ids: list[str] = []
+    start: float | None = None
+    end: float | None = None
+
+    def close() -> None:
+        nonlocal speakers, ids, start, end
+        if speakers is not None and ids:
+            stretches.append(SpeakerDoubtStretch(start, end, speakers, tuple(ids)))
+        speakers, ids, start, end = None, [], None, None
+
+    neighbours = _nearest_other_speakers(tokens)
+    for index, token in enumerate(tokens):
+        if token.human_corrected or not token.has_speaker_doubt:
+            if _breaks_a_stretch(token):
+                close()
+            continue
+        pair = _doubted_speakers(token, neighbours[index])
+        if speakers is not None and set(pair) != set(speakers):
+            close()
+        if speakers is None:
+            speakers = pair
+        ids.append(token.id)
+        first, last = _bounds_of(token)
+        if first is not None:
+            start = first if start is None else min(start, first)
+        if last is not None:
+            end = last if end is None else max(end, last)
+    close()
+    return stretches
+
+
+def _bounds_of(token: FinalToken) -> tuple[float | None, float | None]:
+    """Where a word starts and ends, or the wider span it sits in.
+
+    Read field by field rather than through ``audible_span``, which builds a
+    span and refuses one whose numbers are out of order. A stretch is only
+    being described here, and one badly timed word must not stop the whole
+    list from being made.
+    """
+    span = token.source_audio_span
+    first = token.start if token.start is not None else (span.start if span else None)
+    last = token.end if token.end is not None else (span.end if span else None)
+    return first, last
+
+
+def _breaks_a_stretch(token: FinalToken) -> bool:
+    """Whether a word without speaker doubt ends the stretch it falls in."""
+    if _bounds_of(token) == (None, None):
+        return False
+    return any(character.isalnum() for character in token.text)
+
+
+def _doubted_speakers(token: FinalToken, neighbour: str | None) -> tuple[str, ...]:
+    """The two people a doubted word lies between, as far as they are known.
+
+    The other speaker comes from the word itself where the second opinion
+    recorded one. Where it did not, which is a word on a speaker boundary
+    that the services placed differently, the other person is ``neighbour``:
+    the nearest word's speaker that differs from this word's, since that is
+    who the word would belong to if the boundary moved.
+    """
+    own = token.speaker
+    other = token.speaker_alternative
+    if other is None or other == own:
+        other = neighbour
+    return tuple(label for label in (own, other) if label is not None)
+
+
+def _nearest_other_speakers(tokens: Sequence[FinalToken]) -> list[str | None]:
+    """For each word, the nearest other word's speaker that differs from its own.
+
+    Worked out in one pass each way, remembering where each speaker was last
+    seen, rather than by searching outwards from every word: a long recording
+    with one speaker and many doubted words would otherwise be searched end
+    to end once for each of them. The earlier neighbour wins a tie, because a
+    disputed boundary is most often a word that may still belong to the turn
+    before it.
+    """
+    count = len(tokens)
+    before: list[tuple[int, str] | None] = [None] * count
+    after: list[tuple[int, str] | None] = [None] * count
+    for order, slots in ((range(count), before), (range(count - 1, -1, -1), after)):
+        seen: dict[str, int] = {}
+        for index in order:
+            own = tokens[index].speaker
+            nearest: tuple[int, str] | None = None
+            for label, position in seen.items():
+                if label == own:
+                    continue
+                distance = abs(index - position)
+                if nearest is None or distance < nearest[0]:
+                    nearest = (distance, label)
+            slots[index] = nearest
+            if own is not None:
+                seen[own] = index
+    result: list[str | None] = []
+    for earlier, later in zip(before, after):
+        if earlier is not None and (later is None or earlier[0] <= later[0]):
+            result.append(earlier[1])
+        else:
+            result.append(later[1] if later is not None else None)
+    return result

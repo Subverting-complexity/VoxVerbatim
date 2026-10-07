@@ -24,6 +24,8 @@ from vox_verbatim.transcription.model import (
     Provider,
     ProviderResult,
     ProviderToken,
+    ReviewReason,
+    ReviewStatus,
     Transcript,
 )
 from vox_verbatim.transcription.normalise import normalise
@@ -276,3 +278,50 @@ def test_the_counts_by_rating_follow_the_capped_rating() -> None:
 
     assert counts[Confidence.REVIEW_SUGGESTED] == 2
     assert counts[Confidence.UNRESOLVED] == 1
+
+
+# -- Which words belong in the word review list --------------------------
+
+
+def test_a_word_in_doubt_only_for_its_speaker_needs_no_word_review():
+    token = FinalToken(text="yes")
+    token.flag(ReviewReason.SPEAKER_UNCERTAIN)
+
+    assert token.needs_review is True
+    assert token.needs_word_review is False
+    assert token.has_speaker_doubt is True
+
+
+def test_a_word_in_doubt_for_its_text_and_its_speaker_needs_word_review():
+    token = FinalToken(text="fifteen")
+    token.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    token.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+
+    assert token.needs_word_review is True
+    assert token.has_speaker_doubt is True
+
+
+def test_overlapping_speech_is_still_a_reason_to_review_the_word():
+    """Two voices at once make the words harder to hear, not only their owner."""
+    token = FinalToken(text="yes")
+    token.flag(ReviewReason.OVERLAPPING_SPEECH)
+
+    assert token.needs_word_review is True
+
+
+def test_a_pending_word_with_no_reason_still_needs_word_review():
+    token = FinalToken(text="yes", review_status=ReviewStatus.PENDING)
+
+    assert token.needs_word_review is True
+    assert FinalToken(text="settled").needs_word_review is False
+
+
+def test_the_word_review_tokens_leave_out_speaker_only_doubts():
+    speaker_only = FinalToken(text="yes")
+    speaker_only.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    text_doubt = FinalToken(text="fifteen")
+    text_doubt.flag(ReviewReason.NUMERIC_DISAGREEMENT)
+    transcript = Transcript(recording_name="a", tokens=[speaker_only, text_doubt])
+
+    assert transcript.review_tokens == [speaker_only, text_doubt]
+    assert transcript.word_review_tokens == [text_doubt]

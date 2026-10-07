@@ -167,9 +167,13 @@ class ReviewQueueModel(QAbstractTableModel):
         belongs in the queue is this model's job and nowhere else's. A
         corrected word stops needing review, so it leaves the queue the
         next time the transcript is handed back.
+
+        A word held only for doubt about its speaker is not a word to review:
+        its text is settled, and the doubt is shown once for each stretch of
+        speech instead of once for each word in it.
         """
         self.beginResetModel()
-        self._all = [token for token in tokens if token.needs_review]
+        self._all = [token for token in tokens if token.needs_word_review]
         self._rows = self._filtered()
         self.endResetModel()
         self.visibleCountChanged.emit(len(self._rows), len(self._all))

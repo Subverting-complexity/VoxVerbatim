@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from typing import TypeVar
 
 from PySide6.QtCore import QByteArray, QModelIndex, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
@@ -47,6 +48,7 @@ from vox_verbatim.transcription.project import (
     Occurrence,
     ProjectState,
     ProjectStore,
+    SpeakerDoubtItem,
 )
 from vox_verbatim.transcription.runner import RunSummary
 from vox_verbatim.transcription.runner import summarise as summarise_transcription
@@ -62,7 +64,7 @@ from vox_verbatim.ui.file_info_panel import FileInfoPanel
 from vox_verbatim.ui.file_table import AudioFileTableModel, AudioFileTableView
 from vox_verbatim.ui.folder_panel import FolderPanel
 from vox_verbatim.ui.help_dialogs import KeyboardShortcutsDialog, show_about
-from vox_verbatim.ui.review_lists import flagged_in
+from vox_verbatim.ui.review_lists import flagged_in, speaker_doubts_in
 from vox_verbatim.ui.review_window import ReviewWindow
 from vox_verbatim.ui.settings_dialog import SettingsDialog
 from vox_verbatim.ui.transcribe_dialog import TranscribeDialog
@@ -75,6 +77,10 @@ from vox_verbatim.ui.player_panel import (
 )
 
 _log = logging.getLogger(__name__)
+
+#: Anything saved per recording and replaced whole when the recording is read
+#: again: a flagged word, or a stretch whose speaker is in doubt.
+_PerRecording = TypeVar("_PerRecording", FlaggedItem, SpeakerDoubtItem)
 
 #: Moving through the file list with the arrow keys should not load a new
 #: file into the player on every key press, so loading waits for the
@@ -1021,6 +1027,7 @@ class MainWindow(QMainWindow):
         analysed_as = _transcript_times(analysing, stores)
         corrected, problems = self._answer_with_project_rules(state, analysing, reader)
         gathered: dict[str, list[FlaggedItem]] = {}
+        doubts: dict[str, list[SpeakerDoubtItem]] = {}
         # The folder listing is handed over as well as the shorter list of
         # recordings to read, and the two are different questions. The second
         # says which transcripts have to be parsed on this run; the first says
@@ -1030,10 +1037,11 @@ class MainWindow(QMainWindow):
         state = grouping.reprocess(
             state,
             analysing,
-            self._reading_and_noting(reader, gathered),
+            self._reading_and_noting(reader, gathered, doubts),
             present_recordings=recording_names,
         )
         state.flagged = _flagged_after(state.flagged, analysing, gathered)
+        state.speaker_doubts = _flagged_after(state.speaker_doubts, analysing, doubts)
         written, unwritten_problems = self._write_recorded_answers(state, analysing, reader)
         corrected += written
         problems.extend(unwritten_problems)
@@ -1313,6 +1321,7 @@ class MainWindow(QMainWindow):
     def _reading_and_noting(
         reader: _TranscriptReader,
         gathered: dict[str, list[FlaggedItem]],
+        doubts: dict[str, list[SpeakerDoubtItem]] | None = None,
     ) -> Callable[[str], Transcript | None]:
         """A loader that also takes the flagged words out of what it reads.
 
@@ -1339,6 +1348,8 @@ class MainWindow(QMainWindow):
             transcript = reader.load(recording_name)
             if transcript is not None:
                 gathered[recording_name] = flagged_in(recording_name, transcript)
+                if doubts is not None:
+                    doubts[recording_name] = speaker_doubts_in(recording_name, transcript)
             return transcript
 
         return load
@@ -2011,11 +2022,14 @@ def _let_the_window_breathe() -> None:
 
 
 def _flagged_after(
-    remembered: list[FlaggedItem],
+    remembered: list[_PerRecording],
     analysed: list[str],
-    gathered: dict[str, list[FlaggedItem]],
-) -> list[FlaggedItem]:
+    gathered: dict[str, list[_PerRecording]],
+) -> list[_PerRecording]:
     """The project's flagged words after one analysis, kept honest both ways.
+
+    The stretches whose speaker is in doubt are kept by the same rule, and
+    pass through here too.
 
     A recording that was read is described entirely by what it was just found
     to say. Its old entries are dropped rather than merged with the new ones,

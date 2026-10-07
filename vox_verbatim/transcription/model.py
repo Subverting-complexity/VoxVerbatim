@@ -288,6 +288,18 @@ _REVIEW_REASON_DISPLAY_NAMES: dict[ReviewReason, str] = {
 }
 
 
+SPEAKER_ONLY_REASONS: frozenset[ReviewReason] = frozenset({ReviewReason.SPEAKER_UNCERTAIN})
+"""Reasons that are about who said a word, and say nothing about its text.
+
+A word held for one of these alone is left out of the word review list. Its
+text is as settled as any other word's, and listing it word by word buried
+the real text doubts under hundreds of rows that all said the same thing.
+The doubt is shown instead once for each stretch of speech it covers.
+Overlapping speech is deliberately not here: two voices at once makes the
+words themselves harder to hear, not only their owner.
+"""
+
+
 class RiskCategory(str, Enum):
     """Kinds of content that must never be settled by plausibility alone.
 
@@ -645,6 +657,14 @@ class FinalToken:
     speaker: str | None = None
     speaker_source: Provider | None = None
     speaker_confidence: Confidence = Confidence.UNRESOLVED
+    speaker_alternative: str | None = None
+    """The other speaker a service heard, where the speaker is in doubt.
+
+    Set when the second opinion disagreed with the backbone: the word keeps
+    one answer in ``speaker`` and the one it did not keep is written here, so
+    a person can be told which two people it might have been. ``None`` where
+    there was no second answer to keep.
+    """
 
     # -- Language
     language: Language = Language.UNKNOWN
@@ -738,6 +758,24 @@ class FinalToken:
     @property
     def needs_review(self) -> bool:
         return self.review_status is ReviewStatus.PENDING or bool(self.review_reasons)
+
+    @property
+    def needs_word_review(self) -> bool:
+        """Whether this word belongs in the word review list.
+
+        True for any reason about the word itself. A word whose only doubt is
+        its speaker is left out, because its text is not in question; see
+        :data:`SPEAKER_ONLY_REASONS`. A pending word with no reason at all is
+        kept, since nothing says its doubt is only about the speaker.
+        """
+        if any(reason not in SPEAKER_ONLY_REASONS for reason in self.review_reasons):
+            return True
+        return not self.review_reasons and self.review_status is ReviewStatus.PENDING
+
+    @property
+    def has_speaker_doubt(self) -> bool:
+        """Whether a service doubted who said this word."""
+        return any(reason in SPEAKER_ONLY_REASONS for reason in self.review_reasons)
 
     @property
     def span(self) -> AudioSpan | None:
@@ -1041,6 +1079,11 @@ class Transcript:
     @property
     def review_tokens(self) -> list[FinalToken]:
         return [token for token in self.tokens if token.needs_review]
+
+    @property
+    def word_review_tokens(self) -> list[FinalToken]:
+        """The words whose text needs a person, without speaker-only doubts."""
+        return [token for token in self.tokens if token.needs_word_review]
 
     @property
     def verbatim_text(self) -> str:

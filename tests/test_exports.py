@@ -698,3 +698,68 @@ def test_the_run_is_said_to_be_shorter_than_the_services_only_when_it_was():
     assert "less than the total above" in shorter
     assert "From start to finish the run took 4 minutes." in longer
     assert "less than the total above" not in longer
+
+
+# -- Doubt about the speaker alone ---------------------------------------
+
+
+def _speaker_doubted(text: str, start: float, speaker: str, alternative: str) -> FinalToken:
+    """A word every service agreed on, given to a different person by the second opinion."""
+    token = _word(text, start, speaker=speaker, speaker_alternative=alternative)
+    token.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    return token
+
+
+def _speaker_doubt_transcript() -> Transcript:
+    transcript = _settled_transcript()
+    disputed = _word("fifteen", 30.0, confidence=Confidence.REVIEW_REQUIRED)
+    disputed.flag(ReviewReason.PROVIDER_DISAGREEMENT)
+    disputed.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    transcript.tokens += [
+        disputed,
+        _word("Then", 35.0, speaker="1"),
+        _speaker_doubted("that", 40.0, "1", "0"),
+        _speaker_doubted("is", 40.5, "1", "0"),
+        _word(",", 40.9, speaker="1"),
+        _speaker_doubted("fine", 41.0, "1", "0"),
+    ]
+    return transcript
+
+
+def test_a_word_doubted_only_for_its_speaker_is_not_in_the_word_table():
+    report = render_review_report(_speaker_doubt_transcript())
+    queue = report[report.index("## What still needs you"):report.index("## Where the speaker")]
+
+    assert "| that |" not in queue
+    assert "| fine |" not in queue
+    assert "One place needs a decision" in queue
+
+
+def test_a_word_doubted_for_its_text_and_its_speaker_stays_in_the_word_table():
+    report = render_review_report(_speaker_doubt_transcript())
+    queue = report[report.index("## What still needs you"):report.index("## Where the speaker")]
+
+    assert "| fifteen |" in queue
+
+
+def test_a_run_of_speaker_doubts_is_one_entry_with_a_start_and_an_end():
+    report = render_review_report(_speaker_doubt_transcript())
+    section = report[report.index("## Where the speaker is in doubt"):]
+
+    assert "| From | To | Speakers the services heard |" in section
+    assert "| 0:40 | 0:41 | Speaker 1 or Adrienne |" in section
+    assert section.count("| 0:40 |") == 1
+
+
+def test_a_report_with_no_speaker_doubt_has_no_section_for_it():
+    assert "## Where the speaker" not in render_review_report(_settled_transcript())
+
+
+def test_a_report_whose_only_doubts_are_speakers_says_the_words_are_settled():
+    transcript = _settled_transcript()
+    transcript.tokens.append(_speaker_doubted("that", 40.0, "1", "0"))
+
+    report = render_review_report(transcript)
+    queue = report[report.index("## What still needs you"):report.index("## Where the speaker")]
+
+    assert "Nothing about the words." in queue

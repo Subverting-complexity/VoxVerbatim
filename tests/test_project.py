@@ -24,6 +24,7 @@ from vox_verbatim.transcription.project import (
     ProjectState,
     ProjectStore,
     ReplacementRule,
+    SpeakerDoubtItem,
     WordGroup,
     merge_learned_names,
     read_learned_names,
@@ -1011,3 +1012,66 @@ def test_a_save_with_no_file_keeps_the_names_it_holds(tmp_path):
     assert store.save_keeping_learned_names(state, [bosch("Bosj")]) is True
 
     assert store.load().learned_names == [bosch("Bosh", "Bosj")]
+
+
+# -- The stretches whose speaker is in doubt --------------------------------
+
+
+def test_a_speaker_doubt_survives_the_round_trip(tmp_path):
+    state = ProjectState()
+    state.speaker_doubts = [
+        SpeakerDoubtItem(
+            recording_name="Interview 01.m4a",
+            start=40.0,
+            end=41.4,
+            speakers=["Jacques", "Speaker 1"],
+            token_ids=["token-1", "token-2"],
+        )
+    ]
+    store = ProjectStore(tmp_path)
+    store.save(state)
+
+    loaded = store.load()
+
+    assert loaded.speaker_doubts == state.speaker_doubts
+
+
+def test_a_project_written_before_speaker_doubts_loads_with_none(tmp_path):
+    write_project(tmp_path, {"flagged": []})
+
+    assert ProjectStore(tmp_path).load().speaker_doubts == []
+
+
+def test_a_speaker_doubt_pointing_at_nothing_is_dropped_and_the_rest_falls_back(tmp_path):
+    write_project(
+        tmp_path,
+        {
+            "speaker_doubts": [
+                {"token_ids": ["token-1"]},
+                {"recording_name": "Interview 01.m4a", "token_ids": []},
+                "not even an object",
+                {
+                    "recording_name": "Interview 01.m4a",
+                    "start": "half past two",
+                    "speakers": ["Jacques", 7, ""],
+                    "token_ids": ["token-3", None],
+                },
+            ]
+        },
+    )
+
+    item, = ProjectStore(tmp_path).load().speaker_doubts
+
+    assert item.start is None
+    assert item.speakers == ["Jacques"]
+    assert item.token_ids == ["token-3"]
+
+
+def test_one_stretch_listed_twice_keeps_the_first(tmp_path):
+    first = SpeakerDoubtItem("Interview 01.m4a", 1.0, 2.0, ["A"], ["token-1"])
+    write_project(
+        tmp_path,
+        {"speaker_doubts": [first.to_dict(), first.to_dict()]},
+    )
+
+    assert ProjectStore(tmp_path).load().speaker_doubts == [first]

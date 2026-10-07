@@ -123,6 +123,7 @@ def transcribe(recording, monkeypatch):
         aligner=None,
         calibration_path=None,
         folder_terms=(),
+        timing_fallback=None,
     ) -> Run:
         services = three_services() if services is None else services
         settings = settings or offline_settings()
@@ -140,9 +141,16 @@ def transcribe(recording, monkeypatch):
             calls.append("forced aligner")
             return aligner
 
+        def build_timing_fallback_provider(_settings):
+            calls.append("timing fallback")
+            return timing_fallback
+
         monkeypatch.setattr(registry, "build_providers", build_providers)
         monkeypatch.setattr(registry, "build_escalation_provider", build_escalation_provider)
         monkeypatch.setattr(registry, "build_forced_aligner", build_forced_aligner)
+        monkeypatch.setattr(
+            registry, "build_timing_fallback_provider", build_timing_fallback_provider
+        )
 
         transcript = pipeline.transcribe_recording(
             recording,
@@ -391,6 +399,77 @@ def test_losing_every_timed_service_leaves_the_words_without_playable_times(tran
     assert run.warned_about("ElevenLabs Scribe", "timings and speakers")
     assert not any(token.timing_status.is_exact for token in run.transcript.tokens)
     assert run.store.transcript_path.is_file()
+
+
+def timed_assemblyai(sentence: str = SENTENCE) -> FakeService:
+    """AssemblyAI over the whole recording, timing its words as it does."""
+    from tests.test_passes import BACKBONE_CAPABILITIES
+
+    return FakeService(
+        Provider.ASSEMBLYAI,
+        spoken_words(Provider.ASSEMBLYAI, sentence, timed=True, speaker="speaker_0"),
+        capabilities=BACKBONE_CAPABILITIES,
+        model="assemblyai-fake",
+        speakers=("speaker_0",),
+    )
+
+
+def test_elevenlabs_giving_no_times_brings_in_assemblyai_for_the_times(transcribe):
+    """One failed key must not cost the whole recording its times."""
+    fallback = timed_assemblyai()
+    services = three_services(
+        elevenlabs=FakeService(Provider.ELEVENLABS, error="The API key was refused.")
+    )
+
+    run = transcribe(services, timing_fallback=fallback)
+
+    assert fallback.requests_received, "AssemblyAI was never asked for a full pass"
+    assert run.transcript.verbatim_text == SENTENCE
+    for token in run.transcript.tokens:
+        assert token.timing_source is Provider.ASSEMBLYAI
+        assert token.audible_span is not None
+    assert run.warned_about(
+        "ElevenLabs Scribe gave no word times", "The API key was refused", "AssemblyAI"
+    )
+    assert not run.warned_about("They are usually less precise")
+    report = exports.render_review_report(run.transcript)
+    assert "AssemblyAI transcribed the whole recording as well" in report
+    assert "## No word could be placed in the recording" not in report
+
+
+def test_elevenlabs_giving_times_means_assemblyai_makes_no_full_pass(transcribe):
+    fallback = timed_assemblyai()
+
+    run = transcribe(three_services(), timing_fallback=fallback)
+
+    assert fallback.requests_received == []
+    assert Provider.ASSEMBLYAI not in run.transcript.provider_results
+    assert "timing fallback" not in run.registry_calls
+
+
+def test_assemblyai_switched_off_leaves_the_words_untimed_as_before(transcribe):
+    services = three_services(
+        elevenlabs=FakeService(Provider.ELEVENLABS, error="The API key was refused.")
+    )
+
+    run = transcribe(services, timing_fallback=None)
+
+    assert Provider.ASSEMBLYAI not in run.transcript.provider_results
+    assert run.warned_about("ElevenLabs Scribe", "timings and speakers")
+
+
+def test_assemblyai_with_a_problem_is_not_asked_for_the_times(transcribe):
+    fallback = FakeService(
+        Provider.ASSEMBLYAI, configuration_problem="No AssemblyAI API key is set."
+    )
+    services = three_services(
+        elevenlabs=FakeService(Provider.ELEVENLABS, error="The API key was refused.")
+    )
+
+    run = transcribe(services, timing_fallback=fallback)
+
+    assert fallback.requests_received == []
+    assert Provider.ASSEMBLYAI not in run.transcript.provider_results
 
 
 def test_services_that_answer_with_no_words_at_all_say_so(transcribe):
@@ -842,6 +921,79 @@ def test_a_second_opinion_that_sides_with_one_service_corrects_the_word(transcri
     # the review window and the report can show it.
     assert Provider.ASSEMBLYAI in run.transcript.provider_results
     assert run.transcript.provider_results[Provider.ASSEMBLYAI].tokens[0].text == "Pieter"
+
+
+def test_with_assemblyai_timing_the_words_disputes_still_get_a_second_opinion(transcribe):
+    """The fallback restores the windows the second opinions need.
+
+    AssemblyAI's full pass is what the words point back to, so the answers
+    are added after it rather than put in its place.
+    """
+    second = SecondOpinion(hears="Pieter")
+    settings = offline_settings(escalation_enabled=True)
+    services = disagreeing_services()
+    services[Provider.ELEVENLABS] = FakeService(
+        Provider.ELEVENLABS, error="The API key was refused."
+    )
+    fallback = timed_assemblyai(PLAIN_SENTENCE)
+
+    run = transcribe(
+        services, settings=settings, escalation_provider=second, timing_fallback=fallback
+    )
+
+    assert second.windows, "the disputed word was never sent for a second opinion"
+    full_pass = run.transcript.provider_results[Provider.ASSEMBLYAI]
+    heard = [token.text for token in full_pass.tokens]
+    assert heard[: len(PLAIN_SENTENCE.split())] == PLAIN_SENTENCE.split()
+    assert "Pieter" in heard[len(PLAIN_SENTENCE.split()):]
+    for token in run.transcript.tokens:
+        for reference in token.source_tokens:
+            if reference.provider is Provider.ASSEMBLYAI:
+                assert full_pass.token_at(reference.index) is not None
+
+
+def test_with_assemblyai_timing_the_words_its_speakers_are_not_checked_against_itself(
+    transcribe, monkeypatch
+):
+    """AssemblyAI gave the speakers, so it cannot also be the second opinion on them."""
+    from vox_verbatim.transcription import diarisation
+
+    checked: list = []
+    monkeypatch.setattr(
+        diarisation, "reconcile_speakers", lambda *args, **kwargs: checked.append(args) or []
+    )
+    services = three_services(
+        elevenlabs=FakeService(Provider.ELEVENLABS, error="The API key was refused.")
+    )
+
+    run = transcribe(services, timing_fallback=timed_assemblyai())
+
+    assert run.transcript.tokens[0].timing_source is Provider.ASSEMBLYAI
+    assert checked == []
+
+
+def test_the_language_model_is_given_only_the_second_opinions_not_the_full_pass():
+    """With AssemblyAI as both backbone and second opinion, only its answers count."""
+    from vox_verbatim.transcription.model import ProviderToken
+
+    full_pass = [
+        ProviderToken(Provider.ASSEMBLYAI, index, text, 0.2 * index, 0.2 * index + 0.15)
+        for index, text in enumerate(["we", "met", "Peter"])
+    ]
+    answer = ProviderToken(Provider.ASSEMBLYAI, 3, "Pieter", 0.38, 0.56)
+    transcript = Transcript(
+        recording_name="a",
+        provider_results={
+            Provider.ASSEMBLYAI: ProviderResult(
+                provider=Provider.ASSEMBLYAI, tokens=[*full_pass, answer]
+            )
+        },
+    )
+    disputed = FinalToken(text="Peter", start=0.4, end=0.55)
+
+    heard = pipeline._escalation_tokens_for([disputed], transcript, answers_from=3)
+
+    assert [word.text for word in heard] == ["Pieter"]
 
 
 def test_the_escalation_settings_and_the_recording_reach_the_second_service(transcribe):

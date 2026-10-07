@@ -78,6 +78,7 @@ from vox_verbatim.transcription.model import (
     ReviewStatus,
     RiskCategory,
     Speaker,
+    StatisticsNote,
     TimingStatus,
     TokenReference,
     Transcript,
@@ -430,6 +431,7 @@ def _final_token_to_dict(token: FinalToken) -> dict[str, Any]:
         "human_corrected": token.human_corrected,
         "text_corrected": token.text_corrected,
         "original_text": token.original_text,
+        "statistics_note": _statistics_note_to_dict(token.statistics_note),
     }
 
 
@@ -480,7 +482,53 @@ def _final_token_from_dict(data: Any) -> FinalToken | None:
     token.human_corrected = _flag(data.get("human_corrected"))
     token.original_text = _optional_text(data.get("original_text"))
     token.text_corrected = _text_corrected_from(data, token)
+    token.statistics_note = _statistics_note_from_dict(data.get("statistics_note"))
     return token
+
+
+def _statistics_note_to_dict(note: StatisticsNote | None) -> dict[str, Any] | None:
+    if note is None:
+        return None
+    return {
+        "provider": note.provider.value if note.provider else None,
+        "language": note.language.value,
+        "is_proper_noun": note.is_proper_noun,
+        "is_numeric": note.is_numeric,
+        "vocabulary_category": note.vocabulary_category,
+        "confidence": note.confidence.value,
+        "service_text": note.service_text,
+        "rejected_providers": [provider.value for provider in note.rejected_providers],
+        "speaker_provider": note.speaker_provider.value if note.speaker_provider else None,
+        "service_speaker": note.service_speaker,
+        "counted": note.counted,
+        "text_corrected": note.text_corrected,
+        "speaker_corrected": note.speaker_corrected,
+    }
+
+
+def _statistics_note_from_dict(data: Any) -> StatisticsNote | None:
+    """Rebuild a word's statistics note, or return ``None`` if there is none.
+
+    A damaged note is read as no note. The word is then left uncounted
+    rather than counted twice, which is the cheaper of the two mistakes.
+    """
+    if not isinstance(data, dict):
+        return None
+    return StatisticsNote(
+        provider=_optional_enum(Provider, data.get("provider")),
+        language=_enum_of(Language, data.get("language"), Language.UNKNOWN),
+        is_proper_noun=_flag(data.get("is_proper_noun")),
+        is_numeric=_flag(data.get("is_numeric")),
+        vocabulary_category=_optional_text(data.get("vocabulary_category")),
+        confidence=_enum_of(Confidence, data.get("confidence"), Confidence.UNRESOLVED),
+        service_text=_text_of(data.get("service_text")),
+        rejected_providers=tuple(_enum_list(Provider, data.get("rejected_providers"))),
+        speaker_provider=_optional_enum(Provider, data.get("speaker_provider")),
+        service_speaker=_optional_text(data.get("service_speaker")),
+        counted=_flag(data.get("counted")),
+        text_corrected=_flag(data.get("text_corrected")),
+        speaker_corrected=_flag(data.get("speaker_corrected")),
+    )
 
 
 def _text_corrected_from(data: dict[str, Any], token: FinalToken) -> bool:

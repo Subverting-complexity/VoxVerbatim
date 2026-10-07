@@ -30,6 +30,7 @@ from vox_verbatim.transcription.model import (
     ReviewStatus,
     RiskCategory,
     Speaker,
+    StatisticsNote,
     TimingStatus,
     TokenReference,
     Transcript,
@@ -543,6 +544,32 @@ def test_whether_the_text_was_replaced_survives_the_round_trip(tmp_path):
     assert data["tokens"][1]["text_corrected"] is True
     assert loaded is not None
     assert [token.text_corrected for token in loaded.tokens] == [False, True]
+
+
+def test_what_the_statistics_counted_for_a_word_survives_the_round_trip(tmp_path):
+    transcript = _full_transcript()
+    note = StatisticsNote(
+        provider=Provider.OPENAI,
+        language=Language.GERMAN,
+        is_proper_noun=True,
+        vocabulary_category="person",
+        confidence=Confidence.REVIEW_REQUIRED,
+        service_text="Fermeulen",
+        rejected_providers=(Provider.DEEPGRAM,),
+        speaker_provider=Provider.ELEVENLABS,
+        service_speaker="speaker_0",
+        counted=True,
+        text_corrected=True,
+    )
+    transcript.tokens[1].statistics_note = note
+    store = TranscriptStore(tmp_path / "board-meeting.m4a")
+    store.save(transcript)
+
+    loaded = store.load()
+
+    assert loaded is not None
+    assert loaded.tokens[0].statistics_note is None
+    assert loaded.tokens[1].statistics_note == note
 
 
 def test_a_word_corrected_before_the_flag_existed_is_still_known_to_be_corrected():

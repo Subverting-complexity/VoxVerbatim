@@ -4564,20 +4564,18 @@ def test_a_word_replacement_counts_the_words_in_each_file_it_saves(qapp, tmp_pat
         window.close()
 
 
-def test_accepting_a_timing_counts_nothing_about_the_text(qapp, tmp_path):
-    token = make_token(
-        "contract",
-        reasons=(ReviewReason.WEAK_ALIGNMENT,),
-        confidence=Confidence.REVIEW_SUGGESTED,
-    )
-    token.timing_confidence = Confidence.REVIEW_REQUIRED
-    folder = Folder({RECORDING: make_transcript([token])})
-    changes = []
-    window = open_counting_window(tmp_path, folder, lambda change: changes.append(change) or True)
+def test_a_correction_after_accepting_the_timing_is_counted(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    window = open_counting_window(tmp_path, folder, lambda change: store.apply(change.apply))
     try:
+        select_word(window, "Bosch")
         assert window.decide_timing(True) is True
+        window._replacement_edit.setText("Bosche")
 
-        assert changes == []
-        assert folder.token(RECORDING, token.id).statistics_note is None
+        assert window.apply_replacement_to_occurrence() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (1, 1)
     finally:
         window.close()

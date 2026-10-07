@@ -4572,12 +4572,9 @@ class ReviewWindow(QMainWindow):
             self._set_status(WORD_NOT_IN_TRANSCRIPT, alert=True, urgent=True)
             return False
         transcript = self._transcript(occurrence.recording_name)
-        # A decision about the clock says nothing about the text or the
-        # speaker, so it must not count the service as right about either.
         if not self._hand_on(
             occurrence.recording_name,
             with_timing_decision(transcript, token.id, accepted),
-            uncounted=frozenset({token.id}),
         ):
             return False
         self._after_change(

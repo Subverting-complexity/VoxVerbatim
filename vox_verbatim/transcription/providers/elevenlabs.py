@@ -89,6 +89,7 @@ from vox_verbatim.transcription.providers.base import (
     ProviderCapabilities,
     ProviderError,
     ProviderNotConfigured,
+    describe_api_key_characters,
     ProviderUnavailable,
     TranscriptionProvider,
     TranscriptionRequest,
@@ -297,6 +298,9 @@ class ElevenLabsProvider(TranscriptionProvider):
     def describe_configuration_problem(self) -> str | None:
         if not self._api_key.strip():
             return "no API key has been entered"
+        key_problem = describe_api_key_characters(self.provider.display_name, self._api_key)
+        if key_problem is not None:
+            return key_problem
         if not self._model.strip():
             return "no model has been chosen"
         return None
@@ -769,7 +773,12 @@ class ElevenLabsForcedAligner(ForcedAligner):
         self._client = client
 
     def is_configured(self) -> bool:
-        return bool(self._api_key.strip())
+        return self.describe_configuration_problem() is None
+
+    def describe_configuration_problem(self) -> str | None:
+        if not self._api_key.strip():
+            return "no API key has been entered"
+        return describe_api_key_characters(self.provider.display_name, self._api_key)
 
     def supports(self, language: Language) -> bool:
         """Whether this aligner can be trusted with a span in this language.
@@ -792,8 +801,9 @@ class ElevenLabsForcedAligner(ForcedAligner):
         language: Language,
         canonical_offset: float = 0.0,
     ) -> list[tuple[str, float, float]]:
-        if not self.is_configured():
-            raise ProviderNotConfigured(self.provider, "no API key has been entered")
+        problem = self.describe_configuration_problem()
+        if problem is not None:
+            raise ProviderNotConfigured(self.provider, problem)
         if not self.supports(language):
             raise ProviderError(
                 f"ElevenLabs cannot align {language.display_name}. The span keeps "

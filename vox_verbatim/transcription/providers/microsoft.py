@@ -84,6 +84,7 @@ from vox_verbatim.transcription.providers.base import (
     ProviderCapabilities,
     ProviderError,
     ProviderNotConfigured,
+    describe_api_key_characters,
     ProviderUnavailable,
     TranscriptionProvider,
     TranscriptionRequest,
@@ -277,6 +278,9 @@ class MicrosoftProvider(TranscriptionProvider):
     def describe_configuration_problem(self) -> str | None:
         if not self._api_key.strip():
             return "no API key has been entered"
+        key_problem = describe_api_key_characters(self.provider.display_name, self._api_key)
+        if key_problem is not None:
+            return key_problem
         if not self._endpoint:
             return (
                 "no endpoint has been entered. It is the Speech resource URL, "

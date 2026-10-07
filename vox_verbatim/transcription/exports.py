@@ -66,6 +66,21 @@ COST_KEYS = ("estimated_cost", "estimated_cost_usd")
 
 _UNKNOWN_SPEAKER = "Unknown speaker"
 
+#: The services that place each word in the recording. The others return
+#: text only, so their failing never explains a transcript with no times.
+_TIMING_SERVICES: tuple[Provider, ...] = (
+    Provider.ELEVENLABS,
+    Provider.ASSEMBLYAI,
+    Provider.DEEPGRAM,
+)
+
+#: The share of the words that must have nothing to play before the report
+#: explains it once instead of listing each word. Below this the words with
+#: no time are exceptions a person should look at one by one; above it they
+#: are one fault, and a list of hundreds of identical rows hides the words
+#: that need a decision for any other reason.
+_UNTIMED_SHARE_FOR_ONE_STATEMENT = 0.5
+
 #: What each confidence category means, in the words the report uses. They
 #: are here rather than on the enumeration because they are an explanation
 #: for a reader, not a label for a control.
@@ -286,6 +301,7 @@ def render_review_report(
     cost = estimated_cost if estimated_cost is not None else _recorded_cost(transcript)
     parts = [
         _report_opening(transcript),
+        _report_untimed(transcript),
         _report_services(transcript, cost),
         _report_confidence(transcript),
         _report_review_queue(transcript),
@@ -322,6 +338,82 @@ def _report_opening(transcript: Transcript) -> str:
             "this report is measured from the start of it."
         )
         lines.append("")
+    return "\n".join(lines)
+
+
+def _untimed_words(transcript: Transcript) -> tuple[int, int]:
+    """How many spoken words have nothing to play, out of how many words."""
+    words = [
+        token for token in transcript.tokens
+        if token.text.strip() and not _attaches_to_previous(token.text)
+    ]
+    return sum(1 for token in words if token.audible_span is None), len(words)
+
+
+def _most_words_are_untimed(transcript: Transcript) -> bool:
+    untimed, total = _untimed_words(transcript)
+    return total > 0 and untimed / total > _UNTIMED_SHARE_FOR_ONE_STATEMENT
+
+
+def _report_untimed(transcript: Transcript) -> str:
+    """Say once, before anything else, that the words could not be placed.
+
+    When no service timed the words, every one of them is flagged for the
+    same reason. Listing each would bury the real disagreements under
+    hundreds of identical rows, and leave the cause to a line at the end of
+    the report, so the cause and the remedy are given here instead and the
+    list further down leaves those rows out.
+    """
+    if not _most_words_are_untimed(transcript):
+        return ""
+    untimed, total = _untimed_words(transcript)
+    lines = ["## No word could be placed in the recording", ""]
+    share = "None" if untimed == total else f"Only {total - untimed:,}"
+    lines.append(
+        f"{share} of the {_count(total, 'word')} in this transcript can be played "
+        "back, because no service said where in the recording the words were "
+        "spoken. Without that, the review window cannot play a word, and the "
+        "language model and the second opinions have no audio to check a "
+        "disagreement against."
+    )
+    lines.append("")
+
+    failed = [
+        transcript.provider_results[provider]
+        for provider in _TIMING_SERVICES
+        if provider in transcript.provider_results
+        and not transcript.provider_results[provider].succeeded
+    ]
+    realign_failed = sum(
+        1 for token in transcript.tokens
+        if ReviewReason.FORCED_ALIGNMENT_FAILED in token.review_reasons
+    )
+    if failed or realign_failed:
+        lines.append("The sources of word times that failed:")
+        lines.append("")
+        for result in failed:
+            reason = result.error or "no reason was reported"
+            lines.append(f"- **{result.provider.display_name}**: {reason}")
+        if realign_failed:
+            lines.append(
+                f"- **Forced alignment**: it could not measure "
+                f"{_count(realign_failed, 'word')}."
+            )
+        lines.append("")
+    else:
+        lines.append(
+            "None of the services that time their words "
+            f"({_service_list(_TIMING_SERVICES)}) answered for this recording."
+        )
+        lines.append("")
+    lines.append(
+        "Fix the cause, such as an API key in Settings, and then transcribe the "
+        "recording again. Forced alignment only measures words that a service "
+        "has already placed roughly, so it cannot place these words on its own. "
+        "The list of words that need a decision leaves out the words whose only "
+        "fault is that they have no time."
+    )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -491,6 +583,19 @@ def _report_confidence(transcript: Transcript) -> str:
 def _report_review_queue(transcript: Transcript) -> str:
     lines = ["## What still needs you", ""]
     pending = transcript.review_tokens
+    if _most_words_are_untimed(transcript):
+        # The statement at the top already explains these words, once.
+        pending = [
+            token for token in pending
+            if token.review_reasons != [ReviewReason.UNALIGNED_WORD]
+        ]
+    if not pending and transcript.review_tokens:
+        lines.append(
+            "Nothing else. Every word flagged for review was flagged only because "
+            "it has no time, which the start of this report explains."
+        )
+        lines.append("")
+        return "\n".join(lines)
     if not pending:
         lines.append(
             "Nothing. No word in this transcript was flagged for review, which "

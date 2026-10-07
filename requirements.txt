@@ -1,0 +1,46 @@
+# Libraries the application needs to run.
+PySide6>=6.8
+mutagen>=1.47
+# Decoding, loudness measurement and lossless writing for Enhance Audio.
+# PyAV carries the FFmpeg libraries with it, so nothing has to be installed
+# separately on the machine.
+av>=12.0
+
+# The transcription services. Each is the vendor's own library, so that a
+# change at their end arrives as a package upgrade rather than as a morning
+# spent reading somebody's HTTP traffic.
+#
+# Every one of these is imported only at the moment its service is called,
+# never when the application starts. A package that is missing or broken
+# therefore switches off one service and says so, which is the same thing
+# that happens when a service is simply unconfigured. The application still
+# starts, and a transcript still comes out of whatever else answered.
+# OpenAI's floor is 2.50.0 for the same kind of reason as AssemblyAI's below.
+# gpt-transcribe takes its keywords and its candidate languages as two named
+# parameters of the library's transcription call, and it reports the languages
+# it detected as objects carrying a code rather than as plain codes. All three
+# arrive together in 2.50.0: the 2.49.0 tag has none of them and the 2.50.0 tag
+# has all three, read from the tagged sources rather than from the changelog.
+# Below the floor every request raises a TypeError about an unexpected
+# argument before it is sent, which reads like a network fault and is not one.
+openai>=2.50.0
+elevenlabs>=2.0
+# AssemblyAI's floor is 1.0 rather than something older, and the reason is
+# not a feature we would like to have. Below 0.45 the package's raw
+# configuration object has no ``speech_models`` field and refuses to be given
+# one, so every request this application makes raises before it is sent.
+# Below 1.0 that same object silently ignores any field it does not declare.
+# Both were verified against the published wheels.
+assemblyai>=1.0
+# Deepgram's floor is 5.0 because version 5 rebuilt the package around a
+# generated client. The accessor chain and the loose options dictionary that
+# versions 3 and 4 took were both removed, and the constructor stopped taking
+# the key as a positional argument, so this application cannot call anything
+# older. Verified against the published wheels.
+deepgram-sdk>=5.0
+# Microsoft is called over plain HTTP rather than through its own library.
+# MAI-Transcribe is not a deployed model with an endpoint of its own; it is
+# a mode inside the ordinary Azure Speech endpoint, and the official package
+# does not expose the two fields that select it. See the note in
+# vox_verbatim/transcription/providers/microsoft.py.
+httpx>=0.27

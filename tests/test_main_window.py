@@ -1092,6 +1092,38 @@ def test_a_transcript_replaced_by_a_newer_one_is_read_again(
         close_window(window)
 
 
+def test_a_transcript_rewritten_with_the_same_time_and_size_is_read_again(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Two saves inside one tick of the Windows file clock carry the same time.
+
+    The test above meets this case only when its two saves happen to land in
+    one tick, which is what made it fail now and then. Here the time is put
+    back by hand and the new word is as long as the old one, so nothing but
+    the file's identity tells the two transcripts apart, on every run.
+    """
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        transcript_path = save_transcript(
+            window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a")
+        ).transcript_path
+        window.show_review()
+        before = transcript_path.stat()
+
+        read = count_transcript_reads(monkeypatch)
+        save_transcript(window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a", "Busch"))
+        os.utime(transcript_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        assert transcript_path.stat().st_size == before.st_size
+        window.show_review()
+
+        assert "alpha.m4a" in read
+        state = ProjectStore(audio_folder).load()
+        assert [item.detected_text for item in state.occurrences] == ["Busch"]
+    finally:
+        close_window(window)
+
+
 def test_a_transcript_restored_from_a_backup_is_read_again_though_it_is_older(
     qapp, monkeypatch, store, audio_folder
 ):

@@ -4952,6 +4952,29 @@ def test_an_empty_typed_word_is_refused_out_loud(qapp, tmp_path, monkeypatch):
         window.close()
 
 
+def test_typing_the_word_as_it_stands_names_the_keep_button(qapp, tmp_path, monkeypatch):
+    said = capture_announcements(monkeypatch)
+    folder = two_file_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        window.set_show_reviewed(True)
+        select_word(window, "Bosch")
+        window._typed_edit.setText("Bausch")
+        assert window.apply_typed_word() is True
+        select_word(window, "Bosch")
+        said.clear()
+        window._typed_edit.setText("Bausch")
+
+        assert window.apply_typed_word() is False
+
+        assert said == [
+            "The replacement is unchanged. Use the Keep button under Decide this "
+            "word to settle this word as it stands."
+        ]
+    finally:
+        window.close()
+
+
 def test_the_switch_shows_and_hides_the_details_and_says_so(qapp, tmp_path, monkeypatch):
     said = capture_announcements(monkeypatch)
     window = open_window(tmp_path, two_file_folder(), process=True)

@@ -4456,8 +4456,15 @@ class ReviewWindow(QMainWindow):
         # meant to settle it rather than to replace it with itself, and
         # Correct as detected is what does that.
         if not anything_changed:
+            # The simple window hides Correct as detected, so it names the
+            # Keep button that stands in for it there.
+            settle = (
+                "Correct as detected"
+                if self._state.settings.show_details
+                else "the Keep button under Decide this word"
+            )
             self._set_status(
-                "The replacement is unchanged. Use Correct as detected to settle this "
+                f"The replacement is unchanged. Use {settle} to settle this "
                 "word as it stands.",
                 alert=True,
                 urgent=True,

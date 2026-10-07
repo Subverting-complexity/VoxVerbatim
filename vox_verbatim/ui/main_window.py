@@ -39,6 +39,7 @@ from vox_verbatim.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     CalibrationStore,
 )
+from vox_verbatim.transcription.learning import user_terms_index
 from vox_verbatim.transcription.model import Transcript
 from vox_verbatim.transcription.project import (
     FlaggedItem,
@@ -1101,6 +1102,8 @@ class MainWindow(QMainWindow):
                 lambda name, changed: self._save_correction(reader, name, changed)
             ),
             parent=self,
+            record_statistics=lambda change: self._calibration_store.apply(change.apply),
+            vocabulary=user_terms_index(self._vocabulary_store.load()),
         )
         # Given its parent after the window exists rather than before, so that
         # Qt destroys the player along with the window it belongs to. A player

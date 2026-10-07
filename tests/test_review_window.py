@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
+from vox_verbatim.transcription.calibration import CALIBRATION_FILE_NAME, CalibrationStore
 from vox_verbatim.transcription.grouping import affected_summary
 from vox_verbatim.transcription.model import (
     AudioSpan,
@@ -4416,5 +4417,165 @@ def test_every_mnemonic_in_the_item_menu_is_its_own(qapp, tmp_path):
 
         assert len(keys) == len(set(keys)), keys
         assert window._confirm_timing_action.text() == "Confirm the &Timing"
+    finally:
+        window.close()
+
+
+# -- What a review teaches the service statistics ------------------------
+
+
+def open_counting_window(tmp_path, folder: Folder, record_statistics) -> ReviewWindow:
+    window = ReviewWindow(
+        tmp_path,
+        folder.names,
+        folder.load,
+        {name: Path(f"C:/Audio/{name}") for name in folder.names},
+        ProjectStore(tmp_path),
+        FakePlayer(),
+        folder.save,
+        record_statistics=record_statistics,
+    )
+    window.show()
+    window.process_low_confidence_words()
+    return window
+
+
+def test_a_correction_in_the_review_window_updates_the_statistics_on_disk(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    window = open_counting_window(tmp_path, folder, lambda change: store.apply(change.apply))
+    try:
+        select_word(window, "Bosch")
+        occurrence = window.current_occurrence()
+        window._replacement_edit.setText("Bosche")
+
+        assert window.apply_replacement_to_occurrence() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (1, 1)
+        note = folder.token(occurrence.recording_name, occurrence.token_id).statistics_note
+        assert note is not None and note.counted and note.text_corrected
+    finally:
+        window.close()
+
+
+def test_a_confirmed_word_is_counted_as_right(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    window = open_counting_window(tmp_path, folder, lambda change: store.apply(change.apply))
+    try:
+        select_word(window, "Bosch")
+
+        assert window.confirm_item() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (1, 0)
+    finally:
+        window.close()
+
+
+def test_a_word_a_folder_rule_answered_is_not_counted(qapp, tmp_path):
+    folder = two_file_folder()
+    changes = []
+    window = open_counting_window(tmp_path, folder, lambda change: changes.append(change) or True)
+    try:
+        select_word(window, "Bosch")
+        occurrence = window.current_occurrence()
+        occurrence.auto_applied = True
+        transcript = window._transcript(occurrence.recording_name)
+
+        corrected = transcript.with_correction(occurrence.token_id, text="Bosche")
+        assert window._hand_on(occurrence.recording_name, corrected) is True
+
+        assert changes == []
+        assert folder.token(occurrence.recording_name, occurrence.token_id).statistics_note is None
+    finally:
+        window.close()
+
+
+def test_a_statistics_failure_keeps_the_correction_and_says_so(qapp, tmp_path, monkeypatch):
+    folder = two_file_folder()
+    window = open_counting_window(tmp_path, folder, lambda change: False)
+    try:
+        select_word(window, "Bosch")
+        occurrence = window.current_occurrence()
+        said = capture(monkeypatch)
+        window._replacement_edit.setText("Bosche")
+
+        assert window.apply_replacement_to_occurrence() is True
+
+        token = folder.token(occurrence.recording_name, occurrence.token_id)
+        assert token.text == "Bosche"
+        # The words stay uncounted, so the next save that works counts them.
+        assert token.statistics_note is not None
+        assert token.statistics_note.counted is False
+        assert any("service statistics could not be saved" in message for message, _ in said)
+    finally:
+        window.close()
+
+
+def test_the_next_save_that_works_counts_the_words_a_failure_left(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    working = [False]
+
+    def record(change):
+        return working[0] and store.apply(change.apply)
+
+    window = open_counting_window(tmp_path, folder, record)
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosche")
+        assert window.apply_replacement_to_occurrence() is True
+        assert store.load().total_words == 0
+
+        working[0] = True
+        # Any later save of the same file is the next one that works.
+        assert window.current_occurrence().recording_name == RECORDING
+        assert window.confirm_item() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (1, 1)
+    finally:
+        window.close()
+
+
+def test_a_word_replacement_counts_the_words_in_each_file_it_saves(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    window = open_counting_window(tmp_path, folder, lambda change: store.apply(change.apply))
+    try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bosk")
+
+        assert window.apply_replacement_to_word() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (3, 3)
+        changed = [
+            token
+            for name in folder.names
+            for token in folder.transcripts[name].tokens
+            if token.text == "Bosk"
+        ]
+        assert len(changed) == 3
+        assert all(token.statistics_note.counted for token in changed)
+    finally:
+        window.close()
+
+
+def test_a_correction_after_accepting_the_timing_is_counted(qapp, tmp_path):
+    folder = two_file_folder()
+    store = CalibrationStore(tmp_path / CALIBRATION_FILE_NAME)
+    window = open_counting_window(tmp_path, folder, lambda change: store.apply(change.apply))
+    try:
+        select_word(window, "Bosch")
+        assert window.decide_timing(True) is True
+        window._replacement_edit.setText("Bosche")
+
+        assert window.apply_replacement_to_occurrence() is True
+
+        counts = store.load().counts_for(Provider.ELEVENLABS)
+        assert (counts.chosen, counts.corrected) == (1, 1)
     finally:
         window.close()

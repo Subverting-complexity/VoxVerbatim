@@ -44,6 +44,7 @@ from vox_verbatim.transcription.model import (
 from vox_verbatim.transcription.providers import registry
 from vox_verbatim.transcription.providers.assemblyai import ASSEMBLYAI_CAPABILITIES
 from vox_verbatim.transcription.store import TranscriptStore
+from vox_verbatim.transcription.vocabulary import VocabularyTerm
 
 from tests.conftest import write_real_audio
 from tests.test_passes import (
@@ -121,6 +122,7 @@ def transcribe(recording, monkeypatch):
         escalation_provider=None,
         aligner=None,
         calibration_path=None,
+        folder_terms=(),
     ) -> Run:
         services = three_services() if services is None else services
         settings = settings or offline_settings()
@@ -148,6 +150,7 @@ def transcribe(recording, monkeypatch):
                 configuration=configuration or RecordingConfiguration(),
                 settings=settings,
                 calibration_path=calibration_path,
+                folder_terms=tuple(folder_terms),
             ),
             progress=progress,
             cancelled=cancelled,
@@ -704,6 +707,24 @@ def test_afrikaans_enabled_reaches_the_services_that_were_asked(transcribe):
         assert Language.AFRIKAANS in service.requests_received[0].languages
     openai = services[Provider.OPENAI].requests_received[0]
     assert "af" in openai.extra_parameters["languages"]
+
+
+def test_a_folder_name_reaches_every_service(transcribe):
+    services = three_services()
+
+    transcribe(services, folder_terms=[VocabularyTerm(text="Bosch")])
+
+    for service in services.values():
+        assert "Bosch" in service.requests_received[0].vocabulary_terms
+
+
+def test_without_folder_names_no_service_is_sent_one(transcribe):
+    services = three_services()
+
+    transcribe(services)
+
+    for service in services.values():
+        assert "Bosch" not in service.requests_received[0].vocabulary_terms
 
 
 def test_the_recording_remembers_whether_afrikaans_was_allowed(transcribe):

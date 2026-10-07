@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
 )
 
 from vox_verbatim.audio.library import AudioFile
+from vox_verbatim.json_store import JsonReadStatus
 from vox_verbatim.paths import calibration_file_path
 from vox_verbatim.settings import (
     MAXIMUM_EXPECTED_SPEAKER_COUNT,
@@ -86,6 +87,7 @@ from vox_verbatim.transcription.cost import (
 )
 from vox_verbatim.transcription.model import Provider, RecordingConfiguration
 from vox_verbatim.transcription.pipeline import PipelineOptions
+from vox_verbatim.transcription.project import PROJECT_FILE_NAME, read_learned_names
 from vox_verbatim.transcription.providers.registry import DEFAULT_FULL_PASS_PROVIDERS
 from vox_verbatim.transcription.runner import (
     RecordingOutcome,
@@ -94,7 +96,12 @@ from vox_verbatim.transcription.runner import (
     summarise,
 )
 from vox_verbatim.transcription.store import TranscriptStore
-from vox_verbatim.transcription.vocabulary import Vocabulary, resolve_terms
+from vox_verbatim.transcription.vocabulary import (
+    Vocabulary,
+    VocabularyTerm,
+    resolve_terms,
+    terms_from_learned_names,
+)
 from vox_verbatim.ui.accessibility import announce, describe
 
 _log = logging.getLogger(__name__)
@@ -431,6 +438,9 @@ class TranscribeDialog(QDialog):
         # The folder the recordings sit in, which is where the project file
         # holding the names learned in its reviews lives.
         self._folder: Path | None = self._recordings[0].path.parent if self._recordings else None
+        # The folder's learned names as terms. Read now for the cost estimate,
+        # and read again when the run starts, which is what the run sends.
+        self._folder_terms: tuple[VocabularyTerm, ...] = self._read_folder_terms()[0]
         self._settings = settings
         self._vocabulary = vocabulary if vocabulary is not None else Vocabulary()
         self._runner = TranscriptionRunner(self)
@@ -950,6 +960,7 @@ class TranscribeDialog(QDialog):
             settings=self._settings,
             vocabulary=self._vocabulary,
             calibration_path=calibration_file_path(),
+            folder_terms=self._folder_terms,
         )
 
     # -- What it will cost -------------------------------------------------
@@ -1003,12 +1014,14 @@ class TranscribeDialog(QDialog):
         )
 
     def vocabulary_terms_will_be_sent(self) -> bool:
-        """Whether the chosen profiles hold any term at all.
+        """Whether the folder's learned names or the chosen profiles hold any term.
 
         ElevenLabs charges more for a request that carries terms, so the
         estimate has to know. A profile that is switched on but empty sends
         nothing and costs nothing extra.
         """
+        if self._folder_terms:
+            return True
         return bool(resolve_terms(self._vocabulary, self.chosen_profile_ids()))
 
     def cost_text(self) -> str:
@@ -1077,6 +1090,43 @@ class TranscribeDialog(QDialog):
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         return box.exec() == QMessageBox.StandardButton.Yes
 
+    def confirm_without_learned_names(self) -> bool:
+        """Ask whether to go on when the folder's project file cannot be read.
+
+        A message box is announced by screen readers when it opens and is
+        answered from the keyboard. Cancel is the default, for the reason
+        :meth:`confirm_cost` gives: an Enter meant for Start must not carry
+        through and start a run the person has not agreed to.
+        """
+        path = (self._folder / PROJECT_FILE_NAME) if self._folder else PROJECT_FILE_NAME
+        box = QMessageBox(self)
+        box.setWindowTitle("Transcribe")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("The names this folder learned in its reviews could not be read.")
+        box.setInformativeText(
+            f"The project file {path} is damaged, or another program has it open. "
+            "Go on and transcribe without the learned names, or cancel and try "
+            "again later?"
+        )
+        go_on = box.addButton("Go on without learned names", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is go_on
+
+    def _read_folder_terms(self) -> tuple[tuple[VocabularyTerm, ...], JsonReadStatus]:
+        """The folder's learned names as terms, and what reading the file found."""
+        if self._folder is None:
+            return (), JsonReadStatus.MISSING
+        names, status = read_learned_names(self._folder)
+        return tuple(terms_from_learned_names(names)), status
+
+    def _say_not_started(self) -> None:
+        self._set_progress_text("The run was not started.")
+        self._progress_group.setVisible(True)
+        self._grow_to_fit()
+        announce(self._progress_bar, "The run was not started.", urgent=True)
+
     # -- Running ----------------------------------------------------------
 
     @property
@@ -1122,14 +1172,22 @@ class TranscribeDialog(QDialog):
             self._refuse_with_problems(problems)
             return False
 
+        # The folder's learned names are read again, because a review may have
+        # added some since the dialog opened. A file that is there but cannot
+        # be read is asked about rather than quietly passed over.
+        folder_terms, status = self._read_folder_terms()
+        if status is JsonReadStatus.DAMAGED:
+            if not self.confirm_without_learned_names():
+                self._say_not_started()
+                return False
+            folder_terms = ()
+        self._folder_terms = folder_terms
+
         # Worked out again here rather than trusted from when the dialog
         # opened, because Settings may have been changed in between.
         self._show_cost()
         if self._settings.cost.confirm_before_running and not self.confirm_cost(self.cost_text()):
-            self._set_progress_text("The run was not started.")
-            self._progress_group.setVisible(True)
-            self._grow_to_fit()
-            announce(self._progress_bar, "The run was not started.", urgent=True)
+            self._say_not_started()
             return False
 
         self._results = []

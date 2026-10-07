@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vox_verbatim.json_store import read_json_object, write_json_object
 from vox_verbatim.transcription.model import Language, Provider
@@ -45,6 +45,9 @@ from vox_verbatim.transcription.normalise import (
     equivalence_kind,
     normalise,
 )
+
+if TYPE_CHECKING:
+    from vox_verbatim.transcription.project import LearnedName
 
 VOCABULARY_FILE_NAME = "vocabulary.json"
 
@@ -698,6 +701,56 @@ def _combine(kept: VocabularyTerm, other: VocabularyTerm) -> VocabularyTerm:
         common_misrecognitions=tuple(misrecognitions),
         confirmation_count=kept.confirmation_count + other.confirmation_count,
     )
+
+
+def terms_from_learned_names(names: Iterable["LearnedName"]) -> list[VocabularyTerm]:
+    """Turn the names a folder learned in its reviews into terms for the services.
+
+    Each name was typed by a person listening to a recording in that folder,
+    so it counts as confirmed once. The spellings the services wrote instead
+    go with it, so reconciliation can recognise them as known mistakes. A
+    name whose language was never established belongs to every language,
+    which is what a term with no language means.
+    """
+    terms: list[VocabularyTerm] = []
+    for name in names:
+        text = name.text.strip()
+        if not text:
+            continue
+        terms.append(
+            VocabularyTerm(
+                text=text,
+                language=_language_from_value(name.language),
+                common_misrecognitions=_clean_text_list(list(name.wrong_forms)),
+                confirmation_count=1,
+            )
+        )
+    return terms
+
+
+def folder_terms_first(
+    folder_terms: Sequence[VocabularyTerm],
+    profile_terms: Sequence[VocabularyTerm],
+) -> list[VocabularyTerm]:
+    """Put a folder's own names ahead of the terms from the chosen profiles.
+
+    A service that will not take every term cuts from the end of the list,
+    so whatever comes first survives. The folder's names come first because
+    they were heard in this folder's recordings, where a profile term was
+    typed into a list in case it came up. A profile term that is the same
+    word as a folder name is folded into the folder's entry rather than
+    sent twice, which would spend one of the few places a service offers.
+    """
+    merged: dict[str, tuple[int, int, VocabularyTerm]] = {}
+    for position, term in enumerate([*folder_terms, *profile_terms]):
+        key = _key_for(term.text, merged)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = (0, position, term)
+        else:
+            merged[key] = (existing[0], existing[1], _combine(existing[2], term))
+    # A dictionary keeps the order its keys arrived in, which is the order wanted.
+    return [entry[2] for entry in merged.values()]
 
 
 @dataclass(frozen=True)

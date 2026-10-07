@@ -364,3 +364,49 @@ def test_an_older_settings_file_and_a_blank_prompt_take_the_defaults():
     loaded = Settings.from_dict({"transcription": {"smoothing": {"prompt": "  "}}})
     assert loaded.transcription.smoothing.prompt == DEFAULT_SMOOTHING_PROMPT
     assert Settings.from_dict({}).transcription.smoothing == SmoothingSettings()
+
+
+def test_when_every_request_fails_nothing_is_written_and_the_outcome_says_why():
+    def answer(turns, _):
+        error = RuntimeError("unauthorised")
+        error.status_code = 401
+        raise error
+
+    store = FakeStore()
+    outcome = write_smooth_transcript(
+        _transcript(("0", "um we we were there")), store, _smoother(FakeClient(answer))
+    )
+
+    assert not outcome.succeeded
+    assert outcome.error is not None and "did not answer" in outcome.error
+    assert "401" in outcome.error
+    assert SMOOTH_EXPORT_NAME not in store.written
+
+
+def test_a_part_with_no_answer_says_so_while_the_other_parts_are_kept():
+    turns = [("0", "first part words here"), ("1", "second part words here")]
+
+    def answer(turns, _):
+        if turns[0][0] == 2:
+            raise ConnectionError("network down")
+        return [(n, t) for n, _s, t in turns]
+
+    outcome = _smoother(FakeClient(answer), part_words=4).smooth(_transcript(*turns))
+
+    assert outcome.succeeded
+    assert len(outcome.warnings) == 1
+    assert "did not answer for turn 2" in outcome.warnings[0]
+    assert "second part words here" in outcome.text
+
+
+def test_a_turn_that_loses_too_many_words_twice_keeps_the_model_text_with_a_warning():
+    literal = "We drove to Pretoria with the cattle in the morning"
+    client = FakeClient(lambda turns, _: [(n, "We drove.") for n, _s, _t in turns])
+
+    outcome = _smoother(client).smooth(_transcript(("0", literal)))
+
+    assert len(client.calls) == 2
+    assert len(outcome.warnings) == 1
+    assert "lost too many of its words" in outcome.warnings[0]
+    assert "We drove." in outcome.text
+    assert literal not in outcome.text

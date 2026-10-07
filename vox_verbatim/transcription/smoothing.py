@@ -321,6 +321,11 @@ class PartResult:
     warning: str | None = None
     requests: list[ProviderRequestRecord] = field(default_factory=list)
 
+    @property
+    def answered(self) -> bool:
+        """Whether any request for this part got an answer back."""
+        return any(record.succeeded for record in self.requests)
+
 
 @dataclass
 class SmoothOutcome:
@@ -408,6 +413,15 @@ class Smoother:
             results = list(pool.map(lambda part: self._smooth_part(client, part), parts))
 
         outcome = SmoothOutcome()
+        if not any(result.answered for result in results):
+            # Every request failed, so there is no edit at all. Writing the
+            # literal words under an "Edited" header would replace an earlier
+            # good smooth file with nothing better than transcript.txt.
+            outcome.requests = [record for result in results for record in result.requests]
+            reason = outcome.requests[-1].error if outcome.requests else None
+            outcome.error = "The smooth transcript was not made: the language model did not answer"
+            outcome.error += f" ({reason})." if reason else "."
+            return outcome
         for result in results:
             outcome.requests.extend(result.requests)
             if result.warning is not None:
@@ -439,11 +453,18 @@ class Smoother:
                 result.texts[turn.number] = turn.text
         first, last = part.turns[0].number, part.turns[-1].number
         where = f"turn {first}" if first == last else f"turns {first} to {last}"
-        result.warning = (
-            f"The language model's edit of {where} did not pass its check: "
-            + "; ".join(problems)
-            + "."
-        )
+        if result.answered:
+            result.warning = (
+                f"The language model's edit of {where} did not pass its check: "
+                + "; ".join(problems)
+                + ". Compare it with transcript.txt."
+            )
+        else:
+            result.warning = (
+                f"The language model did not answer for {where} ("
+                + "; ".join(problems)
+                + "), so these turns are the literal words."
+            )
         _log.info("A smoothing part failed its check twice: %s", result.warning)
         return result
 
@@ -569,7 +590,7 @@ def render_smooth_text(
     blocks: list[tuple[str | None, list[str]]] = []
     for result in results:
         if result.warning is not None:
-            blocks.append((None, [f"[WARNING: {result.warning} Compare it with transcript.txt.]"]))
+            blocks.append((None, [f"[WARNING: {result.warning}]"]))
         for turn in result.part.turns:
             text = result.texts.get(turn.number, "")
             if not text:

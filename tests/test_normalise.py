@@ -25,6 +25,7 @@ from vox_verbatim.transcription.normalise import (
     normalise_phrase,
     normalise_sequence,
     read_number,
+    spelled_as,
 )
 
 
@@ -153,6 +154,28 @@ def test_ordinary_words_are_not_dragged_into_the_german_equivalence(first, secon
     find again once it was in a transcript.
     """
     assert not are_equivalent(first, second)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("Ja.", "Yeah."), ("ja", "yeah"), ("Yeah,", "JA"), ("Ja, yeah", "yeah ja")],
+)
+def test_ja_and_yeah_are_the_same_word(first, second):
+    """Afrikaans and German write "ja" where English writes "yeah"."""
+    assert are_equivalent(first, second)
+    assert equivalence_kind(first, second) is EquivalenceKind.SPELLING_VARIANT
+
+
+@pytest.mark.parametrize(("first", "second"), [("jam", "yeah"), ("Ja.", "yes"), ("ja", "yea")])
+def test_only_ja_and_yeah_are_joined(first, second):
+    assert not are_equivalent(first, second)
+
+
+def test_spelled_as_ignores_capitals_and_punctuation_only():
+    assert spelled_as("Ja.", "ja")
+    assert spelled_as("Yeah,", "yeah")
+    assert not spelled_as("Ja.", "yeah")
+    assert not spelled_as("Jam", "ja")
 
 
 # -- Numbers ------------------------------------------------------------

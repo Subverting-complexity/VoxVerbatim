@@ -120,6 +120,7 @@ from vox_verbatim.transcription.normalise import (
     are_equivalent,
     equivalence_kind,
     normalise,
+    spelled_as,
 )
 from vox_verbatim.transcription.risk import RISK_WINDOW, numbers_disagree, risk_at
 from vox_verbatim.transcription.vocabulary import TermCategory, VocabularyIndex
@@ -1154,7 +1155,7 @@ def _score_group(
     group.score = _combine(per_provider, options)
     group.components["combined"] = round(group.score, 4)
     group.components["supporting_providers"] = float(len(group.readings))
-    group.display = _preferred_text(group, vocabulary)
+    group.display = _preferred_text(group, vocabulary, language)
 
 
 def _combine(scores: Sequence[float], options: ReconciliationOptions) -> float:
@@ -1201,7 +1202,46 @@ def _vocabulary_factor(
     return 1.0, False
 
 
-def _preferred_text(group: _Group, vocabulary: VocabularyIndex | None) -> str:
+#: The spelling each language gives a word that is one spoken word written
+#: in two languages, as in ``normalise._SAME_WORD_ACROSS_LANGUAGES``.
+_SPELLING_BY_LANGUAGE: tuple[dict[Language, str], ...] = (
+    {Language.ENGLISH: "yeah", Language.AFRIKAANS: "ja", Language.GERMAN: "ja"},
+)
+
+
+def _readings_for_language(
+    readings: Sequence[_Reading], language: Language
+) -> Sequence[_Reading]:
+    """Keep the readings spelled for the language spoken at this place.
+
+    Only where the readings hold more than one spelling of a word in
+    ``_SPELLING_BY_LANGUAGE``: "Ja" and "Yeah" are then the same word, and
+    the transcript should show the one the speaker's language writes. Where
+    the language is not known, or no reading has its spelling, every
+    reading is kept and the usual ranking decides.
+    """
+    for spellings in _SPELLING_BY_LANGUAGE:
+        wanted = spellings.get(language)
+        if wanted is None:
+            continue
+        present = {
+            spelling
+            for spelling in spellings.values()
+            if any(spelled_as(reading.text, spelling) for reading in readings)
+        }
+        if len(present) < 2:
+            continue
+        chosen = [reading for reading in readings if spelled_as(reading.text, wanted)]
+        if chosen:
+            return chosen
+    return readings
+
+
+def _preferred_text(
+    group: _Group,
+    vocabulary: VocabularyIndex | None,
+    language: Language,
+) -> str:
     """Choose which spelling of one candidate to print.
 
     The user's own spelling wins, because that is the entire point of having
@@ -1211,7 +1251,9 @@ def _preferred_text(group: _Group, vocabulary: VocabularyIndex | None) -> str:
     poorer of the two would lose information nobody can recover later.
     Otherwise the strongest service's spelling is used, with the backbone's
     preferred on a tie so that the same recording reconciles the same way
-    twice.
+    twice. Where the readings are one word written in two languages, as
+    "Ja" and "Yeah", only those spelled for the language spoken here are
+    ranked; the chosen reading keeps its own capitals and punctuation.
     """
     texts = group.texts
     if not texts:
@@ -1222,7 +1264,7 @@ def _preferred_text(group: _Group, vocabulary: VocabularyIndex | None) -> str:
             if match is not None:
                 return match.term.text
     ranked = sorted(
-        group.readings,
+        _readings_for_language(group.readings, language),
         key=lambda reading: (
             group.components.get(f"{reading.provider.value}.score", 0.0),
             _has_german_letter(reading.text),

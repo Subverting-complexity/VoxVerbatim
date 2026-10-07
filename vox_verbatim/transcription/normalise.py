@@ -431,6 +431,16 @@ _LEFT_ALONE = frozenset(
 #: evidence* they are the same thing, and which one to print is a question
 #: for the reconciliation rules rather than for this module.
 
+#: Words that are one spoken word written in two languages. "Ja" is how
+#: Afrikaans and German write what English writes as "yeah", and a service
+#: that wrote one where the others wrote the other heard the same thing.
+#: Comparing them as different words left a disagreement, often reported as
+#: a name that differs, at every one of them. Each entry is mapped to one
+#: shared spelling at the spelling stage, so they meet as a spelling
+#: variant. Which spelling the transcript shows is for the reconciliation
+#: rules, which know the language spoken at that place.
+_SAME_WORD_ACROSS_LANGUAGES = {"ja": "yeah"}
+
 
 # -- Building the comparison forms ---------------------------------------
 
@@ -538,8 +548,14 @@ def _settle_apostrophes(word: str) -> str:
 
 @lru_cache(maxsize=100_000)
 def _spelling_form(text: str, dropped: bool) -> str:
-    """German characters settled, in one direction or the other."""
-    plain = _plain_form(text)
+    """German characters settled, in one direction or the other.
+
+    A word in ``_SAME_WORD_ACROSS_LANGUAGES`` is settled to its shared
+    spelling first, so "Ja" and "yeah" meet here.
+    """
+    plain = " ".join(
+        _SAME_WORD_ACROSS_LANGUAGES.get(word, word) for word in _plain_form(text).split()
+    )
     return _drop_german_letters(plain) if dropped else _german_fold(plain)
 
 
@@ -1061,6 +1077,17 @@ def equivalence_kind(first: str, second: str) -> EquivalenceKind:
         (smallest, EquivalenceKind.COMPOUND),
         key=_BY_TIMING_CONSTRAINT.index,
     )
+
+
+def spelled_as(text: str, word: str) -> bool:
+    """Whether this text is the given word, apart from case and punctuation.
+
+    "Ja." is spelled as "ja" and "Yeah," as "yeah", but "Ja." is not spelled
+    as "yeah", even though the two are equivalent. The reconciliation rules
+    use this to pick, from readings that are the same word, the one written
+    in the language spoken at that place.
+    """
+    return _plain_form(text) == _plain_form(word)
 
 
 def are_equivalent(first: str, second: str) -> bool:

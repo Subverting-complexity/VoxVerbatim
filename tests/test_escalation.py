@@ -257,6 +257,24 @@ def test_two_spellings_of_the_same_number_are_not_a_disagreement():
     assert reasons_for(token) == ()
 
 
+def test_ja_and_yeah_are_not_a_name_that_differs():
+    """One service writes the Afrikaans "Ja." where the others write "Yeah."."""
+    token = word(
+        "Yeah.",
+        1.0,
+        1.4,
+        candidates=(
+            ("Yeah.", (Provider.OPENAI, Provider.MICROSOFT)),
+            ("Ja.", (Provider.ELEVENLABS,)),
+        ),
+    )
+
+    reasons = reasons_for(token)
+
+    assert EscalationReason.PROPER_NOUN_DIFFERS not in reasons
+    assert reasons == ()
+
+
 def test_a_name_that_differs_is_escalated():
     token = word(
         "Jürgen",

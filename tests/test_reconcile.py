@@ -503,6 +503,99 @@ def test_microsoft_carries_no_weight_on_a_confidently_afrikaans_span() -> None:
     assert disputed.text == "praat"
 
 
+# -- "Ja" and "yeah" -----------------------------------------------------
+
+
+def test_ja_and_yeah_agree_and_english_speech_shows_yeah() -> None:
+    """ElevenLabs writes the Afrikaans "Ja." where the others write "Yeah."."""
+    english = ["we", "should", "sign", "the", "contract"]
+    table = table_of(
+        spoken(Provider.ELEVENLABS, [*english, "Ja."]),
+        spoken(Provider.OPENAI, [*english, "Yeah."], timed=False),
+        spoken(Provider.MICROSOFT, [*english, "Yeah."], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    answer = tokens[5]
+    assert answer.language is Language.ENGLISH
+    assert answer.text == "Yeah."
+    assert len(answer.candidates) == 1
+    assert answer.text_confidence is Confidence.HIGH
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in answer.review_reasons
+    assert ReviewReason.PROPER_NAME_DISAGREEMENT not in answer.review_reasons
+
+
+def test_ja_and_yeah_in_afrikaans_speech_shows_ja() -> None:
+    words = AFRIKAANS_WORDS[:5]
+    backbone = spoken(Provider.ELEVENLABS, [*words, "Ja."])
+    backbone.detected_language = Language.AFRIKAANS
+    openai = spoken(Provider.OPENAI, [*words, "Yeah."], timed=False)
+    openai.detected_language = Language.AFRIKAANS
+    microsoft = spoken(Provider.MICROSOFT, [*words, "Yeah."], timed=False)
+    microsoft.detected_language = Language.AFRIKAANS
+    table = table_of(backbone, openai, microsoft)
+
+    tokens = reconcile(
+        table,
+        configuration=RecordingConfiguration(afrikaans_enabled=True),
+        results=[backbone, openai, microsoft],
+    )
+
+    answer = tokens[5]
+    assert answer.language is Language.AFRIKAANS
+    assert answer.text == "Ja."
+    assert len(answer.candidates) == 1
+    assert ReviewReason.PROPER_NAME_DISAGREEMENT not in answer.review_reasons
+
+
+def test_english_speech_shows_yeah_even_where_most_services_wrote_ja() -> None:
+    english = ["we", "should", "sign", "the", "contract"]
+    table = table_of(
+        spoken(Provider.ELEVENLABS, [*english, "Ja."]),
+        spoken(Provider.OPENAI, [*english, "Ja."], timed=False),
+        spoken(Provider.MICROSOFT, [*english, "Yeah."], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert tokens[5].language is Language.ENGLISH
+    assert tokens[5].text == "Yeah."
+
+
+def test_ja_and_yeah_in_german_speech_shows_ja() -> None:
+    words = ["ich", "glaube", "das", "ist", "richtig"]
+    german = [Language.GERMAN] * 6
+    backbone = spoken(Provider.ELEVENLABS, [*words, "yeah,"], languages=german)
+    backbone.detected_language = Language.GERMAN
+    openai = spoken(Provider.OPENAI, [*words, "yeah,"], timed=False, languages=german)
+    openai.detected_language = Language.GERMAN
+    microsoft = spoken(
+        Provider.MICROSOFT, [*words, "Ja,"], timed=False, languages=german
+    )
+    microsoft.detected_language = Language.GERMAN
+    table = table_of(backbone, openai, microsoft)
+
+    tokens = reconcile(table, results=[backbone, openai, microsoft])
+
+    answer = tokens[5]
+    assert answer.language is Language.GERMAN
+    assert answer.text == "Ja,"
+    assert len(answer.candidates) == 1
+
+
+def test_the_chosen_yeah_keeps_its_own_punctuation_and_capitals() -> None:
+    english = ["we", "should", "sign", "the", "contract"]
+    table = table_of(
+        spoken(Provider.ELEVENLABS, [*english, "Ja."]),
+        spoken(Provider.OPENAI, [*english, "yeah,"], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert tokens[5].text == "yeah,"
+
+
 def test_microsoft_is_only_reduced_where_the_language_is_uncertain() -> None:
     """A code-switch boundary, where nothing is confidently anything.
 

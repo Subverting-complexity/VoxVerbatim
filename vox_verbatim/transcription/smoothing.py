@@ -435,9 +435,14 @@ class Smoother:
         """Send one part, check the answer, and try once more if it fails."""
         result = PartResult(part=part, texts={})
         problems: list[str] = []
+        # The problems of the last answer that came back. A retry that then
+        # fails to connect must not be given as why that answer failed.
+        checked_problems: list[str] = []
         for _attempt in range(ATTEMPTS_PER_PART):
             answer, problems, record = self._ask(client, part)
             result.requests.append(record)
+            if record.succeeded:
+                checked_problems = problems
             if answer:
                 result.texts = answer
             if not problems:
@@ -456,7 +461,7 @@ class Smoother:
         if result.answered:
             result.warning = (
                 f"The language model's edit of {where} did not pass its check: "
-                + "; ".join(problems)
+                + "; ".join(checked_problems)
                 + ". Compare it with transcript.txt."
             )
         else:

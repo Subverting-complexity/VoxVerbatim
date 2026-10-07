@@ -410,3 +410,18 @@ def test_a_turn_that_loses_too_many_words_twice_keeps_the_model_text_with_a_warn
     assert "lost too many of its words" in outcome.warnings[0]
     assert "We drove." in outcome.text
     assert literal not in outcome.text
+
+
+def test_a_failed_check_then_a_failed_retry_gives_the_check_as_the_reason():
+    def answer(turns, index):
+        if index == 1:
+            raise ConnectionError("network down")
+        return [(n, "We drove.") for n, _s, _t in turns]
+
+    outcome = _smoother(FakeClient(answer)).smooth(
+        _transcript(("0", "We drove to Pretoria with the cattle in the morning"))
+    )
+
+    assert len(outcome.warnings) == 1
+    assert "lost too many of its words" in outcome.warnings[0]
+    assert "could not be reached" not in outcome.warnings[0]

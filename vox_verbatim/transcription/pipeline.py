@@ -195,6 +195,11 @@ def transcribe_recording(
         cancelled=cancelled,
         chunk_overlap_seconds=settings.processing.provider_chunk_overlap_seconds,
     )
+    timed_by_fallback = False
+    if not outcome.cancelled and not _stopped(cancelled):
+        timed_by_fallback = _time_with_fallback(
+            outcome, canonical, settings, context, configuration, store, reporter, cancelled
+        )
     transcript.provider_results = outcome.results
     transcript.requests.extend(outcome.requests)
     transcript.warnings.extend(outcome.warnings)
@@ -219,7 +224,9 @@ def transcribe_recording(
             "from. The raw answers are kept in the transcript folder."
         )
         return _finish(transcript, store, started, stopped=False)
-    if backbone_provider is not Provider.ELEVENLABS:
+    if backbone_provider is not Provider.ELEVENLABS and not (
+        timed_by_fallback and backbone_provider is Provider.ASSEMBLYAI
+    ):
         # Worth saying plainly rather than leaving in a log. The backbone
         # decides every timestamp and every initial speaker label, so a
         # different one is a different transcript, not a detail. And the
@@ -308,6 +315,84 @@ def transcribe_recording(
 
     transcript.speakers = _speakers_in(tokens, configuration)
     return _finish(transcript, store, started, stopped=_stopped(cancelled))
+
+
+def _gave_word_times(result: ProviderResult | None) -> bool:
+    return (
+        result is not None
+        and result.succeeded
+        and any(token.has_timing for token in result.word_tokens)
+    )
+
+
+def _time_with_fallback(
+    outcome: passes.PassOutcome,
+    canonical: CanonicalAudio,
+    settings: TranscriptionSettings,
+    context,
+    configuration: RecordingConfiguration,
+    store: TranscriptStore,
+    reporter: "_Reporter",
+    cancelled: CancelCheck | None,
+) -> bool:
+    """Ask AssemblyAI for a full pass when ElevenLabs gave no word times.
+
+    Returns whether AssemblyAI's words were added and carry times.
+
+    ElevenLabs is the only full-pass service that times its words. Without
+    those times nothing can be played from the review window, the second
+    opinions have no window of audio to send, and the language model has
+    nothing to check a disagreement against, so one failed key costs the
+    whole recording its review. AssemblyAI times its words too, and a full
+    pass from it costs less than that. It is asked only when ElevenLabs was
+    asked and gave no times, so a run where ElevenLabs answers costs what
+    it did before.
+    """
+    elevenlabs = outcome.results.get(Provider.ELEVENLABS)
+    if elevenlabs is None or _gave_word_times(elevenlabs):
+        return False
+    if Provider.ASSEMBLYAI in outcome.results:
+        return False
+    provider = registry.build_timing_fallback_provider(settings)
+    if provider is None or provider.describe_configuration_problem() is not None:
+        return False
+
+    name = Provider.ASSEMBLYAI.display_name
+    reporter.stage(
+        "services",
+        1.0,
+        f"{Provider.ELEVENLABS.display_name} gave no word times, so {name} is "
+        "transcribing the whole recording to time the words.",
+    )
+    fallback = passes.run_passes(
+        canonical=canonical,
+        providers={Provider.ASSEMBLYAI: provider},
+        context=context,
+        configuration=configuration,
+        store=store,
+        chunk_folder=store.folder / "chunks",
+        progress=lambda _fraction, message: reporter.stage("services", 1.0, message),
+        cancelled=cancelled,
+        chunk_overlap_seconds=settings.processing.provider_chunk_overlap_seconds,
+    )
+    outcome.results.update(fallback.results)
+    outcome.requests.extend(fallback.requests)
+    outcome.warnings.extend(fallback.warnings)
+    outcome.cancelled = outcome.cancelled or fallback.cancelled
+
+    if not _gave_word_times(fallback.results.get(Provider.ASSEMBLYAI)):
+        return False
+    why = (
+        f"it did not answer ({elevenlabs.error})"
+        if elevenlabs.error
+        else "it answered without them"
+    )
+    outcome.warnings.append(
+        f"{Provider.ELEVENLABS.display_name} gave no word times, because {why}. "
+        f"{name} transcribed the whole recording as well, so the word times and "
+        f"speakers come from {name} instead."
+    )
+    return True
 
 
 def _learned_weights(path: Path | None) -> reconcile_rules.ReliabilityWeights:
@@ -421,9 +506,22 @@ def _escalate(
     # The answers first, then the bookkeeping. apply_outcome flags the words
     # no answer reached, and it must see the words that apply_answers has
     # just settled so that it does not flag those.
-    applied = escalation.apply_answers(tokens, result)
+    # When AssemblyAI also made the full pass, as the timing fallback, its
+    # words are what the transcript's words point back to. The answers are
+    # numbered after them and added to them, because replacing that result
+    # would leave every reference pointing at a word that is not there.
+    full_pass = transcript.provider_results.get(Provider.ASSEMBLYAI)
+    if full_pass is not None and not full_pass.tokens:
+        full_pass = None
+    first_index = (
+        0 if full_pass is None else 1 + max(token.index for token in full_pass.tokens)
+    )
+    applied = escalation.apply_answers(tokens, result, first_index=first_index)
     if applied.evidence is not None:
-        transcript.provider_results[applied.evidence.provider] = applied.evidence
+        if full_pass is not None and full_pass.provider is applied.evidence.provider:
+            full_pass.tokens = [*full_pass.tokens, *applied.evidence.tokens]
+        else:
+            transcript.provider_results[applied.evidence.provider] = applied.evidence
     escalation.apply_outcome(transcript, result)
     reporter.stage("escalating", 1.0, applied.sentence)
     return tokens

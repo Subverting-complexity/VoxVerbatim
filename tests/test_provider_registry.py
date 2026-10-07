@@ -308,6 +308,20 @@ def test_switching_assemblyai_off_leaves_no_second_opinion(settings):
     assert registry.build_escalation_provider(settings) is None
 
 
+def test_the_timing_fallback_comes_from_assemblyai(settings, monkeypatch):
+    record(monkeypatch, assemblyai_module, "AssemblyAiProvider")
+
+    built = registry.build_timing_fallback_provider(settings)
+
+    assert built.arguments["api_key"] == "assemblyai-key"
+
+
+def test_switching_assemblyai_off_leaves_no_timing_fallback(settings):
+    settings.assemblyai.enabled = False
+
+    assert registry.build_timing_fallback_provider(settings) is None
+
+
 # -- Measuring a corrected word again ------------------------------------
 
 

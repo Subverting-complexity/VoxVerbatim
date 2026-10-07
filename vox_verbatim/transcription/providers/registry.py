@@ -99,6 +99,19 @@ def build_escalation_provider(
     return build_provider(Provider.ASSEMBLYAI, settings)
 
 
+def build_timing_fallback_provider(
+    settings: TranscriptionSettings,
+) -> TranscriptionProvider | None:
+    """Return the service that times the words when ElevenLabs gives no times.
+
+    AssemblyAI times its words, but it is left out of the full pass because
+    of what a full pass costs. When ElevenLabs gives no word times, that
+    saving costs the whole transcript its times, so AssemblyAI is asked for
+    a full pass then, and only then. None if it is switched off.
+    """
+    return build_provider(Provider.ASSEMBLYAI, settings)
+
+
 def build_forced_aligner(settings: TranscriptionSettings) -> ForcedAligner | None:
     """Return the forced aligner, or None if it is switched off or unavailable.
 

@@ -952,6 +952,54 @@ def test_an_export_may_be_written_again(tmp_path):
     assert [item.name for item in store.exports_folder.iterdir()] == ["review-report.md"]
 
 
+def _hold_open(monkeypatch, held_path: Path) -> None:
+    """Make ``held_path`` refuse to be replaced, as a file another program has open."""
+    from vox_verbatim import json_store
+
+    real_replace = json_store.os.replace
+
+    def held(source, destination):
+        if Path(destination) == held_path:
+            raise PermissionError(13, "The process cannot access the file")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(json_store.os, "replace", held)
+
+
+def test_a_held_rebuildable_export_leaves_no_copy_behind(tmp_path, monkeypatch):
+    """The next write makes it again, so nothing is kept beside it."""
+    store = TranscriptStore(tmp_path / "talk.m4a")
+    path = store.write_export("transcript.txt", "old", rebuildable=True)
+    _hold_open(monkeypatch, path)
+
+    assert store.write_export("transcript.txt", "new", patient=False, rebuildable=True) is None
+
+    assert [item.name for item in store.exports_folder.iterdir()] == ["transcript.txt"]
+    assert path.read_text(encoding="utf-8") == "old"
+
+
+def test_writing_a_rebuildable_export_removes_an_old_unsaved_copy(tmp_path):
+    store = TranscriptStore(tmp_path / "talk.m4a")
+    store.exports_folder.mkdir(parents=True)
+    (store.exports_folder / "review-report.md.unsaved").write_text("stale", encoding="utf-8")
+
+    assert store.write_export("review-report.md", "new", rebuildable=True) is not None
+
+    assert [item.name for item in store.exports_folder.iterdir()] == ["review-report.md"]
+
+
+def test_a_held_export_that_is_not_rebuildable_is_still_kept(tmp_path, monkeypatch):
+    """The smooth transcript cost a paid call, so its data is not thrown away."""
+    store = TranscriptStore(tmp_path / "talk.m4a")
+    path = store.write_export("transcript-smooth.txt", "old")
+    _hold_open(monkeypatch, path)
+
+    assert store.write_export("transcript-smooth.txt", "new", patient=False) is None
+
+    kept = store.exports_folder / "transcript-smooth.txt.unsaved"
+    assert kept.read_text(encoding="utf-8") == "new"
+
+
 def test_saving_leaves_no_temporary_files_behind(tmp_path):
     store = TranscriptStore(tmp_path / "talk.m4a")
 
@@ -1097,3 +1145,20 @@ def test_a_file_written_before_the_other_speaker_was_kept_still_loads():
 
     assert loaded is not None
     assert [token.speaker_alternative for token in loaded.tokens] == [None, None]
+
+
+def test_write_exports_leaves_no_copy_beside_a_held_file(tmp_path, monkeypatch):
+    """The two documents rebuilt from the transcript are written as rebuildable."""
+    from vox_verbatim.transcription.exports import write_exports
+
+    store = TranscriptStore(tmp_path / "talk.m4a")
+    transcript = Transcript(recording_name="talk.m4a")
+    assert write_exports(transcript, store) == []
+    _hold_open(monkeypatch, store.exports_folder / "review-report.md")
+
+    assert write_exports(transcript, store, patient=False) == ["review-report.md"]
+
+    assert sorted(item.name for item in store.exports_folder.iterdir()) == [
+        "review-report.md",
+        "transcript.txt",
+    ]

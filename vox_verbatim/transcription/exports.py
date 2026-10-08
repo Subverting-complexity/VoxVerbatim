@@ -361,7 +361,9 @@ def write_exports(
         if names and name not in names:
             continue
         try:
-            written = store.write_export(name, render(transcript), patient=patient)
+            written = store.write_export(
+                name, render(transcript), patient=patient, rebuildable=True
+            )
         except Exception:  # an export is a convenience, never the transcript
             _log.exception("Could not write the %s export.", name)
             written = None

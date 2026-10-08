@@ -406,6 +406,28 @@ def test_losing_every_timed_service_leaves_the_words_without_playable_times(tran
     assert run.store.transcript_path.is_file()
 
 
+def test_openai_alone_makes_a_transcript_and_says_elevenlabs_is_switched_off(transcribe):
+    """A person may run with only OpenAI on, and is not told that ElevenLabs failed."""
+    openai_only = {Provider.OPENAI: three_services()[Provider.OPENAI]}
+
+    run = transcribe(openai_only)
+
+    assert run.transcript.verbatim_text == SENTENCE
+    assert run.warned_about("ElevenLabs Scribe is switched off", "OpenAI")
+    assert not run.warned_about("did not answer, so timings")
+    assert run.store.transcript_path.is_file()
+
+
+def test_elevenlabs_that_was_asked_and_failed_still_did_not_answer(transcribe):
+    run = transcribe(
+        three_services(
+            elevenlabs=FakeService(Provider.ELEVENLABS, error="Scribe did not answer.")
+        )
+    )
+
+    assert run.warned_about("ElevenLabs Scribe did not answer", "timings and speakers")
+
+
 def timed_assemblyai(sentence: str = SENTENCE) -> FakeService:
     """AssemblyAI over the whole recording, timing its words as it does."""
     from tests.test_passes import BACKBONE_CAPABILITIES

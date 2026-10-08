@@ -918,21 +918,31 @@ class TranscriptionSettings:
         that a key is missing is before half the services have been paid.
         Only what is switched on is checked: an unconfigured Deepgram that
         nobody asked for is not a problem.
+
+        No one service is required. A run needs at least one of the services
+        that transcribe the whole recording, and the pipeline builds the
+        transcript from whichever of them answers. AssemblyAI and Deepgram do
+        not count, because neither is sent the whole recording on its own.
         """
         problems: list[str] = []
-        for name, section, required in (
-            ("ElevenLabs Scribe", self.elevenlabs, True),
-            ("OpenAI transcription", self.openai_transcription, True),
-            ("Microsoft MAI", self.microsoft, False),
-            ("AssemblyAI", self.assemblyai, False),
-            ("Deepgram", self.deepgram, False),
+        if not (
+            self.elevenlabs.enabled
+            or self.openai_transcription.enabled
+            or self.microsoft.enabled
         ):
-            if required and not section.enabled:
-                problems.append(
-                    f"{name} is switched off. It provides part of every transcript, so a "
-                    "run cannot be made without it."
-                )
-            elif section.enabled and not section.is_configured:
+            problems.append(
+                "ElevenLabs Scribe, OpenAI transcription and Microsoft MAI are all "
+                "switched off. Switch at least one of them on, because a transcript is "
+                "made from what they hear."
+            )
+        for name, section in (
+            ("ElevenLabs Scribe", self.elevenlabs),
+            ("OpenAI transcription", self.openai_transcription),
+            ("Microsoft MAI", self.microsoft),
+            ("AssemblyAI", self.assemblyai),
+            ("Deepgram", self.deepgram),
+        ):
+            if section.enabled and not section.is_configured:
                 problems.append(
                     f"{name} is switched on but is not set up. It needs "
                     f"{section.requirements} in Settings."

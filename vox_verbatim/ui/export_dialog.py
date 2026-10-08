@@ -1,8 +1,9 @@
 """The Export Transcripts dialog: which files, and which folder.
 
-It only asks. The main window works out what to write, asks about files
+It only asks. The export flow works out what to write, asks about files
 already in the folder, and writes them, because those steps need the
-recordings and the transcript folders, which this dialog knows nothing of.
+recordings and the transcript folders, which this dialog knows nothing of;
+see :mod:`vox_verbatim.ui.export_flow`.
 
 The dialog refuses to close on Export with no file kind ticked or with no
 usable folder. It says why in a line under the controls, reads that line
@@ -43,17 +44,22 @@ class ExportDialog(QDialog):
         recording_count: int,
         settings: ExportSettings,
         parent: QWidget | None = None,
+        scope_text: str | None = None,
     ) -> None:
+        """``scope_text`` says what will be exported. The main window's wording,
+        about checked and highlighted files, is the default; the review window
+        names its one recording instead."""
         super().__init__(parent)
         self.setWindowTitle("Export Transcripts")
         layout = QVBoxLayout(self)
 
         noun = "recording" if recording_count == 1 else "recordings"
-        self._count_label = QLabel(
-            f"{recording_count} {noun} will be exported: the checked files, or the "
-            "highlighted file if none are checked.",
-            self,
-        )
+        if scope_text is None:
+            scope_text = (
+                f"{recording_count} {noun} will be exported: the checked files, or the "
+                "highlighted file if none are checked."
+            )
+        self._count_label = QLabel(scope_text, self)
         self._count_label.setWordWrap(True)
         layout.addWidget(self._count_label)
 

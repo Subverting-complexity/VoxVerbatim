@@ -207,6 +207,7 @@ from vox_verbatim.ui.review_queue import (
     chosen_text,
     reason_text,
 )
+from vox_verbatim.ui.export_flow import EXPORT_KEY, ExportRecordings
 from vox_verbatim.ui.smooth_commands import (
     MAKE_AGAIN_KEY,
     OPEN_KEY,
@@ -1313,8 +1314,14 @@ class ReviewWindow(QMainWindow):
         transcript_store_for: Callable[[str], TranscriptStore | None] | None = None,
         build_smoother: Callable[[], Smoother] | None = None,
         smooth_runner: SmoothRunner | None = None,
+        export_recordings: ExportRecordings | None = None,
     ) -> None:
         super().__init__(parent)
+        # Runs an export with its dialog in front of this window; the main
+        # window gives it, so both windows remember the same folder and
+        # check boxes. Nothing given means Export Transcripts says it is not
+        # available here.
+        self._export_recordings = export_recordings
         # Where each recording's transcript folder is, and how to build the
         # smoothing engine from the app's settings as they are now. Both are
         # needed by the two smooth transcript commands; nothing given means
@@ -2460,6 +2467,15 @@ class ReviewWindow(QMainWindow):
             QKeySequence(OPEN_KEY),
             self.open_smooth_transcript,
         )
+        project_menu.addSeparator()
+        # E rather than the main window's P, which Process Low Confidence
+        # Words holds on this menu. The key is the same in both windows.
+        self._export_action = self._add_action(
+            project_menu,
+            "&Export Transcripts...",
+            QKeySequence(EXPORT_KEY),
+            self.export_transcripts,
+        )
 
         word_menu = menu_bar.addMenu("&Word")
         self._next_group_action = self._add_action(
@@ -3069,6 +3085,35 @@ class ReviewWindow(QMainWindow):
         if requester is not self or not self.isVisible():
             return
         self._set_status(result.message, alert=True, urgent=not result.succeeded)
+
+    def export_transcripts(self) -> None:
+        """Export the selected occurrence's recording, through the shared dialog.
+
+        Only that one recording, because it is the one the person is working
+        on; the main window exports several at once. Every correction made
+        here is saved to the transcript the moment it is made, and the export
+        reads the saved transcript, so a word corrected just before is in the
+        exported file.
+        """
+        occurrence = self.current_occurrence()
+        if occurrence is None:
+            self._set_status(
+                "Choose a word first. Export Transcripts exports the recording of the "
+                "selected occurrence.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        name = occurrence.recording_name
+        path = self._recording_paths.get(name)
+        if self._export_recordings is None or path is None:
+            self._set_status(
+                f"The transcripts of {name} cannot be exported from this window.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        self._export_recordings([path], self, self._set_status, f"{name} will be exported.")
 
     def set_smoothing_prompt(self, prompt: str) -> None:
         """Keep a prompt of the folder's own, or none, and say which.

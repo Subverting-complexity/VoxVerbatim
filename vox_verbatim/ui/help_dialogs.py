@@ -105,6 +105,8 @@ In the review window
   Ctrl+Shift+M        Make the smooth transcript of the selected
                       occurrence's recording again, with your corrections.
   Ctrl+Shift+O        Open the smooth transcript of that recording.
+  Ctrl+Shift+E        Export the transcripts of that recording to a folder
+                      you choose, with every correction made so far.
   F6 and Shift+F6     Move to the next and previous panel.
   Ctrl+Shift+Left     Give the lists more of the window.
   Ctrl+Shift+Right    Give the details more of the window.

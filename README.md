@@ -617,7 +617,7 @@ The main ones:
 | `Ctrl+E` | Enhance the checked files, or the highlighted one |
 | `Ctrl+T` | Transcribe the checked files, or the highlighted one |
 | `Ctrl+R` | Review everything in the folder that needs you |
-| `Ctrl+Shift+E` | Export the transcripts of the checked files, or the highlighted one, to a folder |
+| `Ctrl+Shift+E` | Export the transcripts of the checked files, or the highlighted one, to a folder. In the review window, the recording of the selected occurrence |
 | `Ctrl+Shift+M` | Make the smooth transcript again, with your corrections |
 | `Ctrl+Shift+O` | Open the smooth transcript in your text editor |
 | `Ctrl+Space` | Play, or pause if already playing |

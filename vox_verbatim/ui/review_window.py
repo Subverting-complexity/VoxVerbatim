@@ -1372,6 +1372,10 @@ class ReviewWindow(QMainWindow):
         self._loaded_path: Path | None = None
         self._media_ready = False
         self._pending_play: tuple[int, int, str] | None = None
+        # A recording that failed to open when it was opened early, before
+        # anybody asked to hear it. It is not opened early again; see
+        # _on_player_error.
+        self._failed_path: Path | None = None
         self._play_timer = QTimer(self)
         self._play_timer.setSingleShot(True)
         # Ends a clip at the word's end time. Qt reports the position only
@@ -4537,7 +4541,12 @@ class ReviewWindow(QMainWindow):
         if occurrence is None:
             return
         path = self._audio_path_for(occurrence.recording_name)
-        if path is None or path == self._loaded_path or not path.is_file():
+        if (
+            path is None
+            or path == self._loaded_path
+            or path == self._failed_path
+            or not path.is_file()
+        ):
             return
         self._pending_play = None
         self._open_recording(path)
@@ -4574,6 +4583,7 @@ class ReviewWindow(QMainWindow):
         if milliseconds <= 0:
             return
         self._media_ready = True
+        self._failed_path = None
         pending = self._pending_play
         if pending is None:
             return
@@ -4591,11 +4601,23 @@ class ReviewWindow(QMainWindow):
         The loaded path is forgotten as well as the pending clip, so that
         asking again reloads the file instead of waiting forever for a
         readiness that will not now arrive.
+
+        A file that fails while it is being opened early, with nothing asked
+        of it, fails in silence. The person only moved to a word, and an
+        urgent alert on every row of a held arrow key would talk over the
+        screen reader for a file they have not asked to hear. The path is
+        remembered so that it is not opened early again, and the error is
+        said when they ask for the audio and the file fails once more.
         """
+        opened_early = not self._media_ready and self._pending_play is None
+        failed = self._loaded_path
         self._pending_play = None
         self._stop_timer.stop()
         self._media_ready = False
         self._loaded_path = None
+        if opened_early:
+            self._failed_path = failed
+            return
         self._set_status(message, alert=True, urgent=True)
 
     def _on_position_changed(self, milliseconds: int) -> None:

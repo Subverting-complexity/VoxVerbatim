@@ -19,8 +19,9 @@ from vox_verbatim.transcription.folder_export import (
 )
 from vox_verbatim.transcription.model import FinalToken, Transcript
 from vox_verbatim.transcription.store import TranscriptStore
-from vox_verbatim.ui import main_window as main_window_module
+from vox_verbatim.ui import export_flow as export_flow_module
 from vox_verbatim.ui.export_dialog import NO_FOLDER_CHOSEN, NO_KIND_CHOSEN, ExportDialog
+from vox_verbatim.ui.export_flow import ExportFlow
 from vox_verbatim.ui.main_window import MainWindow
 
 from tests.conftest import wait_until, write_fake_audio
@@ -256,7 +257,7 @@ class _AcceptingDialog:
         self.settings = settings
         self.accepted = accepted
 
-    def __call__(self, count, settings, parent):
+    def __call__(self, count, settings, parent, **_options):
         self.count = count
         return self
 
@@ -276,6 +277,9 @@ class _AcceptingDialog:
             kinds.append(ExportKind.REVIEW_REPORT)
         return kinds
 
+    def chosen_remake(self):
+        return False
+
     def deleteLater(self):
         pass
 
@@ -292,9 +296,11 @@ def test_exporting_two_checked_recordings_writes_six_files(window, recordings, o
     window._model.set_checked(0, True)
     window._model.set_checked(1, True)
     fake = _AcceptingDialog(ExportSettings(folder=str(out), review_report=True))
-    monkeypatch.setattr(main_window_module, "ExportDialog", fake)
+    monkeypatch.setattr(export_flow_module, "ExportDialog", fake)
     summaries = []
-    monkeypatch.setattr(window, "_show_export_summary", lambda m: summaries.append(m) or False)
+    monkeypatch.setattr(
+        ExportFlow, "_show_export_summary", lambda _flow, m: summaries.append(m) or False
+    )
 
     window.show_export()
 
@@ -315,11 +321,13 @@ def test_files_already_there_are_asked_about_once_and_cancel_writes_nothing(
     (out / "alpha - transcript.txt").write_text("old\n", encoding="utf-8")
     (out / "beta - transcript.txt").write_text("old\n", encoding="utf-8")
     monkeypatch.setattr(
-        main_window_module, "ExportDialog", _AcceptingDialog(ExportSettings(folder=str(out)))
+        export_flow_module, "ExportDialog", _AcceptingDialog(ExportSettings(folder=str(out)))
     )
     asked = []
     monkeypatch.setattr(
-        window, "_ask_about_existing_exports", lambda paths, _f: asked.append(paths) or "cancel"
+        ExportFlow,
+        "_ask_about_existing_exports",
+        lambda _flow, paths, _f: asked.append(paths) or "cancel",
     )
 
     window.show_export()
@@ -359,13 +367,13 @@ def test_the_summarys_button_opens_the_folder(window, recordings, out, monkeypat
     _transcribe(recordings[0], "hello")
     window._table.select_row(0)
     monkeypatch.setattr(
-        main_window_module,
+        export_flow_module,
         "ExportDialog",
         _AcceptingDialog(ExportSettings(folder=str(out), smooth_transcript=False)),
     )
-    monkeypatch.setattr(window, "_show_export_summary", lambda _m: True)
+    monkeypatch.setattr(ExportFlow, "_show_export_summary", lambda _flow, _m: True)
     opened = []
-    monkeypatch.setattr(window, "_open_with_windows", lambda path, what: opened.append(path))
+    monkeypatch.setattr(ExportFlow, "_open_folder", lambda _flow, path: opened.append(path))
 
     window.show_export()
 

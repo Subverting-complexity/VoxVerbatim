@@ -1,8 +1,11 @@
 """The Export Transcripts dialog: which files, and which folder.
 
-It only asks. The main window works out what to write, asks about files
+It only asks. The export flow works out what to write, asks about files
 already in the folder, and writes them, because those steps need the
-recordings and the transcript folders, which this dialog knows nothing of.
+recordings and the transcript folders, which this dialog knows nothing of;
+see :mod:`vox_verbatim.ui.export_flow`. The one thing it is told about the
+recordings is which smooth transcripts are out of date, so it can ask what
+to do with them in the same place as everything else.
 
 The dialog refuses to close on Export with no file kind ticked or with no
 usable folder. It says why in a line under the controls, reads that line
@@ -11,6 +14,7 @@ out, and puts the focus on the control to fix.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -23,12 +27,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
 
 from vox_verbatim.settings import ExportSettings
-from vox_verbatim.transcription.folder_export import ExportKind
+from vox_verbatim.transcription.folder_export import ExportKind, names_text
 from vox_verbatim.ui.accessibility import announce, describe
 
 NO_KIND_CHOSEN = "Tick at least one kind of file to export."
@@ -43,17 +48,29 @@ class ExportDialog(QDialog):
         recording_count: int,
         settings: ExportSettings,
         parent: QWidget | None = None,
+        scope_text: str | None = None,
+        out_of_date_names: Sequence[str] = (),
     ) -> None:
+        """``scope_text`` says what will be exported. The main window's wording,
+        about checked and highlighted files, is the default; the review window
+        names its one recording instead.
+
+        ``out_of_date_names`` are the recordings whose smooth transcript is
+        older than their corrections. When there are any, the dialog names
+        them and asks whether to make them again first or export them as
+        they are; Cancel is the third answer.
+        """
         super().__init__(parent)
         self.setWindowTitle("Export Transcripts")
         layout = QVBoxLayout(self)
 
         noun = "recording" if recording_count == 1 else "recordings"
-        self._count_label = QLabel(
-            f"{recording_count} {noun} will be exported: the checked files, or the "
-            "highlighted file if none are checked.",
-            self,
-        )
+        if scope_text is None:
+            scope_text = (
+                f"{recording_count} {noun} will be exported: the checked files, or the "
+                "highlighted file if none are checked."
+            )
+        self._count_label = QLabel(scope_text, self)
         self._count_label.setWordWrap(True)
         layout.addWidget(self._count_label)
 
@@ -83,6 +100,13 @@ class ExportDialog(QDialog):
         self._transcript_box.setChecked(settings.transcript)
         self._smooth_box.setChecked(settings.smooth_transcript)
         self._report_box.setChecked(settings.review_report)
+
+        self._out_of_date_names = list(out_of_date_names)
+        self._out_of_date_group: QGroupBox | None = None
+        self._remake_radio: QRadioButton | None = None
+        self._as_is_radio: QRadioButton | None = None
+        if self._out_of_date_names:
+            self._build_out_of_date_choice(layout)
 
         folder_label = QLabel("&Folder:", self)
         self._folder_edit = QLineEdit(settings.folder, self)
@@ -118,9 +142,71 @@ class ExportDialog(QDialog):
 
         self.setTabOrder(self._transcript_box, self._smooth_box)
         self.setTabOrder(self._smooth_box, self._report_box)
-        self.setTabOrder(self._report_box, self._folder_edit)
+        if self._remake_radio is not None and self._as_is_radio is not None:
+            self.setTabOrder(self._report_box, self._remake_radio)
+            self.setTabOrder(self._remake_radio, self._as_is_radio)
+            self.setTabOrder(self._as_is_radio, self._folder_edit)
+        else:
+            self.setTabOrder(self._report_box, self._folder_edit)
         self.setTabOrder(self._folder_edit, self._browse_button)
         self._transcript_box.setFocus()
+
+    def _build_out_of_date_choice(self, layout: QVBoxLayout) -> None:
+        """Name the out-of-date smooth transcripts, and ask what to do with them.
+
+        Two radio buttons rather than a second box after Export, so the whole
+        decision is made in one place and can be read through with Tab. The
+        names are in the label, and in each button's description as well,
+        because a screen reader moving by Tab reads the buttons and not the
+        label above them. The group follows the smooth transcript box: it is
+        switched off while that box is clear, because the question does not
+        arise.
+        """
+        names = names_text(self._out_of_date_names)
+        one = len(self._out_of_date_names) == 1
+        them = "it" if one else "them"
+        group = QGroupBox(
+            f"Smooth {'transcript' if one else 'transcripts'} that {'is' if one else 'are'} "
+            "out of date",
+            self,
+        )
+        group_layout = QVBoxLayout(group)
+        sentence = (
+            f"The smooth {'transcript' if one else 'transcripts'} of {names} "
+            f"{'was' if one else 'were'} made before the latest corrections."
+        )
+        label = QLabel(sentence, group)
+        label.setWordWrap(True)
+        group_layout.addWidget(label)
+        self._remake_radio = QRadioButton(f"Make {them} a&gain first", group)
+        describe(
+            self._remake_radio,
+            f"Make {them} again first",
+            f"{sentence} Make {them} again with the language model, with every "
+            "correction, and then export. This can take a minute or more for each.",
+        )
+        self._as_is_radio = QRadioButton(f"E&xport {them} as {'it is' if one else 'they are'}", group)
+        describe(
+            self._as_is_radio,
+            f"Export {them} as {'it is' if one else 'they are'}",
+            f"{sentence} Export {them} without the latest corrections.",
+        )
+        self._remake_radio.setChecked(True)
+        group_layout.addWidget(self._remake_radio)
+        group_layout.addWidget(self._as_is_radio)
+        layout.addWidget(group)
+        self._out_of_date_group = group
+        # The smooth box says so too, because it is where a person deciding
+        # whether to export the smooth transcript is.
+        describe(
+            self._smooth_box,
+            "Smooth transcript",
+            "The copy edited for easy reading. A recording that has none is skipped. "
+            f"{sentence} The choice below says what to do with "
+            f"{'it' if one else 'them'}.",
+        )
+        group.setEnabled(self._smooth_box.isChecked())
+        self._smooth_box.toggled.connect(group.setEnabled)
 
     # -- What was chosen ------------------------------------------------
 
@@ -141,6 +227,18 @@ class ExportDialog(QDialog):
         if self._report_box.isChecked():
             chosen.append(ExportKind.REVIEW_REPORT)
         return chosen
+
+    def chosen_remake(self) -> bool:
+        """Whether to make the out-of-date smooth transcripts again first.
+
+        False when there are none, or the smooth transcript is not being
+        exported, or the person chose to export them as they are.
+        """
+        return (
+            self._remake_radio is not None
+            and self._smooth_box.isChecked()
+            and self._remake_radio.isChecked()
+        )
 
     def chosen_folder(self) -> Path:
         return Path(self._folder_edit.text().strip())

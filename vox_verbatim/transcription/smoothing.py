@@ -26,6 +26,7 @@ request is made.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -64,6 +65,12 @@ _log = logging.getLogger(__name__)
 # SMOOTH_EXPORT_NAME, the file name, and SMOOTHING_PURPOSE, what these
 # requests are called in provenance, are defined in exports, because the
 # review report needs them and this module imports that one.
+
+#: Beside ``transcript.json``, not among the exports: the fingerprint of the
+#: literal text a smooth transcript was made from; see source_fingerprint.
+#: It is bookkeeping, not something to read or share, so it stays out of the
+#: exports folder a person opens.
+SMOOTH_SOURCE_NAME = "transcript-smooth.source"
 
 #: The name the strict schema is registered under on the request.
 SCHEMA_NAME = "transcript_smoothing"
@@ -640,13 +647,83 @@ def write_smooth_transcript(transcript: Transcript, store: Any, smoother: Smooth
 
     ``store`` is the recording's :class:`~vox_verbatim.transcription.store.TranscriptStore`.
     Nothing is written when there is no text; the outcome says why.
+
+    The fingerprint of the literal text it was made from is written after
+    it, so a later correction can be noticed; see :func:`smooth_is_out_of_date`.
+    It is taken from the same transcript the model was sent, not from the
+    file on disk, because a correction saved while the request was out is
+    not in this smooth transcript.
     """
+    fingerprint = source_fingerprint(transcript)
     outcome = smoother.smooth(transcript)
     if not outcome.text:
         return outcome
+    # The old fingerprint goes before the new file is written. If the write
+    # then fails, no fingerprint is left to match a smooth file it does not
+    # describe, so the file can only ever read as out of date, never current.
+    _remove_source_fingerprint(store)
     if store.write_export(SMOOTH_EXPORT_NAME, outcome.text) is None:
         outcome.error = f"{NOT_MADE}: the {SMOOTH_EXPORT_NAME} file could not be written."
+        return outcome
+    _write_source_fingerprint(store, fingerprint)
     return outcome
+
+
+def source_fingerprint(transcript: Transcript) -> str:
+    """A short fingerprint of the literal text the model is sent.
+
+    Made from the turns, each speaker's name with what they said, because
+    that is exactly what a smooth transcript is made from. A corrected word
+    or a renamed speaker changes it; a decision that changes nothing the
+    model would read, such as confirming a word as it was, does not.
+    """
+    turns = [[turn.speaker, turn.text] for turn in build_turns(transcript)]
+    text = json.dumps(turns, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def smooth_is_out_of_date(store: Any, transcript: Transcript) -> bool:
+    """Whether the recording's smooth transcript was made from other words.
+
+    True when there is a smooth transcript and its fingerprint is missing,
+    cannot be read, or does not match ``transcript`` as it is now. A smooth
+    transcript made before fingerprints were kept has none, and is reported
+    as out of date: nothing can show it matches, and saying it does could
+    let an old edit go out as the final text. No smooth transcript at all
+    is not out of date; there is simply none.
+    """
+    if not (store.exports_folder / SMOOTH_EXPORT_NAME).is_file():
+        return False
+    try:
+        recorded = (store.folder / SMOOTH_SOURCE_NAME).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return True
+    return recorded != source_fingerprint(transcript)
+
+
+def _remove_source_fingerprint(store: Any) -> None:
+    """Remove the recorded fingerprint, if any. A failure is only logged."""
+    path = store.folder / SMOOTH_SOURCE_NAME
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        _log.warning("Could not remove %s.", path, exc_info=True)
+
+
+def _write_source_fingerprint(store: Any, fingerprint: str) -> None:
+    """Keep the fingerprint beside the transcript. A failure is only logged.
+
+    If it cannot be written, an older fingerprint may be left, or none. The
+    smooth transcript is then reported as out of date, which is the safe
+    mistake: the person is offered to make it again, never told a stale
+    copy is current.
+    """
+    path = store.folder / SMOOTH_SOURCE_NAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(fingerprint + "\n", encoding="utf-8")
+    except OSError:
+        _log.warning("Could not write %s.", path, exc_info=True)
 
 
 def style_prompt_for(app_prompt: str, folder_prompt: str = "") -> str:

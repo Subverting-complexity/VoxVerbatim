@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QStatusBar,
@@ -38,7 +37,7 @@ from vox_verbatim.settings import (
     Settings,
     SettingsStore,
 )
-from vox_verbatim.transcription import folder_export, grouping, smoothing
+from vox_verbatim.transcription import grouping, smoothing
 from vox_verbatim.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     CalibrationStore,
@@ -67,7 +66,7 @@ from vox_verbatim.transcription.vocabulary import (
 )
 from vox_verbatim.ui.accessibility import announce, describe
 from vox_verbatim.ui.enhance_dialog import EnhanceAudioDialog, summarise
-from vox_verbatim.ui.export_dialog import ExportDialog
+from vox_verbatim.ui.export_flow import EXPORT_KEY, ExportFlow
 from vox_verbatim.ui.file_info_panel import FileInfoPanel
 from vox_verbatim.ui.file_table import AudioFileTableModel, AudioFileTableView
 from vox_verbatim.ui.folder_panel import FolderPanel
@@ -330,7 +329,7 @@ class MainWindow(QMainWindow):
         self._export_action = self._add_action(
             file_menu,
             "Ex&port Transcripts...",
-            QKeySequence("Ctrl+Shift+E"),
+            QKeySequence(EXPORT_KEY),
             self.show_export,
         )
         self._make_smooth_action = self._add_action(
@@ -894,92 +893,45 @@ class MainWindow(QMainWindow):
                 urgent=True,
             )
             return
-        dialog = ExportDialog(len(files), self._settings.export, self)
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        chosen = dialog.chosen_settings()
-        kinds = dialog.chosen_kinds()
-        dialog.deleteLater()
-        self._remember_export_settings(chosen)
-        if not accepted:
-            self._set_status("Export Transcripts was closed without exporting anything.")
-            return
-        folder = Path(chosen.folder)
-        plan = folder_export.plan_export(
-            [audio_file.path for audio_file in files], folder, kinds, self._transcript_store
+        self.export_recordings([audio_file.path for audio_file in files])
+
+    def export_recordings(
+        self,
+        recordings: list[Path],
+        parent: QWidget | None = None,
+        say: Callable[..., None] | None = None,
+        scope_text: str | None = None,
+    ) -> None:
+        """Run one export of ``recordings``, with its boxes in front of ``parent``.
+
+        The review window calls this for the recording it is on, passing
+        itself and its own status line, so the dialog opens in front of it
+        and what happened is said where the person is working. The settings
+        and the transcript folders are this window's, so an export from
+        either window remembers the same folder and check boxes.
+        """
+        flow = ExportFlow(
+            parent if parent is not None else self,
+            say if say is not None else self._set_status,
+            settings=lambda: self._settings.export,
+            save_settings=self._remember_export_settings,
+            store_for=self._transcript_store,
+            smooth_runner=self._smooth_runner,
+            build_smoother=(
+                lambda recording: smoothing.smoother_for(
+                    self._settings.transcription, recording.parent
+                )
+            ),
+            owner=self,
+            owner_say=self._set_status,
         )
-        replace_existing = True
-        existing = plan.existing()
-        if existing:
-            answer = self._ask_about_existing_exports(existing, folder)
-            if answer == "cancel":
-                self._set_status("The export was cancelled. Nothing was written.", alert=True)
-                return
-            replace_existing = answer == "replace"
-        result = folder_export.run_export(plan, self._transcript_store, replace_existing)
-        message = folder_export.summary_text(result)
-        self._set_status(message)
-        if self._show_export_summary(message):
-            self._open_with_windows(folder, "export folder")
+        flow.run(recordings, scope_text)
 
     def _remember_export_settings(self, export: ExportSettings) -> None:
         """Keep what was chosen, so the dialog opens the same way next time."""
         self._settings = replace(self._settings, export=export)
         if not self._settings_store.save(self._settings):
             _log.warning("The Export Transcripts settings could not be saved.")
-
-    def _ask_about_existing_exports(self, existing: list[Path], folder: Path) -> str:
-        """Ask once what to do with files already in the folder.
-
-        Answers "replace", "skip" or "cancel". A test replaces this.
-        """
-        count = len(existing)
-        names = [path.name for path in existing]
-        shown = "\n".join(names[:10])
-        if count > 10:
-            shown += f"\nand {count - 10} more."
-        one = count == 1
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Files Already Exist")
-        box.setText(
-            f"{count} {'file' if one else 'files'} with the same "
-            f"{'name' if one else 'names'} already {'exists' if one else 'exist'} "
-            f"in {folder}. Replace them, skip them, or cancel the export?"
-        )
-        box.setInformativeText(shown)
-        replace_button = box.addButton("&Replace All", QMessageBox.ButtonRole.YesRole)
-        skip_button = box.addButton("&Skip Them", QMessageBox.ButtonRole.NoRole)
-        cancel_button = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(cancel_button)
-        box.setEscapeButton(cancel_button)
-        box.exec()
-        clicked = box.clickedButton()
-        box.deleteLater()
-        if clicked is replace_button:
-            return "replace"
-        if clicked is skip_button:
-            return "skip"
-        return "cancel"
-
-    def _show_export_summary(self, message: str) -> bool:
-        """Show how the export went, and answer whether to open the folder.
-
-        A message box rather than the status bar alone, because it holds the
-        button that opens the folder, and a screen reader reads its text when
-        it appears. A test replaces this.
-        """
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle("Export Finished")
-        box.setText(message)
-        open_button = box.addButton("&Open Folder", QMessageBox.ButtonRole.ActionRole)
-        close_button = box.addButton(QMessageBox.StandardButton.Close)
-        box.setDefaultButton(close_button)
-        box.setEscapeButton(close_button)
-        box.exec()
-        opened = box.clickedButton() is open_button
-        box.deleteLater()
-        return opened
 
     # -- The smooth transcript ---------------------------------------------
 
@@ -1038,7 +990,13 @@ class MainWindow(QMainWindow):
         Closing the review window with its own close button hides it rather
         than deleting it, so it is still held here; whether it is on screen
         is what tells.
+
+        A run an export asked for, to bring an out-of-date smooth transcript
+        up to date first, is never said here: the export says how far it has
+        got, and its summary says how each run went.
         """
+        if isinstance(requester, ExportFlow):
+            return
         window = self._review_window
         if requester is not self and requester is window and window.isVisible():
             return
@@ -1325,6 +1283,7 @@ class MainWindow(QMainWindow):
                 lambda: smoothing.smoother_for(self._settings.transcription, folder)
             ),
             smooth_runner=self._smooth_runner,
+            export_recordings=self.export_recordings,
         )
         # Given its parent after the window exists rather than before, so that
         # Qt destroys the player along with the window it belongs to. A player

@@ -136,8 +136,12 @@ def _smoother(client: FakeClient, **extra) -> Smoother:
 
 
 class FakeStore:
-    def __init__(self) -> None:
+    """Keeps the exports in memory. ``folder`` is where the fingerprint of
+    the smoothed text goes, for a test that gets that far."""
+
+    def __init__(self, folder=None) -> None:
         self.written: dict[str, str] = {}
+        self.folder = folder
 
     def write_export(self, name: str, text: str):
         self.written[name] = text
@@ -147,13 +151,13 @@ class FakeStore:
 # -- The file -------------------------------------------------------------
 
 
-def test_the_file_has_speaker_names_no_times_and_no_fillers():
+def test_the_file_has_speaker_names_no_times_and_no_fillers(tmp_path):
     transcript = _transcript(
         ("0", "Um we we were living in the old house"),
         ("1", "Uh how long did you stay there"),
     )
     client = FakeClient(lambda turns, _: [(n, _clean(t)) for n, _s, t in turns])
-    store = FakeStore()
+    store = FakeStore(tmp_path)
 
     outcome = write_smooth_transcript(transcript, store, _smoother(client))
 

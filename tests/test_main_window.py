@@ -767,6 +767,7 @@ def fake_review_window(monkeypatch) -> list:
             transcript_store_for=None,
             build_smoother=None,
             smooth_runner=None,
+            export_recordings=None,
         ):
             super().__init__(parent)
             self.transcript_store_for = transcript_store_for

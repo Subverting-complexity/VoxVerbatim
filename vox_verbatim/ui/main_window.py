@@ -42,7 +42,7 @@ from vox_verbatim.transcription.calibration import (
     CalibrationStore,
 )
 from vox_verbatim.transcription.learning import user_terms_index
-from vox_verbatim.transcription.model import Transcript
+from vox_verbatim.transcription.model import SPEAKER_ONLY_REASONS, Transcript
 from vox_verbatim.transcription.project import (
     FlaggedItem,
     Occurrence,
@@ -1265,7 +1265,9 @@ class MainWindow(QMainWindow):
         whether the file still gives the same mark. If it does
         not, for any reason and in either direction, the recording is read
         again. A recording the project has no note of has never been analysed,
-        or was analysed and could not be read, and is read as well.
+        or was analysed and could not be read, and is read as well. So is a
+        recording whose speaker doubts were saved in the old way, as flagged
+        words; see :func:`_without_speaker_stretches`.
 
         It is worth saying why this is a comparison for sameness rather than
         the obvious one, which is to ask whether the transcript is newer than
@@ -1299,10 +1301,11 @@ class MainWindow(QMainWindow):
         writes nothing further to them.
         """
         wanted: list[str] = []
+        old_speaker_doubts = _without_speaker_stretches(state)
         for name in recording_names:
             analysed_as = state.transcript_times.get(name)
             store = stores.get(name)
-            if analysed_as is None or store is None:
+            if analysed_as is None or store is None or name in old_speaker_doubts:
                 wanted.append(name)
                 continue
             try:
@@ -2019,6 +2022,28 @@ def _let_the_window_breathe() -> None:
     application = QApplication.instance()
     if application is not None:
         application.processEvents()
+
+
+def _without_speaker_stretches(state: ProjectState) -> set[str]:
+    """The recordings whose speaker doubts were saved in the old way.
+
+    A project analysed before speaker doubts had their own list saved each
+    doubted word as a flagged word. Those words now leave the word list as
+    soon as the project is opened, but a recording whose transcript has not
+    changed is not read again, so its stretches would never be found and the
+    doubts would vanish from the window altogether. Such a recording has
+    flagged words whose only reason is the speaker, and no saved stretch, so
+    it is read once more. That reading saves its stretches, and the next
+    opening reads nothing.
+    """
+    speaker_only = {reason.value for reason in SPEAKER_ONLY_REASONS}
+    old_style = {
+        item.recording_name
+        for item in state.flagged
+        if not item.settled and item.reasons and set(item.reasons) <= speaker_only
+    }
+    with_stretches = {item.recording_name for item in state.speaker_doubts}
+    return old_style - with_stretches
 
 
 def _flagged_after(

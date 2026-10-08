@@ -4915,6 +4915,39 @@ def test_the_speaker_doubts_are_saved_in_the_project(qapp, tmp_path):
     ]
 
 
+def test_regrouping_keeps_the_speaker_doubts(qapp, tmp_path):
+    folder = speaker_doubt_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        before = list(window.state.speaker_doubts)
+        assert len(before) == 1
+
+        assert window.regroup_words() is True
+
+        assert window.state.speaker_doubts == before
+        assert window._speaker_doubt_model.items() == before
+    finally:
+        window.close()
+
+
+def test_regrouping_keeps_the_speaker_doubts_of_a_recording_it_could_not_read(
+    qapp, tmp_path
+):
+    """A recording that cannot be read now has not lost its doubts."""
+    folder = speaker_doubt_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        before = list(window.state.speaker_doubts)
+        del folder.transcripts[RECORDING]
+
+        window.regroup_words()
+
+        assert window.state.speaker_doubts == before
+        assert window._speaker_doubt_model.rowCount() == 1
+    finally:
+        window.close()
+
+
 def test_the_speaker_doubt_list_says_so_when_there_are_none(qapp, tmp_path):
     window = open_window(tmp_path, process=True)
     try:

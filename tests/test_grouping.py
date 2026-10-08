@@ -41,6 +41,7 @@ from vox_verbatim.transcription.project import (
     ProjectSettings,
     ProjectState,
     ReplacementRule,
+    SpeakerDoubtItem,
     WordGroup,
 )
 
@@ -1140,6 +1141,30 @@ def test_a_recording_that_has_left_the_folder_takes_its_occurrences_with_it():
 
     assert state.occurrence("occurrence-gone") is None
     assert state.flagged == []
+
+
+def test_the_speaker_doubts_survive_the_analysis_running_again():
+    """A stretch is the window's business, and the rebuild must carry it over."""
+    state, transcripts = worked_project()
+    state.speaker_doubts = [
+        SpeakerDoubtItem(recording_name=RECORDING, start=4.0, end=5.0, token_ids=["token-a"])
+    ]
+
+    state = reprocess(state, *folder(transcripts))
+
+    assert [item.token_ids for item in state.speaker_doubts] == [["token-a"]]
+
+
+def test_a_recording_that_has_left_the_folder_takes_its_speaker_doubts_with_it():
+    state, transcripts = worked_project()
+    state.speaker_doubts = [
+        SpeakerDoubtItem(recording_name=RECORDING, token_ids=["token-kept"]),
+        SpeakerDoubtItem(recording_name="Interview 02.m4a", token_ids=["token-gone"]),
+    ]
+
+    state = reprocess(state, *folder(transcripts), present_recordings=[RECORDING])
+
+    assert [item.token_ids for item in state.speaker_doubts] == [["token-kept"]]
 
 
 def test_reprocessing_keeps_what_each_transcript_was_when_it_was_read():

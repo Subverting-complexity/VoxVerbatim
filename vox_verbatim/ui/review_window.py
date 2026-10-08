@@ -162,6 +162,7 @@ from vox_verbatim.transcription.model import (
     TimingStatus,
     TokenReference,
     Transcript,
+    _attaches_to_previous,
 )
 from vox_verbatim.transcription.project import (
     MAXIMUM_AUTO_PLAY_DELAY_SECONDS,
@@ -208,6 +209,7 @@ from vox_verbatim.ui.review_queue import (
     reason_text,
 )
 from vox_verbatim.ui.export_flow import EXPORT_KEY, ExportRecordings
+from vox_verbatim.ui.flow_layout import FlowLayout
 from vox_verbatim.ui.smooth_commands import (
     MAKE_AGAIN_KEY,
     OPEN_KEY,
@@ -217,6 +219,7 @@ from vox_verbatim.ui.smooth_commands import (
     open_smooth_transcript,
     starting_message,
 )
+from vox_verbatim.ui.wrapping_button import WrappingButton
 
 #: How much audio to add either side of a word when it is played alone. The
 #: word is what a person listens for first, and playing three seconds of
@@ -238,6 +241,16 @@ WIDE_CONTEXT_SECONDS = 12.0
 #: five services, so this is more than one word ever needs. A word with more
 #: different answers than this still has every one of them in the details.
 CHOICE_BUTTON_COUNT = 8
+
+#: How many spoken words of the transcript the simple window shows on each
+#: side of the word being decided.
+CONTEXT_WORDS = 5
+
+#: Where the word being decided goes in the words around it: a line to read
+#: the choices into on screen, and the word "blank" for a screen reader,
+#: which would otherwise read out six underscores.
+SHOWN_BLANK = "______"
+SPOKEN_BLANK = "blank"
 
 #: Said when the wait is set to nothing at all, which is a real choice and not
 #: a mistake: somebody working by eye, with no screen reader running, has
@@ -641,6 +654,63 @@ class CandidateRow:
     vocabulary: str
     kind: str
     choice: str
+
+
+def words_around(
+    transcript: Transcript, token_id: str, count: int = CONTEXT_WORDS
+) -> list[str | None] | None:
+    """The words either side of one word, with ``None`` where the word is.
+
+    Up to ``count`` spoken words on each side, fewer where the recording
+    starts or ends sooner. Punctuation that a service gave as a word of its
+    own is kept, since it is part of how the transcript reads, but it is not
+    counted as one of the words. A word with no text, such as a filler a
+    reviewer removed, is not in the transcript text, so it is left out here
+    too. ``None`` when the word is not in the transcript.
+    """
+    tokens = transcript.tokens
+    position = next(
+        (index for index, token in enumerate(tokens) if token.id == token_id), None
+    )
+    if position is None:
+        return None
+    before: list[str] = []
+    words = 0
+    for token in reversed(tokens[:position]):
+        if words == count:
+            break
+        if not token.text:
+            continue
+        before.append(token.text)
+        if not _attaches_to_previous(token.text):
+            words += 1
+    after: list[str] = []
+    words = 0
+    for token in tokens[position + 1:]:
+        if not token.text:
+            continue
+        if not _attaches_to_previous(token.text):
+            if words == count:
+                break
+            words += 1
+        after.append(token.text)
+    return [*reversed(before), None, *after]
+
+
+def context_text(parts: list[str | None], blank: str) -> str:
+    """Join the words around a word as the transcript joins them.
+
+    ``blank`` takes the place of the word itself, and punctuation that
+    follows the word attaches to the blank, as it would to the word.
+    """
+    joined: list[str] = []
+    for part in parts:
+        text = blank if part is None else part
+        if joined and part is not None and _attaches_to_previous(text):
+            joined[-1] = joined[-1] + text
+        else:
+            joined.append(text)
+    return " ".join(joined)
 
 
 def candidate_rows(transcript: Transcript, token: FinalToken | None) -> list[CandidateRow]:
@@ -1542,6 +1612,14 @@ class ReviewWindow(QMainWindow):
         # accessible value of its own: its text is its name, and naming it
         # would hide whatever it says behind the name.
         self._status_label = QLabel("Ready", self)
+        # A status message is often a long sentence. Unwrapped, the label is
+        # as wide as the sentence, the status bar cannot be narrower than the
+        # label, and the window grows past the edge of the screen to hold it.
+        # Wrapped, it takes more lines instead; the smallest width lets even
+        # one long file name be cut rather than widen the window. The whole
+        # message is announced as well, so nothing is lost to a reader.
+        self._status_label.setWordWrap(True)
+        self._status_label.setMinimumWidth(1)
         status_bar = QStatusBar(self)
         status_bar.addWidget(self._status_label, 1)
         status_bar.setSizeGripEnabled(True)
@@ -2098,11 +2176,28 @@ class ReviewWindow(QMainWindow):
         self._choices_group = QGroupBox("Decide this word", self)
         layout = QVBoxLayout(self._choices_group)
 
+        # The words around this one, so the person can tell where it sits
+        # without playing it. Plain text, because the words come from the
+        # transcript and must never be read as markup.
+        self._context_label = QLabel(self._choices_group)
+        self._context_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._context_label.setWordWrap(True)
+        self._context_label.setVisible(False)
+        layout.addWidget(self._context_label)
+        # The same words as the label, with "blank" where the label has a
+        # line. Each choice button carries them in its description, so a
+        # screen reader reads them when the person reaches the choices: the
+        # label itself takes no focus and would be passed by.
+        self._context_spoken = ""
+
         # (text, keep) for each button on show, in the order they are shown.
         self._choices: list[tuple[str, bool]] = []
-        self._choice_buttons: list[QPushButton] = []
+        self._choice_buttons: list[WrappingButton] = []
         for index in range(CHOICE_BUTTON_COUNT):
-            button = QPushButton(self._choices_group)
+            # A button that wraps its text, because a word heard by several
+            # services makes a long name, and a plain button that long would
+            # make the window wider than the screen.
+            button = WrappingButton(self._choices_group)
             # Named even while hidden and unused, so no control in the window
             # is ever without a name.
             describe(button, "Unused choice")
@@ -2111,6 +2206,27 @@ class ReviewWindow(QMainWindow):
             self._note_keys[button] = REPLACEMENT
             self._choice_buttons.append(button)
             layout.addWidget(button)
+
+        # A filler or a stutter, such as "um" or "the the", is said but means
+        # nothing. Replacing it with the empty text takes it out of the
+        # transcript and every export. A button of its own does that, because
+        # an empty Different word box is refused: typing nothing is far more
+        # often a slip than a decision.
+        self._remove_filler_button = QPushButton(
+            "Remove as a filler or stutter", self._choices_group
+        )
+        describe(
+            self._remove_filler_button,
+            "Remove as a filler or stutter",
+            "Takes every occurrence of this word out of the transcript and its "
+            "exports. The speaker and the timing are left alone. Choose a word "
+            "above later to put it back.",
+        )
+        self._note_keys[self._remove_filler_button] = REPLACEMENT
+        remove_row = QHBoxLayout()
+        remove_row.addWidget(self._remove_filler_button)
+        remove_row.addStretch(1)
+        layout.addLayout(remove_row)
 
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -2206,11 +2322,14 @@ class ReviewWindow(QMainWindow):
         )
         self._note_keys[self._play_wide_button] = PLAYBACK
 
-        row = QHBoxLayout()
+        # A flowing row, which moves a button to the next line when the three
+        # do not fit side by side. A plain row of three set a floor on the
+        # width of the panel, and at a large text size that floor was wider
+        # than the screen.
+        row = FlowLayout()
         row.addWidget(self._play_button)
         row.addWidget(self._play_short_button)
         row.addWidget(self._play_wide_button)
-        row.addStretch(1)
         layout.addLayout(row)
         return self._playback_group
 
@@ -2676,6 +2795,7 @@ class ReviewWindow(QMainWindow):
         self._apply_word_button.clicked.connect(self.apply_replacement_to_word)
         self._replacement_edit.returnPressed.connect(self.apply_replacement_to_word)
         self._apply_typed_button.clicked.connect(self.apply_typed_word)
+        self._remove_filler_button.clicked.connect(self.remove_filler)
         self._typed_edit.returnPressed.connect(self.apply_typed_word)
         self._apply_occurrence_button.clicked.connect(self.apply_replacement_to_occurrence)
         self._correct_as_detected_button.clicked.connect(self.correct_word_as_detected)
@@ -2936,7 +3056,12 @@ class ReviewWindow(QMainWindow):
 
     def _focus_choices(self) -> None:
         self._focus_first_enabled(
-            [*self._choice_buttons, self._typed_edit, self._apply_typed_button]
+            [
+                *self._choice_buttons,
+                self._remove_filler_button,
+                self._typed_edit,
+                self._apply_typed_button,
+            ]
         )
 
     def _focus_playback(self) -> None:
@@ -4213,6 +4338,7 @@ class ReviewWindow(QMainWindow):
             )
         else:
             self._set_value(self._candidate_text, "")
+        self._show_context(transcript, token)
         self._fill_choices(occurrence, self._candidates_model.rows())
 
         if occurrence is None:
@@ -4309,6 +4435,31 @@ class ReviewWindow(QMainWindow):
         self._speaker_box.setCurrentText(self._speaker_box_text(transcript, token))
         self._set_item_controls_enabled(True)
 
+    def _show_context(self, transcript: Transcript | None, token: FinalToken | None) -> None:
+        """Show the words around the word being decided, with a blank for it.
+
+        Nothing is shown when the word cannot be found in its transcript,
+        rather than words that might not be the ones around it.
+        """
+        parts = (
+            words_around(transcript, token.id)
+            if transcript is not None and token is not None
+            else None
+        )
+        if parts is None:
+            self._context_spoken = ""
+            self._context_label.clear()
+            self._context_label.setAccessibleName("")
+            self._context_label.setVisible(False)
+            return
+        self._context_spoken = context_text(parts, SPOKEN_BLANK)
+        self._context_label.setText(context_text(parts, SHOWN_BLANK))
+        # The label's name is the same words, read with "blank" for the line.
+        # A label is normally left unnamed so that its text is what is read,
+        # but here its text would be read as six underscores.
+        self._context_label.setAccessibleName(self._context_spoken)
+        self._context_label.setVisible(True)
+
     def _fill_choices(self, occurrence: Occurrence | None, rows: list[CandidateRow]) -> None:
         """Put one button on show for each different word the services heard.
 
@@ -4355,15 +4506,15 @@ class ReviewWindow(QMainWindow):
             said_by = f", said by {_listed(services)}" if services else ""
             name = f"{'Keep' if keep else 'Use'} {text}{said_by}"
             # An ampersand in a word would otherwise become an Alt letter.
-            button.setText(name.replace("&", "&&"))
-            describe(
-                button,
-                name,
+            button.set_full_text(name.replace("&", "&&"))
+            what_it_does = (
                 "Says this word is right as detected, and settles every occurrence of it."
                 if keep
                 else "Changes every occurrence of this word to this one. The speaker and "
-                "the timing are left alone.",
+                "the timing are left alone."
             )
+            said_here = f"Said here: {self._context_spoken}. " if self._context_spoken else ""
+            describe(button, name, said_here + what_it_does)
             button.setVisible(True)
         if focus_lost:
             if self._choices:
@@ -4510,6 +4661,7 @@ class ReviewWindow(QMainWindow):
             (self._play_wide_button, playable),
             (self._use_candidate_button, enabled),
             *((button, enabled) for button in self._choice_buttons),
+            (self._remove_filler_button, enabled),
             (self._typed_edit, enabled),
             (self._apply_typed_button, enabled),
             (self._replacement_edit, enabled),
@@ -4881,7 +5033,37 @@ class ReviewWindow(QMainWindow):
                 urgent=True,
             )
             return False
+        return self._replace_word(row, text)
 
+    def remove_filler(self) -> bool:
+        """Take every occurrence of the selected word out, as a filler or stutter.
+
+        This is a replacement with the empty text, applied to the same
+        occurrences a choice button reaches. The transcript text and every
+        export already leave out a word with no text, so the word is gone
+        from them, with no double space and no marker where it was. Choosing
+        a word for it later puts it back, because a replacement is always
+        worked out from what the word originally said.
+        """
+        row = self.current_row()
+        if row is None:
+            self._set_status(NO_WORD_SELECTED, alert=True, urgent=True)
+            return False
+        return self._replace_word(row, "")
+
+    def _replace_word(self, row: GroupRow, text: str) -> bool:
+        """Replace every occurrence of a word with ``text``, which may be empty.
+
+        The empty text removes the word as a filler or a stutter. It differs
+        from a replacement in three ways. It teaches no names, because nobody
+        typed a word. It teaches no rule, and drops the rules an earlier
+        replacement of this word made: removing fillers from files
+        transcribed later is the smooth transcript's job, and a rule left
+        standing would go on writing a replacement the person has now taken
+        back. And it is announced as a removal, because "applied" and an
+        empty word would say nothing.
+        """
+        removing = text == ""
         group = self._state.group(row.group_id) if row.group_id is not None else None
         touched: list[Occurrence] = []
         missing = 0
@@ -4906,8 +5088,10 @@ class ReviewWindow(QMainWindow):
                 # point of having asked for this occurrence only. One a rule
                 # answered was decided by nobody, so the group's answer
                 # reaches it like any other.
+                # Tested against None, because the empty text is a decision
+                # too: the occurrence was removed as a filler.
                 if (
-                    occurrence.replacement
+                    occurrence.replacement is not None
                     and not occurrence.auto_applied
                     and group is not None
                 ):
@@ -4922,7 +5106,9 @@ class ReviewWindow(QMainWindow):
                 transcript = transcript.with_correction(token.id, text=text)
                 changed = True
             if changed:
-                if not self._hand_on(recording_name, transcript, quiet=True, teach=True):
+                if not self._hand_on(
+                    recording_name, transcript, quiet=True, teach=not removing
+                ):
                     unsaved.append(recording_name)
                     continue
                 anything_changed = True
@@ -4944,6 +5130,13 @@ class ReviewWindow(QMainWindow):
         # quietly recording a decision, because the person almost certainly
         # meant to settle it rather than to replace it with itself, and
         # Correct as detected is what does that.
+        if not anything_changed and removing:
+            self._set_status(
+                "This word is already removed. Choose a word above to put it back.",
+                alert=True,
+                urgent=True,
+            )
+            return False
         if not anything_changed:
             # The simple window hides Correct as detected, so it names the
             # Keep button that stands in for it there.
@@ -4984,8 +5177,22 @@ class ReviewWindow(QMainWindow):
                 self._update_rules(group, text)
             else:
                 self._update_loose_rules(touched, text)
+            if removing:
+                # The two calls above have already dropped every rule another
+                # decision made for these forms, and written the empty text
+                # into the ones left for this word. Dropping those as well
+                # leaves no rule for the forms at all, which is what a removal
+                # teaches.
+                self._state.rules = [rule for rule in self._state.rules if rule.replacement]
 
-        if unsaved:
+        if unsaved and removing:
+            message = (
+                f"Removed from {_counted(len(touched), 'occurrence')}, but not from "
+                f"all of them. {self._correction_failure_text(unsaved)} The word stays "
+                "open, so remove it again to finish. The speaker and the timing of "
+                "every occurrence are unchanged."
+            )
+        elif unsaved:
             message = (
                 f"{text} applied to {_counted(len(touched), 'occurrence')}, but not to "
                 f"all of them. {self._correction_failure_text(unsaved)} The word stays "
@@ -4993,8 +5200,9 @@ class ReviewWindow(QMainWindow):
                 "the timing of every occurrence are unchanged."
             )
         else:
+            done = "Removed as a filler or stutter" if removing else text
             message = (
-                f"{text}. {self._affected_text(row)} The speaker and the timing of "
+                f"{done}. {self._affected_text(row)} The speaker and the timing of "
                 "every one of them are unchanged."
             )
         if missing:

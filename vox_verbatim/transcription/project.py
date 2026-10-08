@@ -172,6 +172,17 @@ def _optional_text(value: Any) -> str | None:
     return value if isinstance(value, str) and value != "" else None
 
 
+def _replacement(value: Any) -> str | None:
+    """A word's replacement, where the empty text is kept.
+
+    Unlike other optional text, an empty replacement means something: the
+    reviewer removed the word as a filler or a stutter. Read back as no
+    replacement, the word would lose that decision when the project is
+    opened again. A rule's replacement is never empty, and is not read here.
+    """
+    return value if isinstance(value, str) else None
+
+
 def _flag(value: Any, default: bool = False) -> bool:
     return value if isinstance(value, bool) else default
 
@@ -385,7 +396,7 @@ class Occurrence:
             context_after=_text(data.get("context_after")),
             reviewed=_flag(data.get("reviewed")),
             correct_as_detected=_flag(data.get("correct_as_detected")),
-            replacement=_optional_text(data.get("replacement")),
+            replacement=_replacement(data.get("replacement")),
             isolated=_flag(data.get("isolated")),
             stale=_flag(data.get("stale")),
             auto_applied=_flag(data.get("auto_applied")),
@@ -608,7 +619,7 @@ class WordGroup:
             id=identifier,
             representative_text=_text(data.get("representative_text")),
             occurrence_ids=_string_list(data.get("occurrence_ids")),
-            replacement=_optional_text(data.get("replacement")),
+            replacement=_replacement(data.get("replacement")),
             reviewed=_flag(data.get("reviewed")),
             correct_as_detected=_flag(data.get("correct_as_detected")),
             user_created=_flag(data.get("user_created")),

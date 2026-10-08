@@ -155,6 +155,9 @@ REVIEWED_CORRECTED = "Corrected by hand"
 REVIEWED_PLAIN = "Reviewed"
 
 NO_REPLACEMENT = "None set"
+#: What a word's replacement reads as when the reviewer removed the word as a
+#: filler or a stutter. Its replacement is then the empty text.
+REMOVED_AS_FILLER = "Removed as a filler or stutter"
 UNKNOWN_TIME_DISPLAY = "Unknown"
 UNKNOWN_TIME_SPOKEN = "the time is not known"
 NO_LANGUAGE = "Not known"
@@ -526,11 +529,36 @@ def group_reviewed_text(group: WordGroup, occurrences: tuple[Occurrence, ...]) -
         return REVIEWED_AUTOMATICALLY
     if group.correct_as_detected:
         return REVIEWED_AS_DETECTED
-    if group.replacement:
-        return f"Replaced with {group.replacement}"
+    if group.replacement is not None:
+        return replaced_text(group.replacement)
     if group.reviewed:
         return REVIEWED_PLAIN
     return NOT_REVIEWED
+
+
+def replaced_text(replacement: str) -> str:
+    """How a word with this replacement was settled.
+
+    The empty text is a word the reviewer removed as a filler or a stutter.
+    It must not read as "Replaced with" and nothing after it.
+    """
+    return REMOVED_AS_FILLER if replacement == "" else f"Replaced with {replacement}"
+
+
+def replacement_display(replacement: str | None) -> str:
+    """A replacement as the lists show it: the text, removed, or none set."""
+    if replacement is None:
+        return NO_REPLACEMENT
+    return REMOVED_AS_FILLER if replacement == "" else replacement
+
+
+def _own_or_group(own: str | None, group_replacement: str | None) -> str | None:
+    """An occurrence's own replacement where it has one, else its group's.
+
+    Tested against ``None`` rather than for truth, because the empty text is
+    a real replacement: the word was removed.
+    """
+    return own if own is not None else group_replacement
 
 
 def occurrence_reviewed_text(occurrence: Occurrence) -> str:
@@ -547,8 +575,8 @@ def occurrence_reviewed_text(occurrence: Occurrence) -> str:
         return REVIEWED_AUTOMATICALLY
     if occurrence.correct_as_detected:
         return REVIEWED_AS_DETECTED
-    if occurrence.replacement:
-        return f"Replaced with {occurrence.replacement}"
+    if occurrence.replacement is not None:
+        return replaced_text(occurrence.replacement)
     if occurrence.reviewed:
         return REVIEWED_PLAIN
     return NOT_REVIEWED
@@ -824,10 +852,12 @@ def spoken_occurrence_summary(
     correction did -- the whole sentence is given, because in that case nothing
     was said a second ago to leave anything out of.
     """
-    replacement = occurrence.replacement or group_replacement
+    replacement = _own_or_group(occurrence.replacement, group_replacement)
     parts = [occurrence.recording_name, time_spoken(occurrence.start)]
     previous_replacement = (
-        (previous.replacement or group_replacement) if previous is not None else None
+        _own_or_group(previous.replacement, group_replacement)
+        if previous is not None
+        else None
     )
     if previous is None or (
         previous.confidence_strength != occurrence.confidence_strength
@@ -836,7 +866,7 @@ def spoken_occurrence_summary(
     if previous is None or previous.language != occurrence.language:
         parts.append(language_name(occurrence.language))
     if previous is None or previous_replacement != replacement:
-        parts.append(f"Replacement {replacement or NO_REPLACEMENT}")
+        parts.append(f"Replacement {replacement_display(replacement)}")
     reviewed = occurrence_reviewed_text(occurrence)
     if previous is None or occurrence_reviewed_text(previous) != reviewed:
         parts.append(reviewed)
@@ -1099,7 +1129,9 @@ class OccurrenceModel(QAbstractTableModel):
         if column == OCCURRENCE_COLUMN_LANGUAGE:
             return language_name(occurrence.language)
         if column == OCCURRENCE_COLUMN_REPLACEMENT:
-            return occurrence.replacement or self._group_replacement or NO_REPLACEMENT
+            return replacement_display(
+                _own_or_group(occurrence.replacement, self._group_replacement)
+            )
         if column == OCCURRENCE_COLUMN_REVIEWED:
             return occurrence_reviewed_text(occurrence)
         return ""

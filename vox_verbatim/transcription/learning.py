@@ -576,7 +576,11 @@ def count_settled_words(transcript: Transcript) -> tuple[StatisticsChange, Trans
             current = replace(
                 note,
                 counted=True,
-                text_corrected=_text_changed(note.service_text, token.text),
+                # A word with no text was removed as a filler or a stutter.
+                # The service heard it rightly; the person chose to leave it
+                # out, so it does not count against the service.
+                text_corrected=bool(token.text)
+                and _text_changed(note.service_text, token.text),
                 speaker_corrected=(token.speaker or None) != (note.service_speaker or None),
             )
         else:

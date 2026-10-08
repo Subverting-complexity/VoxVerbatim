@@ -23,6 +23,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAccessible, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QLabel,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from vox_verbatim.transcription.calibration import CALIBRATION_FILE_NAME, CalibrationStore
+from vox_verbatim.transcription.exports import render_plain_text
 from vox_verbatim.transcription.grouping import affected_summary
 from vox_verbatim.transcription.model import (
     AudioSpan,
@@ -76,6 +78,7 @@ from vox_verbatim.ui.review_lists import (
     OCCURRENCE_COLUMN_REVIEWED,
     OCCURRENCE_COLUMN_WHEN,
     REVIEWED_AS_DETECTED,
+    REMOVED_AS_FILLER,
     REVIEWED_AUTOMATICALLY,
     loose_key,
 )
@@ -91,10 +94,14 @@ from vox_verbatim.ui.review_window import (
     IN_VOCABULARY,
     NOT_IN_VOCABULARY,
     SHORT_CONTEXT_SECONDS,
+    SHOWN_BLANK,
+    SPOKEN_BLANK,
     WIDE_CONTEXT_SECONDS,
     WORD_MARGIN_SECONDS,
     ReviewWindow,
     candidate_rows,
+    context_text,
+    words_around,
 )
 
 RECORDING = "board meeting.m4a"
@@ -5523,6 +5530,7 @@ def test_tab_moves_through_the_simple_window_in_reading_order(qapp, tmp_path):
             window._speaker_doubts,
             window._choice_buttons[0],
             window._choice_buttons[1],
+            window._remove_filler_button,
             window._typed_edit,
             window._apply_typed_button,
             window._span_edit,
@@ -5649,5 +5657,305 @@ def test_setting_a_threshold_from_the_menu_shows_the_details_first(qapp, tmp_pat
         assert window.state.settings.show_details is True
         assert window._settings_group.isVisibleTo(window)
         assert window._holds_focus(window._minimum_spin)
+    finally:
+        window.close()
+
+
+# -- The window stays inside the screen ----------------------------------
+
+
+def available_width(window: ReviewWindow) -> int:
+    return window.screen().availableGeometry().width()
+
+
+@pytest.mark.parametrize("show_details", [False, True])
+def test_a_long_status_message_does_not_widen_the_window(qapp, tmp_path, show_details):
+    """The status line wraps. Unwrapped, one long sentence widened the window."""
+    window = open_window(
+        tmp_path, two_file_folder(), process=True, show_details=show_details
+    )
+    try:
+        window.show()
+        QApplication.processEvents()
+        width = window.width()
+        assert width <= available_width(window)
+
+        window._set_status("Every word in this sentence is long enough to matter. " * 30)
+        QApplication.processEvents()
+
+        assert window.width() == width
+        assert window.minimumSizeHint().width() <= available_width(window)
+    finally:
+        window.close()
+
+
+def test_a_long_choice_wraps_and_keeps_its_whole_name(qapp, tmp_path):
+    window = candidate_window(tmp_path)
+    try:
+        window.show()
+        window.resize(320, 700)
+        QApplication.processEvents()
+        button = window._choice_buttons[0]
+        name = button.accessibleName()
+
+        assert "\n" in button.text()
+        assert " ".join(button.text().split()) == name
+        # The screen reader reads the name, which is never broken or cut.
+        assert name == (
+            f"Keep 50,000, said by {Provider.OPENAI.display_name} and "
+            f"{Provider.MICROSOFT.display_name}"
+        )
+        assert window.width() <= available_width(window)
+    finally:
+        window.close()
+
+
+def test_a_very_long_choice_does_not_set_the_width_of_the_panel(qapp, tmp_path):
+    window = candidate_window(tmp_path)
+    try:
+        window.show()
+        QApplication.processEvents()
+        long_text = "Keep Smith, said by " + "ElevenLabs, Deepgram, AssemblyAI, " * 10
+        button = window._choice_buttons[0]
+        before = window._choices_group.minimumSizeHint().width()
+
+        button.set_full_text(long_text)
+        QApplication.processEvents()
+
+        assert window._choices_group.minimumSizeHint().width() <= before
+        assert window.minimumSizeHint().width() <= available_width(window)
+        assert " ".join(button.text().split()) == " ".join(long_text.split())
+    finally:
+        window.close()
+
+
+# -- The words around the word -------------------------------------------
+
+
+def spoken_sentence(*texts: str) -> Transcript:
+    return make_transcript(
+        [
+            make_token(text, start=float(index), end=index + 0.4, reasons=())
+            for index, text in enumerate(texts)
+        ]
+    )
+
+
+INVOICE = (
+    "so", "and", "the", "invoice", "came", "to", "fifty",
+    "pounds", "for", "the", "whole", "job", "today",
+)
+
+
+def test_five_words_either_side_with_a_blank_for_the_word(qapp):
+    transcript = spoken_sentence(*INVOICE)
+    word = transcript.tokens[INVOICE.index("fifty")]
+
+    parts = words_around(transcript, word.id)
+
+    assert context_text(parts, SHOWN_BLANK) == (
+        "and the invoice came to ______ pounds for the whole job"
+    )
+    assert context_text(parts, SPOKEN_BLANK) == (
+        "and the invoice came to blank pounds for the whole job"
+    )
+
+
+def test_near_the_start_only_the_words_there_are_shown(qapp):
+    transcript = spoken_sentence(*INVOICE)
+
+    parts = words_around(transcript, transcript.tokens[1].id)
+
+    assert context_text(parts, SHOWN_BLANK) == "so ______ the invoice came to fifty"
+
+
+def test_near_the_end_only_the_words_there_are_shown(qapp):
+    transcript = spoken_sentence(*INVOICE)
+
+    parts = words_around(transcript, transcript.tokens[-1].id)
+
+    assert context_text(parts, SHOWN_BLANK) == "pounds for the whole job ______"
+
+
+def test_punctuation_is_kept_as_the_transcript_joins_it_and_not_counted(qapp):
+    transcript = spoken_sentence("one", "two", "three", "four", "five", ",", "six", ".", "Then")
+
+    parts = words_around(transcript, transcript.tokens[6].id)
+
+    assert context_text(parts, SHOWN_BLANK) == "one two three four five, ______. Then"
+
+
+def test_a_removed_word_is_left_out_of_the_words_around(qapp):
+    transcript = spoken_sentence("we", "um", "met", "there")
+    transcript = transcript.with_correction(transcript.tokens[1].id, text="")
+
+    parts = words_around(transcript, transcript.tokens[2].id)
+
+    assert context_text(parts, SHOWN_BLANK) == "we ______ there"
+
+
+def test_the_simple_window_shows_the_words_around_and_reads_the_blank(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        label = window._context_label
+
+        assert label.isVisibleTo(window)
+        assert label.wordWrap()
+        assert SHOWN_BLANK in label.text()
+        assert label.accessibleName() == label.text().replace(SHOWN_BLANK, SPOKEN_BLANK)
+        # The label takes no focus, so the choices carry the words to the
+        # screen reader when the person reaches them.
+        assert window._choice_buttons[0].accessibleDescription().startswith(
+            f"Said here: {label.accessibleName()}. "
+        )
+    finally:
+        window.close()
+
+
+def test_the_words_around_follow_the_occurrence(qapp, tmp_path):
+    window = open_window(tmp_path, two_file_folder(), process=True)
+    try:
+        select_word(window, "Bosch")
+        first = window._context_label.text()
+
+        window.go_to_next_item()
+
+        assert window._context_label.text() != first
+        assert SHOWN_BLANK in window._context_label.text()
+    finally:
+        window.close()
+
+
+# -- Removing a filler or a stutter --------------------------------------
+
+
+def filler_folder() -> Folder:
+    return Folder(
+        {
+            RECORDING: make_transcript(
+                [
+                    make_token("We", start=9.0, end=9.3, reasons=(), confidence=Confidence.HIGH),
+                    weak_token("um", 10.0),
+                    make_token("met", start=11.0, end=11.3, reasons=(), confidence=Confidence.HIGH),
+                ]
+            )
+        }
+    )
+
+
+def test_a_filler_is_removed_from_the_transcript_and_its_exports(
+    qapp, tmp_path, monkeypatch
+):
+    said = capture_announcements(monkeypatch)
+    folder = filler_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        select_word(window, "um")
+        group_id = window.current_row().group_id
+        said.clear()
+
+        window._remove_filler_button.click()
+
+        assert folder.texts(RECORDING) == ["We", "", "met"]
+        transcript = folder.transcripts[RECORDING]
+        assert transcript.verbatim_text == "We met"
+        text = render_plain_text(transcript)
+        assert "um" not in text.split()
+        assert "  " not in text
+        assert "UNCERTAIN" not in text
+        assert said[0].startswith("Removed as a filler or stutter.")
+        group = window.state.group(group_id)
+        assert (group.replacement, group.reviewed) == ("", True)
+        # A removal teaches no rule for files transcribed later.
+        assert window.state.rules == []
+        # The decision is kept when the folder is opened again.
+        assert ProjectStore(tmp_path).load().group(group_id).replacement == ""
+    finally:
+        window.close()
+
+
+def test_a_removed_word_says_so_in_the_lists(qapp, tmp_path):
+    window = open_window(tmp_path, filler_folder(), process=True, show_details=True)
+    try:
+        select_word(window, "um")
+        window.remove_filler()
+        window.set_show_reviewed(True)
+        select_word(window, "um")
+
+        groups = window._group_model
+        position = groups.row_for_key(group_row(window, "um").key)
+        assert groups.data(groups.index(position, GROUP_COLUMN_REVIEWED)) == REMOVED_AS_FILLER
+        occurrences = window._occurrence_model
+        assert occurrences.data(
+            occurrences.index(0, OCCURRENCE_COLUMN_REPLACEMENT)
+        ) == REMOVED_AS_FILLER
+    finally:
+        window.close()
+
+
+def test_a_removed_word_can_be_put_back(qapp, tmp_path):
+    folder = filler_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        window.set_show_reviewed(True)
+        select_word(window, "um")
+        window.remove_filler()
+        select_word(window, "um")
+        assert shown_choices(window)[0] == "Keep um"
+
+        window._choice_buttons[0].click()
+
+        assert folder.texts(RECORDING) == ["We", "um", "met"]
+        assert window.state.group(window.current_row().group_id).replacement is None
+    finally:
+        window.close()
+
+
+def test_removing_a_word_drops_the_rules_its_earlier_replacement_made(qapp, tmp_path):
+    folder = filler_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        window.set_show_reviewed(True)
+        select_word(window, "um")
+        window._typed_edit.setText("hmm")
+        assert window.apply_typed_word() is True
+        assert [rule.replacement for rule in window.state.rules] == ["hmm"]
+        select_word(window, "um")
+
+        assert window.remove_filler() is True
+
+        assert folder.texts(RECORDING) == ["We", "", "met"]
+        assert window.state.rules == []
+    finally:
+        window.close()
+
+
+def test_removing_a_word_twice_says_it_is_already_removed(qapp, tmp_path, monkeypatch):
+    said = capture_announcements(monkeypatch)
+    window = open_window(tmp_path, filler_folder(), process=True)
+    try:
+        window.set_show_reviewed(True)
+        select_word(window, "um")
+        window.remove_filler()
+        select_word(window, "um")
+        said.clear()
+
+        assert window.remove_filler() is False
+
+        assert said == ["This word is already removed. Choose a word above to put it back."]
+    finally:
+        window.close()
+
+
+def test_the_remove_button_is_named_and_reached_from_the_keyboard(qapp, tmp_path):
+    window = open_window(tmp_path, filler_folder(), process=True)
+    try:
+        select_word(window, "um")
+        button = window._remove_filler_button
+
+        assert button.accessibleName() == "Remove as a filler or stutter"
+        assert button.isEnabled()
+        assert button.focusPolicy() & Qt.FocusPolicy.TabFocus
     finally:
         window.close()

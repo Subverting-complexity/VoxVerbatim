@@ -426,6 +426,17 @@ def test_a_confirmed_word_counts_as_right():
     assert (counts.chosen, counts.corrected) == (1, 0)
 
 
+def test_a_filler_removed_from_the_transcript_counts_as_right():
+    """The service heard "um" rightly. The person chose to leave it out."""
+    before = sentence("We", "um", "met", "yesterday.")
+    statistics = ProviderStatistics()
+
+    save(before, corrected(before, "um", ""), statistics)
+
+    counts = statistics.counts_for(Provider.OPENAI)
+    assert (counts.chosen, counts.corrected) == (1, 0)
+
+
 def test_pending_words_and_words_a_folder_rule_answered_add_nothing():
     before = sentence("We", "met", "Fermeulen", "yesterday.")
     before.tokens[0].review_status = ReviewStatus.PENDING

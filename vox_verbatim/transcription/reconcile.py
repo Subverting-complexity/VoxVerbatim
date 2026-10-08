@@ -836,7 +836,15 @@ def _decide_scope(
         return []
 
     risk = _risk_for(scope, backbone_texts, groups)
-    counted = _contesting_silence(deletions, winner, runner_up, scope, backbone_texts, risk)
+    counted = _contesting_silence(
+        deletions,
+        winner,
+        runner_up,
+        scope,
+        backbone_texts,
+        risk,
+        languages.language_at(position),
+    )
     unresolved, reasons = _settle(
         winner=winner,
         runner_up=runner_up,
@@ -1436,6 +1444,7 @@ def _contesting_silence(
     scope: tuple[int, ...],
     backbone_texts: Sequence[str],
     risk: tuple[RiskCategory, ...],
+    language: Language = Language.UNKNOWN,
 ) -> tuple[Provider, ...]:
     """The silent services that count as arguing against the winning word.
 
@@ -1447,7 +1456,8 @@ def _contesting_silence(
     and leave both out as a matter of style, so their silence says nothing
     about the audio. Counting it put every such word in the review list as
     a disagreement even when every service that wrote it agreed. Where no
-    service heard a different word, the silence is set aside.
+    service heard a different word, the silence is set aside. "er" and "um"
+    are real words in German, so in German speech they are not fillers.
 
     The same holds for a high-risk value such as a date or an amount that
     at least two services heard the same way. A service that heard nothing
@@ -1470,7 +1480,9 @@ def _contesting_silence(
         return deletions
     if risk:
         return () if len(winner.providers) >= 2 else deletions
-    if is_filler(winner.display) or _is_repeated_beside(scope, backbone_texts, winner.display):
+    if is_filler(winner.display, language) or _is_repeated_beside(
+        scope, backbone_texts, winner.display
+    ):
         return ()
     return deletions
 

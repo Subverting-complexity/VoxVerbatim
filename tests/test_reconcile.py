@@ -1006,6 +1006,31 @@ def test_a_filler_another_service_heard_as_a_word_is_still_a_disagreement() -> N
     assert ReviewReason.PROVIDER_DISAGREEMENT in tokens[1].review_reasons
 
 
+def test_a_german_er_some_services_leave_out_is_still_a_disagreement() -> None:
+    """In German "er" is "he", so a service that left it out lost a word."""
+    written = ["dann", "hat", "er", "das", "gemacht"]
+    tidied = ["dann", "hat", "das", "gemacht"]
+    results = []
+    for provider, words, timed in (
+        (Provider.ELEVENLABS, written, True),
+        (Provider.DEEPGRAM, written, True),
+        (Provider.OPENAI, tidied, False),
+        (Provider.ASSEMBLYAI, tidied, False),
+    ):
+        result = spoken(
+            provider, words, timed=timed, languages=[Language.GERMAN] * len(words)
+        )
+        result.detected_language = Language.GERMAN
+        results.append(result)
+
+    tokens = reconcile(table_of(*results), results=results)
+
+    word = token_at(tokens, "er")
+    assert word.language is Language.GERMAN
+    assert ReviewReason.PROVIDER_DISAGREEMENT in word.review_reasons
+    assert word.needs_review
+
+
 # -- High-risk values the services agree on ------------------------------
 
 

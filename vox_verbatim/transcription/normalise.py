@@ -939,18 +939,33 @@ def is_punctuation_only(text: str) -> bool:
 #: so "äh" is held here as "aeh".
 _FILLER_FORMS = frozenset(_spelling_form(word, False) for word in FILLER_WORDS)
 
+#: Fillers in English that are real words in German: "er" is "he", and "um"
+#: is "at" or "around", as in "um zehn Uhr". In German speech a service that
+#: left one out has lost a word, so they are not fillers there. Afrikaans
+#: has neither word ("hy" and "om" are its forms), so nothing is set aside
+#: for it.
+_REAL_WORDS_BY_LANGUAGE = {"de": frozenset(("er", "um"))}
 
-def is_filler(text: str) -> bool:
+
+def is_filler(text: str, language: str | None = None) -> bool:
     """Whether this text is nothing but filler sounds, such as "um" or "äh".
 
     Punctuation and case are set aside, so "Um," is a filler. A text with no
     word in it at all is not.
 
+    ``language`` is the language spoken there, as its code ("de" for German).
+    A filler sound that is a real word in that language is not a filler; see
+    :data:`_REAL_WORDS_BY_LANGUAGE`. Without a language, every filler counts.
+
     The spelling form is used rather than :func:`normalise`, because
     :func:`normalise` joins words, and "um uh" would come out as "umuh".
     """
     words = _spelling_form(text, False).split()
-    return bool(words) and all(word in _FILLER_FORMS for word in words)
+    # The code is read from the enum's value, because an enum member hashes
+    # by its name and would not find "de" in the table.
+    code = getattr(language, "value", language)
+    real = _REAL_WORDS_BY_LANGUAGE.get(code, frozenset())
+    return bool(words) and all(word in _FILLER_FORMS and word not in real for word in words)
 
 
 def read_number(text: str) -> int | None:

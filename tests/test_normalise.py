@@ -14,6 +14,7 @@ that must.
 from __future__ import annotations
 
 import pytest
+from vox_verbatim.transcription.model import Language
 
 from vox_verbatim.transcription.normalise import (
     EquivalenceKind,
@@ -646,3 +647,19 @@ def test_a_filler_sound_is_a_filler(text: str) -> None:
 @pytest.mark.parametrize("text", ["umbrella", "m", "", ",", "um we"])
 def test_a_word_is_not_a_filler(text: str) -> None:
     assert not is_filler(text)
+
+
+@pytest.mark.parametrize("text", ["er", "Um,", "um er"])
+def test_a_german_word_spelled_like_a_filler_is_not_a_filler_in_german(text: str) -> None:
+    assert is_filler(text)
+    assert not is_filler(text, Language.GERMAN)
+
+
+@pytest.mark.parametrize("language", [Language.ENGLISH, Language.AFRIKAANS, Language.UNKNOWN])
+def test_er_and_um_are_fillers_outside_german(language: Language) -> None:
+    assert is_filler("er", language)
+    assert is_filler("um", language)
+
+
+def test_a_german_filler_sound_is_still_a_filler_in_german() -> None:
+    assert is_filler("äh", Language.GERMAN)

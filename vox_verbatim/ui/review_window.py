@@ -173,6 +173,8 @@ from vox_verbatim.transcription.project import (
     SpeakerDoubtItem,
     WordGroup,
 )
+from vox_verbatim.transcription.smoothing import Smoother
+from vox_verbatim.transcription.store import TranscriptStore
 from vox_verbatim.transcription.vocabulary import VocabularyIndex
 from vox_verbatim.settings import DEFAULT_SMOOTHING_PROMPT
 from vox_verbatim.ui.accessibility import announce, describe
@@ -204,6 +206,15 @@ from vox_verbatim.ui.review_queue import (
     ReviewQueueModel,
     chosen_text,
     reason_text,
+)
+from vox_verbatim.ui.smooth_commands import (
+    MAKE_AGAIN_KEY,
+    OPEN_KEY,
+    SmoothResult,
+    SmoothRunner,
+    busy_message,
+    open_smooth_transcript,
+    starting_message,
 )
 
 #: How much audio to add either side of a word when it is played alone. The
@@ -1299,8 +1310,18 @@ class ReviewWindow(QMainWindow):
         vocabulary: VocabularyIndex | None = None,
         app_smoothing_prompt: str = DEFAULT_SMOOTHING_PROMPT,
         write_exports: Callable[[str, Transcript], list[str]] | None = None,
+        transcript_store_for: Callable[[str], TranscriptStore | None] | None = None,
+        build_smoother: Callable[[], Smoother] | None = None,
     ) -> None:
         super().__init__(parent)
+        # Where each recording's transcript folder is, and how to build the
+        # smoothing engine from the app's settings as they are now. Both are
+        # needed by the two smooth transcript commands; nothing given means
+        # the commands say they are not available here.
+        self._transcript_store_for = transcript_store_for
+        self._build_smoother = build_smoother
+        self._smooth_runner = SmoothRunner(self)
+        self._smooth_runner.finished.connect(self._on_smooth_finished)
         self._folder = Path(folder)
         # The app's style prompt from Settings, offered as the starting point
         # for a prompt of the folder's own; see edit_smoothing_prompt.
@@ -2424,6 +2445,18 @@ class ReviewWindow(QMainWindow):
         self._smoothing_prompt_action = self._add_action(
             project_menu, "Set the &Smoothing Prompt...", None, self.edit_smoothing_prompt
         )
+        self._make_smooth_action = self._add_action(
+            project_menu,
+            "Make Smooth Transcript &Again",
+            QKeySequence(MAKE_AGAIN_KEY),
+            self.make_smooth_transcript_again,
+        )
+        self._open_smooth_action = self._add_action(
+            project_menu,
+            "&Open Smooth Transcript",
+            QKeySequence(OPEN_KEY),
+            self.open_smooth_transcript,
+        )
 
         word_menu = menu_bar.addMenu("&Word")
         self._next_group_action = self._add_action(
@@ -2963,6 +2996,70 @@ class ReviewWindow(QMainWindow):
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.set_smoothing_prompt(dialog.chosen_prompt())
+
+    def _smooth_target(self) -> tuple[str, TranscriptStore] | None:
+        """The recording of the selected occurrence and its transcript folder.
+
+        Says why, and answers None, when there is no such recording.
+        """
+        occurrence = self.current_occurrence()
+        if occurrence is None:
+            self._set_status(
+                "Choose a word first. The smooth transcript commands work on the "
+                "recording of the selected occurrence.",
+                alert=True,
+                urgent=True,
+            )
+            return None
+        name = occurrence.recording_name
+        store = self._transcript_store_for(name) if self._transcript_store_for else None
+        if store is None:
+            self._set_status(
+                f"The transcript folder of {name} is not known here.", alert=True, urgent=True
+            )
+            return None
+        return name, store
+
+    def make_smooth_transcript_again(self) -> None:
+        """Make the selected recording's smooth transcript again, in the background.
+
+        It is made from the transcript this window holds, so every correction
+        made here is in it. The folder's own smoothing prompt is used where it
+        has one, because the engine is built afresh for each request.
+        """
+        if self._smooth_runner.is_running():
+            self._set_status(busy_message(), alert=True, urgent=True)
+            return
+        target = self._smooth_target()
+        if target is None:
+            return
+        name, store = target
+        if self._build_smoother is None:
+            self._set_status(
+                "The smooth transcript cannot be made from this window.", alert=True, urgent=True
+            )
+            return
+        transcript = self._transcript(name)
+        if transcript is None:
+            self._set_status(
+                f"The transcript of {name} cannot be read, so there is nothing to smooth.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        self._smooth_runner.start(name, transcript, store, self._build_smoother())
+        self._set_status(starting_message(name), alert=True)
+
+    def open_smooth_transcript(self) -> None:
+        """Open the selected recording's smooth transcript in the text editor."""
+        target = self._smooth_target()
+        if target is None:
+            return
+        opened, message = open_smooth_transcript(*target)
+        self._set_status(message, alert=True, urgent=not opened)
+
+    def _on_smooth_finished(self, result: SmoothResult) -> None:
+        self._set_status(result.message, alert=True, urgent=not result.succeeded)
 
     def set_smoothing_prompt(self, prompt: str) -> None:
         """Keep a prompt of the folder's own, or none, and say which.

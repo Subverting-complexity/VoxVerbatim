@@ -36,7 +36,7 @@ from vox_verbatim.settings import (
     Settings,
     SettingsStore,
 )
-from vox_verbatim.transcription import grouping
+from vox_verbatim.transcription import grouping, smoothing
 from vox_verbatim.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     CalibrationStore,
@@ -72,6 +72,15 @@ from vox_verbatim.ui.help_dialogs import KeyboardShortcutsDialog, show_about
 from vox_verbatim.ui.review_lists import flagged_in, speaker_doubts_in
 from vox_verbatim.ui.review_window import ReviewWindow
 from vox_verbatim.ui.settings_dialog import SettingsDialog
+from vox_verbatim.ui.smooth_commands import (
+    MAKE_AGAIN_KEY,
+    OPEN_KEY,
+    SmoothResult,
+    SmoothRunner,
+    busy_message,
+    open_smooth_transcript,
+    starting_message,
+)
 from vox_verbatim.ui.transcribe_dialog import TranscribeDialog
 from vox_verbatim.ui.player_panel import (
     STATUS_FINISHED,
@@ -164,6 +173,9 @@ class MainWindow(QMainWindow):
         self._player = AudioPlayer(self)
         self._scanner = FolderScanner(self)
         self._model = AudioFileTableModel(self)
+        # Makes the smooth transcript again on request, in the background.
+        self._smooth_runner = SmoothRunner(self)
+        self._smooth_runner.finished.connect(self._on_smooth_finished)
 
         self._media_load_timer = QTimer(self)
         self._media_load_timer.setSingleShot(True)
@@ -311,6 +323,18 @@ class MainWindow(QMainWindow):
             "&Review Transcript...",
             QKeySequence("Ctrl+R"),
             self.show_review,
+        )
+        self._make_smooth_action = self._add_action(
+            file_menu,
+            "&Make Smooth Transcript Again",
+            QKeySequence(MAKE_AGAIN_KEY),
+            self.make_smooth_transcript_again,
+        )
+        self._open_smooth_action = self._add_action(
+            file_menu,
+            "&Open Smooth Transcript",
+            QKeySequence(OPEN_KEY),
+            self.open_smooth_transcript,
         )
         file_menu.addSeparator()
         # Named outright rather than as StandardKey.Preferences: Qt gives
@@ -848,6 +872,58 @@ class MainWindow(QMainWindow):
             # decision that has already been taken.
             self.open_project_review(land_on=review.path.name)
 
+    # -- The smooth transcript ---------------------------------------------
+
+    def _highlighted_file(self) -> AudioFile | None:
+        return self._model.file_at(self._table.selected_row())
+
+    def make_smooth_transcript_again(self) -> None:
+        """Make the highlighted recording's smooth transcript again, in the background.
+
+        It is made from the transcript as it is saved now, so every correction
+        made in the review window is in it. The folder's own smoothing prompt
+        is used where it has one.
+        """
+        audio_file = self._highlighted_file()
+        if audio_file is None:
+            self._set_status(
+                "Highlight a recording in the file list first.", alert=True, urgent=True
+            )
+            return
+        if self._smooth_runner.is_running():
+            self._set_status(busy_message(), alert=True, urgent=True)
+            return
+        name = audio_file.path.name
+        store = self._transcript_store(audio_file.path)
+        transcript = store.load()
+        if transcript is None:
+            self._set_status(
+                f"{name} has no transcript yet, so there is nothing to smooth. "
+                "Transcribe it first.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        smoother = smoothing.smoother_for(self._settings.transcription, audio_file.path.parent)
+        self._smooth_runner.start(name, transcript, store, smoother)
+        self._set_status(starting_message(name), alert=True)
+
+    def open_smooth_transcript(self) -> None:
+        """Open the highlighted recording's smooth transcript in the text editor."""
+        audio_file = self._highlighted_file()
+        if audio_file is None:
+            self._set_status(
+                "Highlight a recording in the file list first.", alert=True, urgent=True
+            )
+            return
+        opened, message = open_smooth_transcript(
+            audio_file.path.name, self._transcript_store(audio_file.path)
+        )
+        self._set_status(message, alert=True, urgent=not opened)
+
+    def _on_smooth_finished(self, result: SmoothResult) -> None:
+        self._set_status(result.message, alert=True, urgent=not result.succeeded)
+
     def _previous_run_is_still_stopping(self) -> bool:
         """Whether a run closed in the background has not yet stopped."""
         dialog = self._stopping_dialog
@@ -1120,6 +1196,14 @@ class MainWindow(QMainWindow):
             vocabulary=user_terms_index(self._vocabulary_store.load()),
             app_smoothing_prompt=self._settings.transcription.smoothing.prompt,
             write_exports=reader.write_exports,
+            transcript_store_for=(
+                lambda name: self._transcript_store(recording_paths[name])
+                if name in recording_paths
+                else None
+            ),
+            build_smoother=(
+                lambda: smoothing.smoother_for(self._settings.transcription, folder)
+            ),
         )
         # Given its parent after the window exists rather than before, so that
         # Qt destroys the player along with the window it belongs to. A player

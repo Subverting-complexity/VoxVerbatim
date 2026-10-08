@@ -40,9 +40,10 @@ class FakeDialog:
     can do what a person's dialog would do to the window behind it.
     """
 
-    def __init__(self, settings: ExportSettings, while_open=None) -> None:
+    def __init__(self, settings: ExportSettings, while_open=None, remake: bool = False) -> None:
         self.settings = settings
         self.while_open = while_open
+        self.remake = remake
         self.calls: list[dict] = []
 
     def __call__(self, count, settings, parent, **options):
@@ -68,7 +69,7 @@ class FakeDialog:
         return kinds
 
     def chosen_remake(self):
-        return False
+        return self.remake
 
     def deleteLater(self):
         pass

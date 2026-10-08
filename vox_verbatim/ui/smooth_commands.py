@@ -31,7 +31,12 @@ from PySide6.QtGui import QDesktopServices
 
 from vox_verbatim.transcription.exports import SMOOTH_EXPORT_NAME
 from vox_verbatim.transcription.model import Transcript
-from vox_verbatim.transcription.smoothing import SmoothOutcome, Smoother, write_smooth_transcript
+from vox_verbatim.transcription.smoothing import (
+    SmoothOutcome,
+    Smoother,
+    smooth_is_out_of_date,
+    write_smooth_transcript,
+)
 from vox_verbatim.transcription.store import TranscriptStore
 
 _log = logging.getLogger(__name__)
@@ -120,6 +125,11 @@ def open_smooth_transcript(recording_name: str, store: TranscriptStore) -> tuple
     """Open the smooth transcript in the default text editor.
 
     Returns whether it opened, and the sentence to say either way.
+
+    A smooth transcript made before the latest corrections is still opened,
+    because the person may only want to read it, but the sentence says it
+    is out of date and how to bring it up to date. A transcript that cannot
+    be read cannot be compared, and nothing is said about it here.
     """
     path = smooth_path(store)
     if not path.is_file():
@@ -127,8 +137,16 @@ def open_smooth_transcript(recording_name: str, store: TranscriptStore) -> tuple
             f"{recording_name} has no smooth transcript yet. Use Make Smooth Transcript "
             f"Again, {MAKE_AGAIN_KEY}, to make one."
         )
+    transcript = store.load()
+    out_of_date = transcript is not None and smooth_is_out_of_date(store, transcript)
     if QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
-        return True, f"Opened the smooth transcript of {recording_name}."
+        message = f"Opened the smooth transcript of {recording_name}."
+        if out_of_date:
+            message += (
+                " It is out of date: it was made before the latest corrections. "
+                f"Make Smooth Transcript Again, {MAKE_AGAIN_KEY}, updates it."
+            )
+        return True, message
     return False, f"Windows could not open the smooth transcript, {path}."
 
 

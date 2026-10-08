@@ -63,7 +63,9 @@ Files
                       file. The same word is often said in several
                       recordings, so a review covers all of them at once.
   Ctrl+Shift+E        Export the transcripts of the checked files, or the
-                      highlighted one, to a folder you choose.
+                      highlighted one, to a folder you choose. A smooth
+                      transcript older than your corrections is named, and
+                      can be made again before it is exported.
   Ctrl+Shift+M        Make the highlighted recording's smooth transcript
                       again, with every correction made so far.
   Ctrl+Shift+O        Open the highlighted recording's smooth transcript.

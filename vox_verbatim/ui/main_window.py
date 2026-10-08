@@ -916,6 +916,12 @@ class MainWindow(QMainWindow):
             settings=lambda: self._settings.export,
             save_settings=self._remember_export_settings,
             store_for=self._transcript_store,
+            smooth_runner=self._smooth_runner,
+            build_smoother=(
+                lambda recording: smoothing.smoother_for(
+                    self._settings.transcription, recording.parent
+                )
+            ),
         )
         flow.run(recordings, scope_text)
 
@@ -982,7 +988,13 @@ class MainWindow(QMainWindow):
         Closing the review window with its own close button hides it rather
         than deleting it, so it is still held here; whether it is on screen
         is what tells.
+
+        A run an export asked for, to bring an out-of-date smooth transcript
+        up to date first, is never said here: the export says how far it has
+        got, and its summary says how each run went.
         """
+        if isinstance(requester, ExportFlow):
+            return
         window = self._review_window
         if requester is not self and requester is window and window.isVisible():
             return

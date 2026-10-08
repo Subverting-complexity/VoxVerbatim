@@ -277,6 +277,9 @@ class _AcceptingDialog:
             kinds.append(ExportKind.REVIEW_REPORT)
         return kinds
 
+    def chosen_remake(self):
+        return False
+
     def deleteLater(self):
         pass
 

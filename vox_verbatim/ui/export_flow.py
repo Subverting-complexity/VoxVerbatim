@@ -14,6 +14,15 @@ that window when the box closes. The flow also puts the focus back on the
 control that had it, because a run of two or three boxes one after another
 can otherwise leave it on the window itself, where a screen reader says
 nothing useful.
+
+A smooth transcript made before the latest corrections is out of date. The
+dialog names those recordings and asks whether to make them again first.
+When the person says yes, the flow smooths them one after another on the
+shared :class:`~vox_verbatim.ui.smooth_commands.SmoothRunner`, saying how
+far it has got, and exports when the last one is done. The window stays
+usable meanwhile, because smoothing can take minutes. A remake that fails
+removes the old smooth file, so the export skips it, and its reason is in
+the summary.
 """
 
 from __future__ import annotations
@@ -29,8 +38,10 @@ from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
 
 from vox_verbatim.settings import ExportSettings
 from vox_verbatim.transcription import folder_export
-from vox_verbatim.transcription.folder_export import StoreFor
+from vox_verbatim.transcription.folder_export import ExportKind, StoreFor
+from vox_verbatim.transcription.smoothing import Smoother
 from vox_verbatim.ui.export_dialog import ExportDialog
+from vox_verbatim.ui.smooth_commands import SmoothResult, SmoothRunner, busy_message
 
 _log = logging.getLogger(__name__)
 
@@ -56,6 +67,12 @@ class ExportFlow(QObject):
     same way next time from either window. ``store_for`` gives the transcript
     folder of a recording.
 
+    ``smooth_runner`` and ``build_smoother`` make out-of-date smooth
+    transcripts again; ``build_smoother`` is given the recording, so the
+    folder's own smoothing prompt is used. Without them the dialog still
+    names the out-of-date ones, and a request to make them again says it
+    cannot be done here.
+
     The three boxes are methods a test replaces: the question about files
     already in the folder, the summary, and opening the folder.
     """
@@ -67,6 +84,8 @@ class ExportFlow(QObject):
         settings: Callable[[], ExportSettings],
         save_settings: Callable[[ExportSettings], None],
         store_for: StoreFor,
+        smooth_runner: SmoothRunner | None = None,
+        build_smoother: Callable[[Path], Smoother] | None = None,
     ) -> None:
         super().__init__(parent)
         self._window = parent
@@ -74,35 +93,145 @@ class ExportFlow(QObject):
         self._settings = settings
         self._save_settings = save_settings
         self._store_for = store_for
+        self._runner = smooth_runner
+        self._build_smoother = build_smoother
         self._focus: QWidget | None = None
+        # What the export was asked for, kept while the remakes run.
+        self._recordings: list[Path] = []
+        self._folder = Path()
+        self._kinds: list[ExportKind] = []
+        self._to_remake: list[Path] = []
+        self._remake_count = 0
+        self._remake_problems: list[str] = []
+        self._waiting = False
+        self._finished = False
 
     def run(self, recordings: Sequence[Path], scope_text: str | None = None) -> None:
         """Export ``recordings``, asking the person how first.
 
         ``scope_text`` is the sentence at the top of the dialog saying what
         will be exported; nothing given means the main window's wording.
+        Returns once the export is done, or, where out-of-date smooth
+        transcripts are being made again, once the first has been started.
         """
         self._remember_focus()
         try:
-            self._run(list(recordings), scope_text)
+            self._ask(list(recordings), scope_text)
         finally:
-            self._restore_focus()
-            self.deleteLater()
+            if not self._waiting:
+                self._finish()
 
-    def _run(self, recordings: list[Path], scope_text: str | None) -> None:
+    def _ask(self, recordings: list[Path], scope_text: str | None) -> None:
+        out_of_date = folder_export.out_of_date_smooth(recordings, self._store_for)
         dialog = ExportDialog(
-            len(recordings), self._settings(), self._window, scope_text=scope_text
+            len(recordings),
+            self._settings(),
+            self._window,
+            scope_text=scope_text,
+            out_of_date_names=[path.name for path in out_of_date],
         )
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         chosen = dialog.chosen_settings()
         kinds = dialog.chosen_kinds()
+        remake = accepted and dialog.chosen_remake()
         dialog.deleteLater()
         self._save_settings(chosen)
         if not accepted:
             self._say("Export Transcripts was closed without exporting anything.")
             return
-        folder = Path(chosen.folder)
-        plan = folder_export.plan_export(recordings, folder, kinds, self._store_for)
+        self._recordings = recordings
+        self._folder = Path(chosen.folder)
+        self._kinds = kinds
+        if remake and out_of_date:
+            self._start_remaking(out_of_date)
+            return
+        self._export()
+
+    # -- Making out-of-date smooth transcripts again --------------------------
+
+    def _start_remaking(self, recordings: list[Path]) -> None:
+        """Start making the smooth transcripts again, one after another.
+
+        One at a time, on the runner both windows share, so this can never
+        race a Make Smooth Transcript Again the person asked for on the same
+        file. If that runner is already busy, nothing is exported: exporting
+        the old files after the person asked for new ones would be wrong,
+        and waiting an unknown time without saying so would be worse.
+        """
+        if self._runner is None or self._build_smoother is None:
+            self._say(
+                "The smooth transcripts cannot be made again from here, so nothing was "
+                "exported.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        if self._runner.is_running():
+            self._say(
+                f"{busy_message()} Nothing was exported.", alert=True, urgent=True
+            )
+            return
+        self._to_remake = list(recordings)
+        self._remake_count = len(recordings)
+        self._remake_problems = []
+        self._runner.finished.connect(self._on_remade)
+        self._waiting = True
+        self._remake_next()
+
+    def _remake_next(self) -> None:
+        while self._to_remake:
+            recording = self._to_remake.pop(0)
+            name = recording.name
+            store = self._store_for(recording)
+            transcript = store.load()
+            if transcript is None:
+                self._remake_problems.append(
+                    f"The transcript of {name} could not be read, so its smooth transcript "
+                    "was not made again."
+                )
+                continue
+            # The run before this one has sent its result, but its thread
+            # may not have quite ended; the runner refuses a second run until
+            # it has.
+            self._runner.wait(5)
+            if not self._runner.start(
+                name, transcript, store, self._build_smoother(recording), requester=self
+            ):
+                self._remake_problems.append(
+                    f"The smooth transcript of {name} was not made again, because another "
+                    "was being made."
+                )
+                continue
+            done = self._remake_count - len(self._to_remake)
+            self._say(
+                f"Making the smooth transcript of {name} again before exporting, "
+                f"{done} of {self._remake_count}. You can keep working. You will hear "
+                "when the export is done.",
+                alert=True,
+            )
+            return
+        self._runner.finished.disconnect(self._on_remade)
+        self._waiting = False
+        # The person has been working meanwhile; the summary hands the focus
+        # back to wherever they are now, not to where they were.
+        self._remember_focus()
+        try:
+            self._export()
+        finally:
+            self._finish()
+
+    def _on_remade(self, result: SmoothResult, requester: object) -> None:
+        if requester is not self:
+            return
+        if not result.succeeded:
+            self._remake_problems.append(result.message)
+        self._remake_next()
+
+    # -- Writing -------------------------------------------------------------
+
+    def _export(self) -> None:
+        folder = self._folder
+        plan = folder_export.plan_export(self._recordings, folder, self._kinds, self._store_for)
         replace_existing = True
         existing = plan.existing()
         if existing:
@@ -112,10 +241,18 @@ class ExportFlow(QObject):
                 return
             replace_existing = answer == "replace"
         result = folder_export.run_export(plan, self._store_for, replace_existing)
+        result.failed[:0] = self._remake_problems
         message = folder_export.summary_text(result)
         self._say(message)
         if self._show_export_summary(message):
             self._open_folder(folder)
+
+    def _finish(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self._restore_focus()
+        self.deleteLater()
 
     # -- Focus ---------------------------------------------------------------
 

@@ -74,6 +74,14 @@ In the review window
   moment that word was said, in every recording in the folder. Deciding a
   word once settles all of its occurrences.
 
+  The window opens in a simple form: the words, the choices for the word
+  you are on, and playback. Each choice button keeps the word or uses what
+  one service heard. Type a different word in the box and press Enter to
+  use it instead.
+
+  Ctrl+D              Show or hide the details: the occurrences, the
+                      corrections, the review settings and the notes.
+
   Ctrl+F3             Go to the next word.
   Ctrl+Shift+F3       Go to the previous word.
   F3 and Shift+F3     Go to the next and previous occurrence of that word.
@@ -82,9 +90,10 @@ In the review window
   Ctrl+I              Isolate this occurrence, which takes it out of its
                       word and keeps it out when the folder is looked at
                       again.
-  F5 and Shift+F5     Play the word again, and play a wider stretch around
-                      it. In this window F5 plays; in the file list it reads
-                      the folder again.
+  F5                  Play the word alone. In this window F5 plays a word;
+                      in the file list it reads the folder again.
+  Shift+F5            Play the word with a second and a half either side.
+  Ctrl+F5             Play the word with twelve seconds either side.
   Ctrl+L              Process the low confidence words of the whole folder.
   Ctrl+G              Group the words again, using the minimum confidence
                       and the grouping tolerance as they now stand.

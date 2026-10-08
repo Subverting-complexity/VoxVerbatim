@@ -84,14 +84,21 @@ from vox_verbatim.ui.review_queue import reason_text
 # -- The first table: the words -------------------------------------------
 
 GROUP_COLUMN_WORD = 0
-GROUP_COLUMN_COUNT = 1
-GROUP_COLUMN_CONFIDENCE = 2
-GROUP_COLUMN_WHY = 3
-GROUP_COLUMN_REVIEWED = 4
-GROUP_COLUMN_TOTAL = 5
+GROUP_COLUMN_WHEN = 1
+GROUP_COLUMN_COUNT = 2
+GROUP_COLUMN_CONFIDENCE = 3
+GROUP_COLUMN_WHY = 4
+GROUP_COLUMN_REVIEWED = 5
+GROUP_COLUMN_TOTAL = 6
+
+#: The columns the simple review window leaves out. What is left -- the
+#: word, when it was said and why it is here -- is what a decision needs;
+#: the rest is still in the model, and comes back with the details.
+GROUP_DETAIL_COLUMNS = (GROUP_COLUMN_COUNT, GROUP_COLUMN_CONFIDENCE, GROUP_COLUMN_REVIEWED)
 
 GROUP_COLUMN_TITLES = (
     "Word",
+    "Time",
     "Occurrences",
     "Confidence",
     "Why it needs review",
@@ -453,6 +460,29 @@ def time_display(seconds: float | None) -> str:
 def time_spoken(seconds: float | None) -> str:
     """The same position written out, for a screen reader to read."""
     return UNKNOWN_TIME_SPOKEN if seconds is None else spoken_duration(seconds)
+
+
+def group_time_display(occurrences: tuple[Occurrence, ...]) -> str:
+    """Where a word first occurs, and how many more times, for a table cell.
+
+    The first occurrence is the one the second list opens on, so the time in
+    this cell is the time that playing the word plays. "1:05 and 3 more"
+    rather than a list of times, which would not fit and would not be read.
+    """
+    if not occurrences:
+        return UNKNOWN_TIME_DISPLAY
+    first = time_display(occurrences[0].start)
+    more = len(occurrences) - 1
+    return first if more == 0 else f"{first} and {more} more"
+
+
+def group_time_spoken(occurrences: tuple[Occurrence, ...]) -> str:
+    """The same, written out for a screen reader."""
+    if not occurrences:
+        return UNKNOWN_TIME_SPOKEN
+    first = time_spoken(occurrences[0].start)
+    more = len(occurrences) - 1
+    return first if more == 0 else f"{first}, and {more} more"
 
 
 def confidence_range(occurrences: tuple[Occurrence, ...]) -> tuple[str, str]:
@@ -951,6 +981,8 @@ class WordGroupModel(QAbstractTableModel):
     def _display_text(row: GroupRow, column: int) -> str:
         if column == GROUP_COLUMN_WORD:
             return row.word
+        if column == GROUP_COLUMN_WHEN:
+            return group_time_display(row.occurrences)
         if column == GROUP_COLUMN_COUNT:
             return str(row.count)
         if column == GROUP_COLUMN_CONFIDENCE:
@@ -966,6 +998,8 @@ class WordGroupModel(QAbstractTableModel):
         # The count is said with its noun, because a screen reader reading a
         # cell holding "8" says "eight" and the listener has to remember which
         # column they are in to know eight of what.
+        if column == GROUP_COLUMN_WHEN:
+            return group_time_spoken(row.occurrences)
         if column == GROUP_COLUMN_COUNT:
             return occurrence_phrase(row.count, row.file_count)
         if column == GROUP_COLUMN_CONFIDENCE:
@@ -1226,6 +1260,16 @@ class WordGroupView(ReviewTable):
         super().setModel(model)
         if model is not None:
             self._stretch(GROUP_COLUMN_WHY)
+
+    def set_simple(self, simple: bool) -> None:
+        """Show only the word, its time and its reason, or every column.
+
+        The columns are hidden rather than taken out of the model, so the
+        cells keep their numbers and a screen reader is told the real column
+        count of what is on the screen.
+        """
+        for column in GROUP_DETAIL_COLUMNS:
+            self.setColumnHidden(column, simple)
 
 
 class OccurrenceView(ReviewTable):

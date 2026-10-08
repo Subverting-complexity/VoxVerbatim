@@ -757,6 +757,15 @@ class ProjectSettings:
     show_reviewed: bool = False
     play_automatically: bool = True
 
+    show_details: bool = False
+    """Whether the review window shows everything, or only what a decision needs.
+
+    Off by default, so a folder opens on the simple window: the words, the
+    choices for the one selected, and playback. Kept with the folder like
+    the other review toggles, so a person who wants the details sees them
+    every time they come back to it.
+    """
+
     auto_play_delay_seconds: int = DEFAULT_AUTO_PLAY_DELAY_SECONDS
     """How long to wait before playing the occurrence just moved to.
 
@@ -789,6 +798,7 @@ class ProjectSettings:
             show_other_uncertainties=_flag(data.get("show_other_uncertainties"), True),
             show_reviewed=_flag(data.get("show_reviewed"), False),
             play_automatically=_flag(data.get("play_automatically"), True),
+            show_details=_flag(data.get("show_details"), False),
             auto_play_delay_seconds=_whole_seconds(
                 data.get("auto_play_delay_seconds"),
                 DEFAULT_AUTO_PLAY_DELAY_SECONDS,

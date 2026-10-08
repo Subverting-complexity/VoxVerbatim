@@ -723,14 +723,24 @@ class Adjudicator:
         the application starts on a machine where the package was never
         installed. That machine loses adjudication and is told why.
         """
-        try:
-            from openai import OpenAI
-        except ImportError as error:
-            raise AdjudicationUnavailable(
-                f"Adjudication needs the {PACKAGE} package, which is not installed. "
-                f"Run: pip install {PACKAGE}"
-            ) from error
-        return OpenAI(api_key=self._api_key, max_retries=self._maximum_retries)
+        return build_openai_client(self._api_key, self._maximum_retries, "Adjudication")
+
+
+def build_openai_client(api_key: str, maximum_retries: int, role: str) -> Any:
+    """Build a real OpenAI client, reporting a missing package as such.
+
+    Shared by every stage that talks to the OpenAI language model, so they
+    all set the client up the same way. ``role`` names the stage in the
+    message a person reads when the package is missing.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError as error:
+        raise AdjudicationUnavailable(
+            f"{role} needs the {PACKAGE} package, which is not installed. "
+            f"Run: pip install {PACKAGE}"
+        ) from error
+    return OpenAI(api_key=api_key, max_retries=maximum_retries)
 
 
 # -- The prompt ----------------------------------------------------------

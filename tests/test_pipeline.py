@@ -1518,7 +1518,7 @@ def _two_part_smoothing(tmp_path, monkeypatch, answer):
     store = TranscriptStore(tmp_path / "talk.wav")
     client = SmoothingClient(answer)
 
-    def build(settings):
+    def build(settings, _folder):
         return smoothing.Smoother(api_key="sk-test-key", model="m", client=client, part_words=1)
 
     monkeypatch.setattr(pipeline, "_build_smoother", build)

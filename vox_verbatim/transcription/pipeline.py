@@ -1185,7 +1185,7 @@ def _smooth(
     if outcome.unanswered_parts:
         problems.append(
             f"the language model did not answer for {_count(outcome.unanswered_parts, 'part')}, "
-            "which keep the literal words"
+            "so the literal words are kept there"
         )
     if outcome.unchecked_parts:
         problems.append(

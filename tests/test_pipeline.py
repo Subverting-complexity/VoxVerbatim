@@ -1539,7 +1539,7 @@ def test_a_part_with_no_answer_is_named_as_such(tmp_path, monkeypatch):
     assert (store.exports_folder / smoothing.SMOOTH_EXPORT_NAME).exists()
     assert len(transcript.warnings) == 1
     warning = transcript.warnings[0]
-    assert "did not answer for 1 part" in warning
+    assert "did not answer for 1 part, so the literal words are kept there" in warning
     assert "did not pass its check" not in warning
 
 
@@ -1552,6 +1552,18 @@ def test_a_part_that_fails_its_check_is_named_as_such(tmp_path, monkeypatch):
     assert len(transcript.warnings) == 1
     assert "edit of 1 part did not pass its check" in transcript.warnings[0]
     assert "did not answer" not in transcript.warnings[0]
+
+
+def test_the_run_finishes_when_the_smoothing_does(transcribe, monkeypatch):
+    # Started, saved before smoothing, then finished after it.
+    stamps = iter(["2026-10-08T10:00:00", "2026-10-08T10:01:00", "2026-10-08T10:05:00"])
+    monkeypatch.setattr(pipeline, "_now", lambda: next(stamps))
+    fake_smoother(monkeypatch, SmoothingClient(echo))
+
+    run = transcribe(settings=smoothing_settings())
+
+    assert run.transcript.completed_at == "2026-10-08T10:05:00"
+    assert run.saved["completed_at"] == "2026-10-08T10:05:00"
 
 
 def test_the_report_charges_only_the_answered_smoothing_requests(transcribe, monkeypatch):

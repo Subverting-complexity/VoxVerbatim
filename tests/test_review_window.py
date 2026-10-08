@@ -1594,6 +1594,49 @@ def test_a_recording_that_fails_to_open_early_is_not_announced_or_opened_again(
         window.close()
 
 
+def test_an_error_while_a_clip_plays_is_still_said_out_loud(qapp, tmp_path):
+    """Only a failure while opening early is quiet; one during playback is not."""
+    player = FakePlayer()
+    folder, _files = _two_real_recordings(tmp_path)
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        select_word(window, "Bosch")
+        player.becomes_ready()
+        window.play_span()
+
+        player.errorOccurred.emit("The audio device was disconnected.")
+        assert window._status_label.text() == "The audio device was disconnected."
+    finally:
+        window.close()
+
+
+def test_a_recording_that_opens_when_asked_is_opened_early_again(qapp, tmp_path):
+    """One failure is not held against a file that has since opened."""
+    player = FakePlayer()
+    folder, _files = _two_real_recordings(tmp_path)
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        select_word(window, "Bosch")
+        failing = Path(player.loaded)
+        player.errorOccurred.emit(f"{failing.name} could not be played.")
+        window.play_span()
+        player.becomes_ready()
+
+        start = window.current_occurrence().id
+        for _ in range(3):
+            window.go_to_next_item()
+        assert window._audio_path() != failing
+        loads = player.loads.count(str(failing))
+        while window.current_occurrence().id != start:
+            before = window.current_occurrence().id
+            window.go_to_previous_item()
+            assert window.current_occurrence().id != before
+
+        assert player.loads.count(str(failing)) == loads + 1
+    finally:
+        window.close()
+
+
 def test_the_clip_is_stopped_on_time_rather_than_at_the_next_position_report(qapp, tmp_path):
     """Qt reports the position only now and then, so the clip used to run on."""
     player = FakePlayer()

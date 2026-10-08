@@ -1372,10 +1372,10 @@ class ReviewWindow(QMainWindow):
         self._loaded_path: Path | None = None
         self._media_ready = False
         self._pending_play: tuple[int, int, str] | None = None
-        # A recording that failed to open when it was opened early, before
-        # anybody asked to hear it. It is not opened early again; see
-        # _on_player_error.
-        self._failed_path: Path | None = None
+        # The recordings that failed to open when they were opened early,
+        # before anybody asked to hear them. They are not opened early again
+        # until one of them opens when asked for; see _on_player_error.
+        self._failed_paths: set[Path] = set()
         self._play_timer = QTimer(self)
         self._play_timer.setSingleShot(True)
         # Ends a clip at the word's end time. Qt reports the position only
@@ -4544,7 +4544,7 @@ class ReviewWindow(QMainWindow):
         if (
             path is None
             or path == self._loaded_path
-            or path == self._failed_path
+            or path in self._failed_paths
             or not path.is_file()
         ):
             return
@@ -4583,7 +4583,8 @@ class ReviewWindow(QMainWindow):
         if milliseconds <= 0:
             return
         self._media_ready = True
-        self._failed_path = None
+        if self._loaded_path is not None:
+            self._failed_paths.discard(self._loaded_path)
         pending = self._pending_play
         if pending is None:
             return
@@ -4616,7 +4617,8 @@ class ReviewWindow(QMainWindow):
         self._media_ready = False
         self._loaded_path = None
         if opened_early:
-            self._failed_path = failed
+            if failed is not None:
+                self._failed_paths.add(failed)
             return
         self._set_status(message, alert=True, urgent=True)
 

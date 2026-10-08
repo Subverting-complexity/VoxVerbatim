@@ -263,11 +263,14 @@ def exports_failure_text(recording_name: str, failed: list[str]) -> str:
     find showing the text from before the review.
     """
     files = " and ".join(failed)
-    verb = "was" if len(failed) == 1 else "were"
+    if len(failed) == 1:
+        verb, still, held, written = "was", "the file still shows", "it", "it is"
+    else:
+        verb, still, held, written = "were", "the files still show", "them", "they are"
     return (
         f"Your change is saved, but {files} for {recording_name} {verb} not written "
-        "again, so the file still shows the text from before. Close any program that "
-        "has it open; it is written again with your next change to that recording."
+        f"again, so {still} the text from before. Close any program that has "
+        f"{held} open; {written} written again with your next change to that recording."
     )
 
 

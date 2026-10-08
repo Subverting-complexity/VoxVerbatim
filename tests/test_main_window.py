@@ -22,6 +22,7 @@ from vox_verbatim.audio.player import AudioPlayer
 from vox_verbatim.session import SessionStore
 from vox_verbatim.transcription import grouping
 from vox_verbatim.transcription.calibration import CalibrationStore, ProviderStatistics
+from vox_verbatim.transcription.exports import REPORT_EXPORT_NAME, TEXT_EXPORT_NAME
 from vox_verbatim.transcription.learning import StatisticsChange
 from vox_verbatim.transcription.model import (
     FinalToken,
@@ -766,6 +767,7 @@ def fake_review_window(monkeypatch) -> list:
         ):
             super().__init__(parent)
             self.app_smoothing_prompt = app_smoothing_prompt
+            self.write_exports = write_exports
             self.record_statistics = record_statistics
             self.vocabulary = vocabulary
             self.folder = folder
@@ -2182,5 +2184,27 @@ def test_the_review_window_records_its_statistics_in_the_shared_file(
 
         counts = window._calibration_store.load().counts_for(Provider.OPENAI)
         assert (counts.chosen, counts.corrected) == (1, 1)
+    finally:
+        close_window(window)
+
+
+def test_the_review_window_writes_the_readable_files_through_the_reader(
+    qapp, monkeypatch, store, audio_folder
+):
+    opened = fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        transcript_store = save_transcript(
+            window, audio_folder / "alpha.m4a", weak_transcript("alpha.m4a")
+        )
+        window.show_review()
+        write = opened[-1].write_exports
+
+        assert write("alpha.m4a", weak_transcript("alpha.m4a")) == []
+        assert (transcript_store.exports_folder / TEXT_EXPORT_NAME).exists()
+        assert write("not in this folder.m4a", weak_transcript("x")) == [
+            TEXT_EXPORT_NAME,
+            REPORT_EXPORT_NAME,
+        ]
     finally:
         close_window(window)

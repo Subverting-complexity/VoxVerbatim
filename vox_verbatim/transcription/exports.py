@@ -317,7 +317,7 @@ def render_review_report(
     return "\n".join(part for part in parts if part).rstrip() + "\n"
 
 
-def write_exports(transcript: Transcript, store: Any) -> list[str]:
+def write_exports(transcript: Transcript, store: Any, patient: bool = True) -> list[str]:
     """Write the two readable documents for a transcript, and name any that failed.
 
     ``store`` is the recording's
@@ -331,6 +331,9 @@ def write_exports(transcript: Transcript, store: Any) -> list[str]:
     it open, is named in the answer rather than raised. The transcript is
     already saved by the time this runs, and an export is a convenience
     rebuilt from it, so a failure here must never undo a correction.
+
+    ``patient`` is passed on to the store: False writes once, without waiting
+    for a program that holds a file open to let go of it.
     """
     failed: list[str] = []
     for name, render in (
@@ -338,7 +341,7 @@ def write_exports(transcript: Transcript, store: Any) -> list[str]:
         (REPORT_EXPORT_NAME, render_review_report),
     ):
         try:
-            written = store.write_export(name, render(transcript))
+            written = store.write_export(name, render(transcript), patient=patient)
         except Exception:  # an export is a convenience, never the transcript
             _log.exception("Could not write the %s export.", name)
             written = None

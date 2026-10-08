@@ -12,6 +12,7 @@ from tests.test_review_window import (
     make_transcript,
     select_word,
     two_file_folder,
+    weak_token,
 )
 from vox_verbatim.transcription.exports import (
     REPORT_EXPORT_NAME,
@@ -22,7 +23,7 @@ from vox_verbatim.transcription.model import Confidence, ReviewReason
 from vox_verbatim.transcription.project import ProjectStore
 from vox_verbatim.transcription.store import TranscriptStore
 from vox_verbatim.ui import review_window as review_window_module
-from vox_verbatim.ui.review_window import ReviewWindow
+from vox_verbatim.ui.review_window import ReviewWindow, exports_failure_text
 
 
 class RefusingStore:
@@ -32,7 +33,7 @@ class RefusingStore:
         self.refuse = refuse
         self.written: dict[str, str] = {}
 
-    def write_export(self, name: str, text: str):
+    def write_export(self, name: str, text: str, patient: bool = True):
         if name in self.refuse:
             return None
         self.written[name] = text
@@ -147,3 +148,49 @@ def test_a_locked_file_is_announced_and_the_correction_is_kept(qapp, tmp_path, m
         assert TEXT_EXPORT_NAME in window._status_label.text()
     finally:
         window.close()
+
+
+def test_a_speaker_change_writes_the_files_again(qapp, tmp_path):
+    folder = Folder({RECORDING: make_transcript([weak_token("contract", 30.0)])})
+    calls: list[str] = []
+
+    def write(name, transcript):
+        calls.append(name)
+        return []
+
+    window = _open(tmp_path, folder, write)
+    try:
+        window._speaker_box.setCurrentText("Speaker speaker_1")
+        assert window.apply_speaker_correction() is True
+        assert calls == [RECORDING]
+    finally:
+        window.close()
+
+
+def test_two_failed_files_are_spoken_of_as_files():
+    message = exports_failure_text(RECORDING, [TEXT_EXPORT_NAME, REPORT_EXPORT_NAME])
+    assert "were not written again, so the files still show" in message
+    assert "has them open; they are written again" in message
+    single = exports_failure_text(RECORDING, [TEXT_EXPORT_NAME])
+    assert "so the file still shows" in single
+    assert "has it open; it is written again" in single
+
+
+def test_an_impatient_write_does_not_wait_for_a_held_file(tmp_path, monkeypatch):
+    from vox_verbatim.transcription import store as store_module
+
+    waits: list[float] = []
+    monkeypatch.setattr(store_module.time, "sleep", waits.append)
+
+    def held(_source, _target):
+        raise PermissionError("held open")
+
+    monkeypatch.setattr(store_module.os, "replace", held)
+    monkeypatch.setattr(store_module, "keep_unsaved_copy", lambda *_: None)
+    store = TranscriptStore(tmp_path / "a.m4a")
+
+    assert write_exports(make_transcript(), store, patient=False) == [
+        TEXT_EXPORT_NAME,
+        REPORT_EXPORT_NAME,
+    ]
+    assert waits == []

@@ -2017,11 +2017,13 @@ class _TranscriptReader:
 
         Answers the names of the files that could not be written. A recording
         this reader does not know has nowhere to write to, so both are named.
+        It writes once without waiting, because the review window calls it
+        after every correction and waiting would freeze the window.
         """
         store = self._stores.get(recording_name)
         if store is None:
             return [TEXT_EXPORT_NAME, REPORT_EXPORT_NAME]
-        return write_exports(transcript, store)
+        return write_exports(transcript, store, patient=False)
 
     def transcript_path(self, recording_name: str) -> Path | None:
         store = self._stores.get(recording_name)

@@ -48,7 +48,7 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from vox_verbatim.json_store import (
     keep_unsaved_copy,
@@ -1137,8 +1137,14 @@ class TranscriptStore:
 
     # -- The readable exports
 
-    def write_export(self, name: str, text: str) -> Path | None:
+    def write_export(self, name: str, text: str, patient: bool = True) -> Path | None:
         """Write one export, replacing any previous copy, and return its path.
+
+        ``patient`` waits and tries again while another program holds the old
+        file open. The review window passes False: it writes after every
+        correction on the thread the person is working on, and several
+        seconds of waiting there would freeze the window and the screen
+        reader each time. Its next correction writes the file again anyway.
 
         Exports are the one thing here that is meant to be written again.
         They hold nothing that is not derived from the transcript, so a fresh
@@ -1146,7 +1152,8 @@ class TranscriptStore:
         the rule that governs the responses next door.
         """
         path = self.exports_folder / name
-        if not _write_bytes(path, text.encode("utf-8")):
+        sleep = time.sleep if patient else _no_wait
+        if not _write_bytes(path, text.encode("utf-8"), sleep):
             return None
         return path
 
@@ -1204,7 +1211,13 @@ def _body_of(payload: str | bytes | dict[str, Any], provider: Provider) -> bytes
         return None
 
 
-def _write_bytes(path: Path, body: bytes) -> bool:
+def _no_wait(_seconds: float) -> None:
+    """A sleep that does not wait, for a write that must not hold the window up."""
+
+
+def _write_bytes(
+    path: Path, body: bytes, sleep: Callable[[float], None] = time.sleep
+) -> bool:
     """Write bytes to ``path`` atomically, returning whether it worked.
 
     :func:`~vox_verbatim.json_store.write_json_object` does this for
@@ -1237,7 +1250,7 @@ def _write_bytes(path: Path, body: bytes) -> bool:
         # itself: an export somebody has open in an editor is the commonest
         # thing here to be held, and the answer from a service is evidence.
         try:
-            moved = replace_with_retries(temp_name, path, time.sleep)
+            moved = replace_with_retries(temp_name, path, sleep)
         except BaseException:
             # Not a held file but something wrong with the place itself, so
             # there is nothing to keep the data for.

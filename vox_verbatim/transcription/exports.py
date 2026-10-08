@@ -34,6 +34,7 @@ durations. A raw ``742.6`` is not something anybody can find in a recording.
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from datetime import datetime
 from typing import Any, Iterable, Sequence
@@ -51,6 +52,8 @@ from vox_verbatim.transcription.model import (
     _attaches_to_previous,
     review_reason_text,
 )
+
+_log = logging.getLogger(__name__)
 
 #: What the two exports are called inside the transcript folder.
 TEXT_EXPORT_NAME = "transcript.txt"
@@ -312,6 +315,36 @@ def render_review_report(
         _report_warnings(transcript),
     ]
     return "\n".join(part for part in parts if part).rstrip() + "\n"
+
+
+def write_exports(transcript: Transcript, store: Any) -> list[str]:
+    """Write the two readable documents for a transcript, and name any that failed.
+
+    ``store`` is the recording's
+    :class:`~vox_verbatim.transcription.store.TranscriptStore`. Both the
+    pipeline, at the end of a run, and the review window, after each saved
+    correction, write through this, so the files always match the transcript
+    they were made from. Each file goes to a temporary name and is then moved
+    over the old one, so a reader never sees a half-written file.
+
+    A file that cannot be written, for example because another program holds
+    it open, is named in the answer rather than raised. The transcript is
+    already saved by the time this runs, and an export is a convenience
+    rebuilt from it, so a failure here must never undo a correction.
+    """
+    failed: list[str] = []
+    for name, render in (
+        (TEXT_EXPORT_NAME, render_plain_text),
+        (REPORT_EXPORT_NAME, render_review_report),
+    ):
+        try:
+            written = store.write_export(name, render(transcript))
+        except Exception:  # an export is a convenience, never the transcript
+            _log.exception("Could not write the %s export.", name)
+            written = None
+        if written is None:
+            failed.append(name)
+    return failed
 
 
 def _recorded_cost(transcript: Transcript) -> float | None:

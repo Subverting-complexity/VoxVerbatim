@@ -253,6 +253,24 @@ STATISTICS_FAILURE_TEXT = (
     "next time they can be saved."
 )
 
+
+
+def exports_failure_text(recording_name: str, failed: list[str]) -> str:
+    """Say that a correction is saved but the readable files did not follow it.
+
+    The correction comes first, because that is what a person worries about.
+    The files are named, because they are what the person will open later and
+    find showing the text from before the review.
+    """
+    files = " and ".join(failed)
+    verb = "was" if len(failed) == 1 else "were"
+    return (
+        f"Your change is saved, but {files} for {recording_name} {verb} not written "
+        "again, so the file still shows the text from before. Close any program that "
+        "has it open; it is written again with your next change to that recording."
+    )
+
+
 NO_SPEAKER = "No speaker attributed"
 NO_RISK = "None recorded"
 NO_LLM_DECISION = "The language model was not consulted."
@@ -1277,6 +1295,7 @@ class ReviewWindow(QMainWindow):
         record_statistics: Callable[[StatisticsChange], bool] | None = None,
         vocabulary: VocabularyIndex | None = None,
         app_smoothing_prompt: str = DEFAULT_SMOOTHING_PROMPT,
+        write_exports: Callable[[str, Transcript], list[str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._folder = Path(folder)
@@ -1316,6 +1335,13 @@ class ReviewWindow(QMainWindow):
         # A sentence saying the statistics could not be saved, waiting to be
         # added to the next status announcement; see _hand_on.
         self._statistics_warning: str | None = None
+        # Writes a recording's transcript.txt and review-report.md again from
+        # its saved transcript, and answers the names of any that failed.
+        # Nothing given means there are no files to keep up to date.
+        self._write_exports = write_exports
+        # Sentences saying the readable files did not follow a saved change,
+        # waiting to be added to the next status announcement; see _hand_on.
+        self._exports_warnings: list[str] = []
 
         self._note_keys: dict[QWidget, str] = {}
         self._showing_note: str | None = None
@@ -5410,6 +5436,7 @@ class ReviewWindow(QMainWindow):
             kept = noted
             self._statistics_warning = STATISTICS_FAILURE_TEXT
         transcript = kept
+        self._rewrite_exports(recording_name, transcript)
         if teach and before is not None:
             self._learn_names(before, transcript)
         self._cached_name = recording_name
@@ -5466,6 +5493,22 @@ class ReviewWindow(QMainWindow):
         noted = note_settled_words(before, transcript, excluded, self._vocabulary)
         change, counted = count_settled_words(noted)
         return noted, change, counted
+
+    def _rewrite_exports(self, recording_name: str, transcript: Transcript) -> None:
+        """Write the recording's readable files again from its saved transcript.
+
+        Called only once the transcript itself is saved, so the files never
+        show a change the transcript does not hold. A file that cannot be
+        written leaves the correction in place: the failure is added to the
+        next status announcement, as a statistics failure is, because the
+        caller is about to say what it did and a second announcement would cut
+        across it.
+        """
+        if self._write_exports is None:
+            return
+        failed = self._write_exports(recording_name, transcript)
+        if failed:
+            self._exports_warnings.append(exports_failure_text(recording_name, failed))
 
     @staticmethod
     def _correction_failure_text(recording_names: list[str]) -> str:
@@ -5613,6 +5656,11 @@ class ReviewWindow(QMainWindow):
             message = f"{message} {self._statistics_warning}"
             self._statistics_warning = None
             alert = True
+        if self._exports_warnings:
+            message = " ".join([message, *self._exports_warnings])
+            self._exports_warnings = []
+            alert = True
+            urgent = True
         self._status_label.setText(message)
         if alert:
             announce(self._status_label, message, urgent=urgent)

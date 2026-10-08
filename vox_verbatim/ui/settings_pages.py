@@ -85,6 +85,7 @@ from vox_verbatim.settings import (
     MINIMUM_PROVIDER_RETRY_BACKOFF_SECONDS,
     MINIMUM_PROVIDER_TIMEOUT_SECONDS,
     MINIMUM_SKIP_SECONDS,
+    DEFAULT_SMOOTHING_PROMPT,
     AssemblyAiSettings,
     CostSettings,
     DeepgramSettings,
@@ -94,6 +95,7 @@ from vox_verbatim.settings import (
     OpenAiTranscriptionSettings,
     ProcessingSettings,
     Settings,
+    SmoothingSettings,
 )
 from vox_verbatim.transcription.model import Language
 from vox_verbatim.transcription.vocabulary import (
@@ -1086,6 +1088,101 @@ class OpenAiAdjudicationPage(ProviderPage):
         settings.transcription.openai_adjudication = self._current_section()
 
 
+class SmoothingPage(SettingsPage):
+    """The smooth transcript: whether it is made, by which model, in what style.
+
+    Not a service page. It has no key of its own, because it uses the OpenAI
+    key entered for adjudication, so there is no "is it set up" message here.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(notes.SMOOTHING, parent)
+        layout = QVBoxLayout(self)
+        form = self._new_form(None)
+        layout.addLayout(form)
+
+        self._run_box = self.add_check(
+            form,
+            "Make the smooth transcript &after each transcription",
+            "smoothing.run_after_transcription",
+        )
+        self._model_edit = self.add_text(
+            form,
+            "&Model",
+            "smoothing.model",
+            required_because=(
+                "The smoothing model name is empty. A request cannot be sent without "
+                "one, and an empty name would be replaced by the default the next time "
+                "the settings were loaded. Type a model name."
+            ),
+        )
+        # Not required: empty means "leave the parameter out of the request".
+        self._effort_edit = self.add_text(
+            form, "&Reasoning effort", "smoothing.reasoning_effort"
+        )
+
+        # A real multi-line editor, so the caret is the system caret that
+        # ZoomText follows. Tab moves on rather than typing a tab, so a
+        # keyboard user is never trapped in the box.
+        self._prompt_box = QPlainTextEdit(self)
+        self._prompt_box.setTabChangesFocus(True)
+        self._prompt_box.setMinimumHeight(
+            self.fontMetrics().lineSpacing() * _PROMPT_LINES
+        )
+        self.add_row(form, "Style &prompt", self._prompt_box, "smoothing.prompt")
+
+        self._restore_button = QPushButton("Restore &default prompt", self)
+        describe(
+            self._restore_button,
+            "Restore default prompt",
+            "Puts the style prompt the application came with back in the box. "
+            "Nothing is saved until you press OK.",
+        )
+        # Standing on the button is standing on the prompt, as far as the
+        # explanation panel goes.
+        self.note_keys[self._restore_button] = "smoothing.prompt"
+        self._restore_button.clicked.connect(self.restore_default_prompt)
+        form.addRow("", self._restore_button)
+        layout.addStretch(1)
+
+    def show_settings(self, settings: Settings) -> None:
+        section = settings.transcription.smoothing
+        self._run_box.setChecked(section.run_after_transcription)
+        self._model_edit.setText(section.model)
+        self._effort_edit.setText(section.reasoning_effort)
+        self._prompt_box.setPlainText(section.prompt)
+
+    def apply_to(self, settings: Settings) -> None:
+        settings.transcription.smoothing = SmoothingSettings(
+            run_after_transcription=self._run_box.isChecked(),
+            model=self._model_edit.text().strip(),
+            reasoning_effort=self._effort_edit.text().strip(),
+            prompt=self._prompt_box.toPlainText(),
+        )
+
+    def problems(self) -> list[Problem]:
+        found = super().problems()
+        if not self._prompt_box.toPlainText().strip():
+            found.append(
+                Problem(
+                    "The style prompt is empty. The smooth transcript cannot be made "
+                    "without one. Type a prompt, or press Restore default prompt.",
+                    self._prompt_box,
+                )
+            )
+        return found
+
+    def restore_default_prompt(self) -> None:
+        """Put the default prompt back, and say so, with the focus in the box."""
+        self._prompt_box.setPlainText(DEFAULT_SMOOTHING_PROMPT)
+        self._prompt_box.setFocus(Qt.FocusReason.OtherFocusReason)
+        announce(self._prompt_box, "The default style prompt is back in the box.")
+
+
+#: How many lines of the style prompt show before the box scrolls.
+_PROMPT_LINES = 10
+
+
 class MicrosoftPage(ProviderPage):
     """Microsoft MAI-Transcribe, through the user's own Azure resource."""
 
@@ -2018,6 +2115,7 @@ def build_pages(
         ElevenLabsPage(),
         OpenAiTranscriptionPage(),
         OpenAiAdjudicationPage(),
+        SmoothingPage(),
         MicrosoftPage(),
         AssemblyAiPage(),
         DeepgramPage(),

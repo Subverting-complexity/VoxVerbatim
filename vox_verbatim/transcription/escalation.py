@@ -1426,7 +1426,7 @@ def apply_answers(
                     settled += 1
                 elif verdict == "confirmed":
                     confirmed += 1
-                else:
+                elif verdict == "unsettled":
                     unsettled += 1
 
     return EscalationApplication(
@@ -1507,11 +1507,21 @@ def _apply_one(
     heard: Sequence[ProviderToken],
     result: EscalationResult,
 ) -> str:
-    """Weigh one answer against one word. Returns what became of it."""
+    """Weigh one answer against one word. Returns what became of it.
+
+    One of "settled", "confirmed", "unsettled" or "unchanged". The last is
+    an agreed value the second opinion said nothing about, which is not
+    counted at all: it was not confirmed, and it is not waiting for anyone.
+    """
     if not heard:
         # The service was asked about this moment and reported no word in
         # it. That is not an answer a person can act on, so the word stays
         # where it was and is marked as still needing one.
+        if _agreed_value(token):
+            # Unless every service already heard the same value. It was asked
+            # about only as a precaution, so an empty answer leaves nothing
+            # in doubt, and flagging it would put it back in the list.
+            return "unchanged"
         token.flag(ReviewReason.ESCALATION_UNRESOLVED)
         return "unsettled"
 

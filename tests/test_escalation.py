@@ -987,6 +987,35 @@ def test_a_second_opinion_that_agrees_on_an_agreed_amount_confirms_it_quietly():
     assert token.needs_review is False
 
 
+def test_a_second_opinion_that_heard_nothing_at_an_agreed_amount_leaves_it_settled():
+    """No word in the answer is no reason to doubt a value every service agreed on."""
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _agreed_amount()
+    outcome = EscalationOutcome(results=(_answered(token, ()),))
+
+    applied = apply_answers([token], outcome)
+
+    assert ReviewReason.ESCALATION_UNRESOLVED not in token.review_reasons
+    assert token.review_reasons == []
+    assert token.needs_review is False
+    assert token.text_confidence is Confidence.HIGH
+    assert applied.unsettled == 0
+    assert applied.sentence == "The second opinions changed nothing."
+
+
+def test_a_second_opinion_that_heard_nothing_at_a_disputed_word_still_flags_it():
+    from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers
+
+    token = _disputed_word()
+    outcome = EscalationOutcome(results=(_answered(token, ()),))
+
+    applied = apply_answers([token], outcome)
+
+    assert ReviewReason.ESCALATION_UNRESOLVED in token.review_reasons
+    assert applied.unsettled == 1
+
+
 def test_a_second_opinion_that_agrees_on_a_disputed_amount_is_not_why_it_is_held():
     """The services' own dispute keeps the amount for a person, and nothing else."""
     from vox_verbatim.transcription.escalation import EscalationOutcome, apply_answers

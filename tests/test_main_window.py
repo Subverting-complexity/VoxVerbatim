@@ -764,8 +764,13 @@ def fake_review_window(monkeypatch) -> list:
             vocabulary=None,
             app_smoothing_prompt="",
             write_exports=None,
+            transcript_store_for=None,
+            build_smoother=None,
+            smooth_runner=None,
         ):
             super().__init__(parent)
+            self.transcript_store_for = transcript_store_for
+            self.build_smoother = build_smoother
             self.app_smoothing_prompt = app_smoothing_prompt
             self.write_exports = write_exports
             self.record_statistics = record_statistics

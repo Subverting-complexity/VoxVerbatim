@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QStatusBar,
@@ -33,10 +34,11 @@ from vox_verbatim.session import SessionState, SessionStore
 from vox_verbatim.settings import (
     SETTINGS_FILE_NAME,
     EnhanceSettings,
+    ExportSettings,
     Settings,
     SettingsStore,
 )
-from vox_verbatim.transcription import grouping
+from vox_verbatim.transcription import folder_export, grouping, smoothing
 from vox_verbatim.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     CalibrationStore,
@@ -65,6 +67,7 @@ from vox_verbatim.transcription.vocabulary import (
 )
 from vox_verbatim.ui.accessibility import announce, describe
 from vox_verbatim.ui.enhance_dialog import EnhanceAudioDialog, summarise
+from vox_verbatim.ui.export_dialog import ExportDialog
 from vox_verbatim.ui.file_info_panel import FileInfoPanel
 from vox_verbatim.ui.file_table import AudioFileTableModel, AudioFileTableView
 from vox_verbatim.ui.folder_panel import FolderPanel
@@ -72,6 +75,15 @@ from vox_verbatim.ui.help_dialogs import KeyboardShortcutsDialog, show_about
 from vox_verbatim.ui.review_lists import flagged_in, speaker_doubts_in
 from vox_verbatim.ui.review_window import ReviewWindow
 from vox_verbatim.ui.settings_dialog import SettingsDialog
+from vox_verbatim.ui.smooth_commands import (
+    MAKE_AGAIN_KEY,
+    OPEN_KEY,
+    SmoothResult,
+    SmoothRunner,
+    busy_message,
+    open_smooth_transcript,
+    starting_message,
+)
 from vox_verbatim.ui.transcribe_dialog import TranscribeDialog
 from vox_verbatim.ui.player_panel import (
     STATUS_FINISHED,
@@ -164,6 +176,9 @@ class MainWindow(QMainWindow):
         self._player = AudioPlayer(self)
         self._scanner = FolderScanner(self)
         self._model = AudioFileTableModel(self)
+        # Makes the smooth transcript again on request, in the background.
+        self._smooth_runner = SmoothRunner(self)
+        self._smooth_runner.finished.connect(self._on_smooth_finished)
 
         self._media_load_timer = QTimer(self)
         self._media_load_timer.setSingleShot(True)
@@ -311,6 +326,24 @@ class MainWindow(QMainWindow):
             "&Review Transcript...",
             QKeySequence("Ctrl+R"),
             self.show_review,
+        )
+        self._export_action = self._add_action(
+            file_menu,
+            "Ex&port Transcripts...",
+            QKeySequence("Ctrl+Shift+E"),
+            self.show_export,
+        )
+        self._make_smooth_action = self._add_action(
+            file_menu,
+            "&Make Smooth Transcript Again",
+            QKeySequence(MAKE_AGAIN_KEY),
+            self.make_smooth_transcript_again,
+        )
+        self._open_smooth_action = self._add_action(
+            file_menu,
+            "&Open Smooth Transcript",
+            QKeySequence(OPEN_KEY),
+            self.open_smooth_transcript,
         )
         file_menu.addSeparator()
         # Named outright rather than as StandardKey.Preferences: Qt gives
@@ -848,6 +881,169 @@ class MainWindow(QMainWindow):
             # decision that has already been taken.
             self.open_project_review(land_on=review.path.name)
 
+    # -- Exporting transcripts ---------------------------------------------
+
+    def show_export(self) -> None:
+        """Export the chosen recordings' transcripts to a folder the person picks."""
+        files = self._chosen_files()
+        if not files:
+            self._set_status(
+                "There is nothing to export. Check the files you want, or highlight "
+                "one in the file list.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        dialog = ExportDialog(len(files), self._settings.export, self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        chosen = dialog.chosen_settings()
+        kinds = dialog.chosen_kinds()
+        dialog.deleteLater()
+        self._remember_export_settings(chosen)
+        if not accepted:
+            self._set_status("Export Transcripts was closed without exporting anything.")
+            return
+        folder = Path(chosen.folder)
+        plan = folder_export.plan_export(
+            [audio_file.path for audio_file in files], folder, kinds, self._transcript_store
+        )
+        replace_existing = True
+        existing = plan.existing()
+        if existing:
+            answer = self._ask_about_existing_exports(existing, folder)
+            if answer == "cancel":
+                self._set_status("The export was cancelled. Nothing was written.", alert=True)
+                return
+            replace_existing = answer == "replace"
+        result = folder_export.run_export(plan, self._transcript_store, replace_existing)
+        message = folder_export.summary_text(result)
+        self._set_status(message)
+        if self._show_export_summary(message):
+            self._open_with_windows(folder, "export folder")
+
+    def _remember_export_settings(self, export: ExportSettings) -> None:
+        """Keep what was chosen, so the dialog opens the same way next time."""
+        self._settings = replace(self._settings, export=export)
+        if not self._settings_store.save(self._settings):
+            _log.warning("The Export Transcripts settings could not be saved.")
+
+    def _ask_about_existing_exports(self, existing: list[Path], folder: Path) -> str:
+        """Ask once what to do with files already in the folder.
+
+        Answers "replace", "skip" or "cancel". A test replaces this.
+        """
+        count = len(existing)
+        names = [path.name for path in existing]
+        shown = "\n".join(names[:10])
+        if count > 10:
+            shown += f"\nand {count - 10} more."
+        one = count == 1
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Files Already Exist")
+        box.setText(
+            f"{count} {'file' if one else 'files'} with the same "
+            f"{'name' if one else 'names'} already {'exists' if one else 'exist'} "
+            f"in {folder}. Replace them, skip them, or cancel the export?"
+        )
+        box.setInformativeText(shown)
+        replace_button = box.addButton("&Replace All", QMessageBox.ButtonRole.YesRole)
+        skip_button = box.addButton("&Skip Them", QMessageBox.ButtonRole.NoRole)
+        cancel_button = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+        box.deleteLater()
+        if clicked is replace_button:
+            return "replace"
+        if clicked is skip_button:
+            return "skip"
+        return "cancel"
+
+    def _show_export_summary(self, message: str) -> bool:
+        """Show how the export went, and answer whether to open the folder.
+
+        A message box rather than the status bar alone, because it holds the
+        button that opens the folder, and a screen reader reads its text when
+        it appears. A test replaces this.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Export Finished")
+        box.setText(message)
+        open_button = box.addButton("&Open Folder", QMessageBox.ButtonRole.ActionRole)
+        close_button = box.addButton(QMessageBox.StandardButton.Close)
+        box.setDefaultButton(close_button)
+        box.setEscapeButton(close_button)
+        box.exec()
+        opened = box.clickedButton() is open_button
+        box.deleteLater()
+        return opened
+
+    # -- The smooth transcript ---------------------------------------------
+
+    def _highlighted_file(self) -> AudioFile | None:
+        return self._model.file_at(self._table.selected_row())
+
+    def make_smooth_transcript_again(self) -> None:
+        """Make the highlighted recording's smooth transcript again, in the background.
+
+        It is made from the transcript as it is saved now, so every correction
+        made in the review window is in it. The folder's own smoothing prompt
+        is used where it has one.
+        """
+        audio_file = self._highlighted_file()
+        if audio_file is None:
+            self._set_status(
+                "Highlight a recording in the file list first.", alert=True, urgent=True
+            )
+            return
+        if self._smooth_runner.is_running():
+            self._set_status(busy_message(), alert=True, urgent=True)
+            return
+        name = audio_file.path.name
+        store = self._transcript_store(audio_file.path)
+        transcript = store.load()
+        if transcript is None:
+            self._set_status(
+                f"{name} has no transcript yet, so there is nothing to smooth. "
+                "Transcribe it first.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        smoother = smoothing.smoother_for(self._settings.transcription, audio_file.path.parent)
+        self._smooth_runner.start(name, transcript, store, smoother, requester=self)
+        self._set_status(starting_message(name), alert=True)
+
+    def open_smooth_transcript(self) -> None:
+        """Open the highlighted recording's smooth transcript in the text editor."""
+        audio_file = self._highlighted_file()
+        if audio_file is None:
+            self._set_status(
+                "Highlight a recording in the file list first.", alert=True, urgent=True
+            )
+            return
+        opened, message = open_smooth_transcript(
+            audio_file.path.name, self._transcript_store(audio_file.path)
+        )
+        self._set_status(message, alert=True, urgent=not opened)
+
+    def _on_smooth_finished(self, result: SmoothResult, requester: object) -> None:
+        """Say how a run went, unless the review window that asked will say it.
+
+        A run the review window asked for is said here only when that window
+        has closed since, so the result is never lost and never said twice.
+        Closing the review window with its own close button hides it rather
+        than deleting it, so it is still held here; whether it is on screen
+        is what tells.
+        """
+        window = self._review_window
+        if requester is not self and requester is window and window.isVisible():
+            return
+        self._set_status(result.message, alert=True, urgent=not result.succeeded)
+
     def _previous_run_is_still_stopping(self) -> bool:
         """Whether a run closed in the background has not yet stopped."""
         dialog = self._stopping_dialog
@@ -1120,6 +1316,15 @@ class MainWindow(QMainWindow):
             vocabulary=user_terms_index(self._vocabulary_store.load()),
             app_smoothing_prompt=self._settings.transcription.smoothing.prompt,
             write_exports=reader.write_exports,
+            transcript_store_for=(
+                lambda name: self._transcript_store(recording_paths[name])
+                if name in recording_paths
+                else None
+            ),
+            build_smoother=(
+                lambda: smoothing.smoother_for(self._settings.transcription, folder)
+            ),
+            smooth_runner=self._smooth_runner,
         )
         # Given its parent after the window exists rather than before, so that
         # Qt destroys the player along with the window it belongs to. A player

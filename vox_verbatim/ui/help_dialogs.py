@@ -62,6 +62,11 @@ Files
   Ctrl+R              Review the whole folder, not just the highlighted
                       file. The same word is often said in several
                       recordings, so a review covers all of them at once.
+  Ctrl+Shift+E        Export the transcripts of the checked files, or the
+                      highlighted one, to a folder you choose.
+  Ctrl+Shift+M        Make the highlighted recording's smooth transcript
+                      again, with every correction made so far.
+  Ctrl+Shift+O        Open the highlighted recording's smooth transcript.
 
 In the Enhance Audio and Transcribe dialogs
   Tab                 Move between the settings. The panel at the bottom
@@ -97,6 +102,9 @@ In the review window
   Ctrl+L              Process the low confidence words of the whole folder.
   Ctrl+G              Group the words again, using the minimum confidence
                       and the grouping tolerance as they now stand.
+  Ctrl+Shift+M        Make the smooth transcript of the selected
+                      occurrence's recording again, with your corrections.
+  Ctrl+Shift+O        Open the smooth transcript of that recording.
   F6 and Shift+F6     Move to the next and previous panel.
   Ctrl+Shift+Left     Give the lists more of the window.
   Ctrl+Shift+Right    Give the details more of the window.

@@ -85,7 +85,19 @@ _log = logging.getLogger(__name__)
 PROJECT_FILE_NAME = f"{DISTRIBUTION_NAME}-project.json"
 
 #: Bumped only if the on-disk shape changes in a way that needs migrating.
-PROJECT_FORMAT_VERSION = 1
+#:
+#: Version 2 changed no shape. It marks the files written after the default
+#: wait before automatic playback went from two seconds to none, so that a
+#: file still holding the old default can be told apart from one where the
+#: person chose two seconds themselves; see :meth:`ProjectState.from_dict`.
+PROJECT_FORMAT_VERSION = 2
+
+#: The last format version whose files were written under the old default
+#: wait of two seconds.
+_LAST_VERSION_WITH_OLD_DELAY_DEFAULT = 1
+
+#: The default wait before automatic playback, up to format version 1.
+_OLD_DEFAULT_DELAY_SECONDS = 2
 
 #: Below this strength a word is weak enough to want a person. The figure is
 #: the same as ``confidence.REVIEW_SUGGESTED_THRESHOLD``, which is where it
@@ -103,16 +115,17 @@ DEFAULT_GROUPING_TOLERANCE = 0.05
 #: How long the Review window waits before playing the occurrence the person
 #: has just moved to, in whole seconds.
 #:
-#: The wait exists so that holding the Down arrow through eight occurrences
-#: does not queue eight clips, but the number that matters is not that one. A
-#: screen reader is reading the row out while the clock runs, and audio that
-#: starts before it has finished talks over the one sentence saying which file
-#: and which moment is about to be played. How long that sentence takes is a
-#: property of the listener rather than of the application: a practised NVDA
-#: user runs their speech at several times the speed somebody new to it can
-#: follow, so no fixed figure can be right for both. Two seconds suits an
-#: ordinary speech rate and the setting is there for everybody else.
-DEFAULT_AUTO_PLAY_DELAY_SECONDS = 2
+#: None, by default. A screen reader is reading the row out as the person
+#: arrives, and audio that starts before it has finished talks over it. How
+#: long that takes is a property of the listener rather than of the
+#: application, so a person who needs a wait sets one. It used to be two
+#: seconds for everybody, which made reviewing hundreds of words slow for
+#: every person who did not need it.
+#:
+#: No wait does not mean holding the Down arrow queues a clip for every row.
+#: The window still waits a moment of its own for the arrow to stop; see
+#: ``SETTLE_MILLISECONDS`` in the review window.
+DEFAULT_AUTO_PLAY_DELAY_SECONDS = 0
 
 #: The longest wait the setting will accept. Half a minute is far more than
 #: anybody needs and is chosen only to be an obvious mistake rather than a
@@ -1020,6 +1033,16 @@ class ProjectState:
             )
 
         state = cls(settings=ProjectSettings.from_dict(data.get("settings")))
+        if (
+            version <= _LAST_VERSION_WITH_OLD_DELAY_DEFAULT
+            and state.settings.auto_play_delay_seconds == _OLD_DEFAULT_DELAY_SECONDS
+        ):
+            # Two seconds in a file this old is the old default rather than a
+            # choice, as far as can be told, and keeping it would leave every
+            # folder reviewed before the change as slow as it was. Any other
+            # value was chosen by the person and stays. The file is written
+            # back at the current version, so this happens only once.
+            state.settings.auto_play_delay_seconds = DEFAULT_AUTO_PLAY_DELAY_SECONDS
         state.occurrences = _unique_by_id(
             _each(data.get("occurrences"), Occurrence.from_dict), "occurrence"
         )

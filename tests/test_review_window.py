@@ -1483,6 +1483,182 @@ def test_a_converted_copy_that_is_still_where_it_was_saved_is_played(qapp, tmp_p
         window.close()
 
 
+def test_the_recording_is_opened_before_anybody_asks_to_hear_it(qapp, tmp_path):
+    """Opening a file takes Qt a moment, which every first clip used to wait for."""
+    player = FakePlayer()
+    copy = tmp_path / "work" / "board meeting-canonical.wav"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(b"copy")
+    window = _moved_folder_window(tmp_path, copy, player)
+    try:
+        assert player.loaded == str(copy)
+        assert player.plays == 0
+        player.becomes_ready()
+
+        assert window.play_span() is True
+
+        # Played at once, with no second load and no wait for the file.
+        assert player.loads == [str(copy)]
+        assert player.seeks == [29_850]
+        assert player.plays == 1
+        assert window._status_label.text().startswith("Playing")
+    finally:
+        window.close()
+
+
+def test_a_recording_that_is_not_there_is_not_opened_until_it_is_asked_for(qapp, tmp_path):
+    """Opening a missing file early would raise an error nobody asked to hear."""
+    player = FakePlayer()
+    folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        assert player.loads == []
+    finally:
+        window.close()
+
+
+def _two_real_recordings(tmp_path) -> tuple[Folder, dict[str, Path]]:
+    """The two-file folder, with an audio file that exists behind each recording."""
+    folder = two_file_folder()
+    files = {}
+    for name, transcript in folder.transcripts.items():
+        audio = tmp_path / "audio" / f"{name}.wav"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"audio")
+        transcript.canonical_audio.path = str(audio)
+        files[name] = audio
+    return folder, files
+
+
+def test_moving_to_a_word_in_another_recording_opens_that_recording_at_once(qapp, tmp_path):
+    """The file is ready before the clip is due, rather than loaded when it is."""
+    player = FakePlayer()
+    folder, files = _two_real_recordings(tmp_path)
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        select_word(window, "Bosch")
+        first = window.current_occurrence().recording_name
+        for _ in range(3):
+            if window.current_occurrence().recording_name != first:
+                break
+            window.go_to_next_item()
+        other = window.current_occurrence().recording_name
+        assert other != first
+
+        assert player.loaded == str(files[other])
+        assert player.plays == 0
+        loads = len(player.loads)
+        player.becomes_ready()
+
+        assert window.play_span() is True
+        assert len(player.loads) == loads
+        assert player.plays == 1
+    finally:
+        window.close()
+
+
+def test_a_recording_that_fails_to_open_early_is_not_announced_or_opened_again(
+    qapp, tmp_path
+):
+    """Only moving to a word asks for nothing, so its failure is not said yet."""
+    player = FakePlayer()
+    folder, files = _two_real_recordings(tmp_path)
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        select_word(window, "Bosch")
+        failing = Path(player.loaded)
+        status = window._status_label.text()
+
+        player.errorOccurred.emit(f"{failing.name} could not be played.")
+        assert window._status_label.text() == status
+
+        # Moving about, and back onto the same recording, does not open the
+        # failed file again.
+        loads = player.loads.count(str(failing))
+        start = window.current_occurrence().id
+        for _ in range(3):
+            window.go_to_next_item()
+        while window.current_occurrence().id != start:
+            before = window.current_occurrence().id
+            window.go_to_previous_item()
+            assert window.current_occurrence().id != before
+        assert window._audio_path() == failing
+        assert player.loads.count(str(failing)) == loads
+
+        # Asking for the audio opens it again, and this time a failure is said.
+        window.play_span()
+        assert player.loads.count(str(failing)) == loads + 1
+        player.errorOccurred.emit(f"{failing.name} could not be played.")
+        assert window._status_label.text() == f"{failing.name} could not be played."
+    finally:
+        window.close()
+
+
+def test_an_error_while_a_clip_plays_is_still_said_out_loud(qapp, tmp_path):
+    """Only a failure while opening early is quiet; one during playback is not."""
+    player = FakePlayer()
+    folder, _files = _two_real_recordings(tmp_path)
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        select_word(window, "Bosch")
+        player.becomes_ready()
+        window.play_span()
+
+        player.errorOccurred.emit("The audio device was disconnected.")
+        assert window._status_label.text() == "The audio device was disconnected."
+    finally:
+        window.close()
+
+
+def test_a_recording_that_opens_when_asked_is_opened_early_again(qapp, tmp_path):
+    """One failure is not held against a file that has since opened."""
+    player = FakePlayer()
+    folder, _files = _two_real_recordings(tmp_path)
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        select_word(window, "Bosch")
+        failing = Path(player.loaded)
+        player.errorOccurred.emit(f"{failing.name} could not be played.")
+        window.play_span()
+        player.becomes_ready()
+
+        start = window.current_occurrence().id
+        for _ in range(3):
+            window.go_to_next_item()
+        assert window._audio_path() != failing
+        loads = player.loads.count(str(failing))
+        while window.current_occurrence().id != start:
+            before = window.current_occurrence().id
+            window.go_to_previous_item()
+            assert window.current_occurrence().id != before
+
+        assert player.loads.count(str(failing)) == loads + 1
+    finally:
+        window.close()
+
+
+def test_the_clip_is_stopped_on_time_rather_than_at_the_next_position_report(qapp, tmp_path):
+    """Qt reports the position only now and then, so the clip used to run on."""
+    player = FakePlayer()
+    folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})
+    window = open_window(tmp_path, folder, player, process=True)
+    try:
+        window.play_span()
+        player.becomes_ready()
+
+        assert window._stop_timer.isActive()
+        assert window._stop_timer.interval() == 30_550 - 29_850
+
+        window._stop_timer.timeout.emit()
+        assert player.pauses == 1
+
+        # The position report that arrives afterwards does not pause again.
+        player.positionChanged.emit(30_600)
+        assert player.pauses == 1
+    finally:
+        window.close()
+
+
 def test_playback_stops_at_the_end_of_the_region_rather_than_running_on(qapp, tmp_path):
     player = FakePlayer()
     folder = Folder({RECORDING: make_transcript([weak_token("word", 30.0)])})
@@ -1689,6 +1865,8 @@ def test_holding_the_arrow_down_does_not_queue_a_clip_for_every_occurrence(qapp,
         window.go_to_next_item()
 
         # The timer is still waiting, and nothing has been asked of the player.
+        # This holds with no wait set, which is the default.
+        assert window._state.settings.auto_play_delay_seconds == 0
         assert window._play_timer.isActive()
         assert player.loads == []
 
@@ -3304,7 +3482,9 @@ def test_the_wait_before_the_audio_starts_is_the_persons_own(qapp, tmp_path):
     store = ProjectStore(tmp_path)
     window = open_window(tmp_path, two_file_folder(), store=store, process=True)
     try:
-        assert window._delay_spin.value() == 2
+        # No wait by default, so a person reviewing hundreds of words is not
+        # held up on every one; somebody whose reader needs time sets it.
+        assert window._delay_spin.value() == 0
         assert window._delay_spin.suffix() == " seconds"
 
         window._delay_spin.setValue(5)
@@ -3334,13 +3514,18 @@ def test_a_wait_of_nothing_is_a_real_choice_and_says_so(qapp, tmp_path):
     """Somebody working by eye has no reading for the clip to talk over."""
     window = open_window(tmp_path, two_file_folder(), process=True)
     try:
+        window._delay_spin.setValue(3)
+        settle(window._delay_spin)
         window._delay_spin.setValue(0)
         settle(window._delay_spin)
 
         assert window._status_label.text() == review_window_module.NO_AUTO_PLAY_DELAY
         select_word(window, "Bosch")
         window.go_to_next_item()
-        assert window._play_timer.interval() == 0
+        # Not exactly nothing: a moment short enough to sound instant, which
+        # lets a held arrow key move on before any clip starts.
+        assert window._play_timer.interval() == review_window_module.SETTLE_MILLISECONDS
+        assert review_window_module.SETTLE_MILLISECONDS < 200
     finally:
         window.close()
 

@@ -230,6 +230,14 @@ CHOICE_BUTTON_COUNT = 8
 #: arrive.
 NO_AUTO_PLAY_DELAY = "The audio starts as soon as you arrive."
 
+#: The shortest wait before automatic playback, in milliseconds, used when the
+#: person has set no wait at all. Holding the Down arrow moves the highlight
+#: about thirty times a second, and with a wait of exactly nothing each row
+#: would start a clip for the next one to cut off, which sounds like a stutter
+#: rather than a word. Each move restarts this wait, so only the row the arrow
+#: stops on plays. It is short enough that a single move still sounds instant.
+SETTLE_MILLISECONDS = 120
+
 NOT_ATTRIBUTED = "Not attributed to a service"
 NOT_REPORTED = "Not reported"
 
@@ -1037,14 +1045,14 @@ _NOTES: dict[str, ControlNote] = {
             """
             Moving the highlight onto an occurrence plays it after the wait set below.
             The focus stays where it is, so you are never taken out of the list you are
-            working in, and moving again before the wait is up cancels the first clip
-            rather than queueing it, so holding the Down arrow does not fill the room
-            with eight overlapping words.
+            working in, and moving again before the clip starts cancels it rather than
+            queueing it, so holding the Down arrow plays only the occurrence you stop
+            on.
 
-            The recording changes as you move between occurrences, and a file takes a
-            moment to open, so the first clip in a new file starts a little after the
-            others. Switch this off if you would rather ask for the audio yourself with
-            F5; the choice is remembered with the rest of this folder's review.
+            The recording is opened as soon as you select an occurrence in it, so the
+            audio is ready when it is wanted. Switch this off if you would rather ask
+            for the audio yourself with F5; the choice is remembered with the rest of
+            this folder's review.
             """
         ),
     ),
@@ -1058,14 +1066,13 @@ _NOTES: dict[str, ControlNote] = {
             and if the audio starts before the reading has finished you hear two voices
             at once and learn nothing from either. This is how long the window waits.
 
-            Set it a little longer than it takes your reader to get through a row. Two
-            seconds suits an ordinary speaking rate; a fast rate wants less and a slow
-            one more. Nought means the audio starts the instant you arrive, which is
-            what you want if no screen reader is running.
+            It starts at nought, which means the audio starts the instant you arrive.
+            If your screen reader is talking over the audio, set it a little longer than
+            it takes your reader to get through a row. Two seconds suits an ordinary
+            speaking rate; a fast rate wants less and a slow one more.
 
-            The wait is also what stops eight clips queueing when you hold the Down
-            arrow, because each move starts it again from the beginning. Making it
-            longer therefore makes moving through a long list quieter as well.
+            Each move starts the wait again from the beginning, so holding the Down
+            arrow does not queue clips even at nought.
             """
         ),
     ),
@@ -1365,8 +1372,19 @@ class ReviewWindow(QMainWindow):
         self._loaded_path: Path | None = None
         self._media_ready = False
         self._pending_play: tuple[int, int, str] | None = None
+        # The recordings that failed to open when they were opened early,
+        # before anybody asked to hear them. They are not opened early again
+        # until one of them opens when asked for; see _on_player_error.
+        self._failed_paths: set[Path] = set()
         self._play_timer = QTimer(self)
         self._play_timer.setSingleShot(True)
+        # Ends a clip at the word's end time. Qt reports the position only
+        # every so often, so waiting for a position past the end stopped the
+        # clip late, with part of the next word in it. The timer stops it on
+        # time, and the position check stays as a second way to stop it.
+        self._stop_timer = QTimer(self)
+        self._stop_timer.setSingleShot(True)
+        self._stop_timer.setTimerType(Qt.TimerType.PreciseTimer)
 
         # The words the pipeline itself flagged, which are the second block of
         # the first list. The queue model is not shown anywhere; it is used
@@ -2578,6 +2596,7 @@ class ReviewWindow(QMainWindow):
         self._previous_button.clicked.connect(self.go_to_previous_item)
 
         self._play_timer.timeout.connect(self._play_after_waiting)
+        self._stop_timer.timeout.connect(self._stop_clip)
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.errorOccurred.connect(self._on_player_error)
@@ -2647,6 +2666,7 @@ class ReviewWindow(QMainWindow):
         cannot get out of would be a worse fault than the one being reported.
         """
         self._play_timer.stop()
+        self._stop_timer.stop()
         self._pending_play = None
         self._player.stop()
         self._player.load(None)
@@ -3950,6 +3970,7 @@ class ReviewWindow(QMainWindow):
     def _show_occurrence(self, occurrence: Occurrence | None) -> None:
         """Fill in every part of the detail panel for one occurrence, or clear it."""
         self._selected_occurrence_id = occurrence.id if occurrence is not None else None
+        self._prepare_audio(occurrence)
         transcript = (
             self._transcript(occurrence.recording_name) if occurrence is not None else None
         )
@@ -4448,7 +4469,9 @@ class ReviewWindow(QMainWindow):
             return
         if self.span_to_play() is None:
             return
-        self._play_timer.start(self._state.settings.auto_play_delay_seconds * 1000)
+        self._play_timer.start(
+            max(SETTLE_MILLISECONDS, self._state.settings.auto_play_delay_seconds * 1000)
+        )
 
     def _play_after_waiting(self) -> None:
         self.play_span(automatic=True)
@@ -4466,8 +4489,9 @@ class ReviewWindow(QMainWindow):
         after ``load`` is dropped on the floor without a word: the player has
         no media to seek in yet. What to play is therefore remembered and
         carried out when the media reports its length, which is Qt's way of
-        saying it is ready. The current window never met this because it
-        opened one file and never changed it.
+        saying it is ready. That wait is rare, because the recording is
+        opened as soon as an occurrence in it is selected; see
+        :meth:`_prepare_audio`.
         """
         path = self._audio_path()
         if path is None:
@@ -4493,20 +4517,61 @@ class ReviewWindow(QMainWindow):
         description = f"{_seconds_phrase(span.duration)} from {spoken_duration(span.start)}"
 
         if path != self._loaded_path:
-            self._loaded_path = path
-            self._media_ready = False
-            self._pending_play = (start, self._stop_at_ms, description)
-            self._player.load(path)
-            self._set_status(f"Loading {path.name}.", alert=not automatic)
-            return True
+            self._open_recording(path)
         if not self._media_ready:
             self._pending_play = (start, self._stop_at_ms, description)
+            self._set_status(f"Loading {path.name}.", alert=not automatic)
             return True
         self._pending_play = None
-        self._player.seek_to(start)
-        self._player.play()
+        self._start_clip(start, self._stop_at_ms)
         self._set_status(f"Playing {description}.", alert=not automatic)
         return True
+
+    def _prepare_audio(self, occurrence: Occurrence | None) -> None:
+        """Open an occurrence's recording before anybody asks to hear it.
+
+        Opening a file takes Qt a noticeable moment, and the window used to
+        open it only when asked to play, so every move to a word in another
+        recording, and the first word after the window opened, waited for it.
+        Opening it as the word is selected means the file is ready by the time
+        F5 is pressed or the automatic clip is due. Nothing is said, because
+        nothing has been asked for, and a file already open is left alone so
+        that a clip playing in it is not cut off.
+        """
+        if occurrence is None:
+            return
+        path = self._audio_path_for(occurrence.recording_name)
+        if (
+            path is None
+            or path == self._loaded_path
+            or path in self._failed_paths
+            or not path.is_file()
+        ):
+            return
+        self._pending_play = None
+        self._open_recording(path)
+
+    def _open_recording(self, path: Path) -> None:
+        """Hand the player a new file, which it opens in the background."""
+        self._stop_timer.stop()
+        self._loaded_path = path
+        self._media_ready = False
+        self._player.load(path)
+
+    def _start_clip(self, start: int, stop_at: int) -> None:
+        """Play from ``start`` and stop at ``stop_at``, both in milliseconds."""
+        self._stop_at_ms = stop_at
+        self._player.seek_to(start)
+        self._player.play()
+        self._stop_timer.start(max(0, stop_at - start))
+
+    def _stop_clip(self) -> None:
+        """End the clip at its end time, whichever of the two ways gets there first."""
+        self._stop_timer.stop()
+        if self._stop_at_ms is None:
+            return
+        self._stop_at_ms = None
+        self._player.pause()
 
     def _on_duration_changed(self, milliseconds: int) -> None:
         """Start what was waiting, now that the file is open.
@@ -4518,14 +4583,14 @@ class ReviewWindow(QMainWindow):
         if milliseconds <= 0:
             return
         self._media_ready = True
+        if self._loaded_path is not None:
+            self._failed_paths.discard(self._loaded_path)
         pending = self._pending_play
         if pending is None:
             return
         self._pending_play = None
         start, stop_at, description = pending
-        self._stop_at_ms = stop_at
-        self._player.seek_to(start)
-        self._player.play()
+        self._start_clip(start, stop_at)
         # Not announced. Whoever asked for this has already been told the file
         # was being loaded, and saying so again when it arrives would talk
         # over the audio it is announcing.
@@ -4537,10 +4602,24 @@ class ReviewWindow(QMainWindow):
         The loaded path is forgotten as well as the pending clip, so that
         asking again reloads the file instead of waiting forever for a
         readiness that will not now arrive.
+
+        A file that fails while it is being opened early, with nothing asked
+        of it, fails in silence. The person only moved to a word, and an
+        urgent alert on every row of a held arrow key would talk over the
+        screen reader for a file they have not asked to hear. The path is
+        remembered so that it is not opened early again, and the error is
+        said when they ask for the audio and the file fails once more.
         """
+        opened_early = not self._media_ready and self._pending_play is None
+        failed = self._loaded_path
         self._pending_play = None
+        self._stop_timer.stop()
         self._media_ready = False
         self._loaded_path = None
+        if opened_early:
+            if failed is not None:
+                self._failed_paths.add(failed)
+            return
         self._set_status(message, alert=True, urgent=True)
 
     def _on_position_changed(self, milliseconds: int) -> None:
@@ -4548,8 +4627,7 @@ class ReviewWindow(QMainWindow):
         if self._stop_at_ms is None:
             return
         if milliseconds >= self._stop_at_ms:
-            self._stop_at_ms = None
-            self._player.pause()
+            self._stop_clip()
 
     # -- Corrections -------------------------------------------------------
 

@@ -20,7 +20,13 @@ reconciliation again: the answer covers a few seconds, and a service that
 heard a few seconds is allowed to choose between the readings the others
 offered, never to rewrite words nobody asked about.
 
-Timing is corrected last, after the text is final. Measuring where words
+The smooth transcript is made after everything else, once the transcript
+and transcript.txt are saved. It is an edited copy for easy reading, so a
+language model that is slow, refuses or cannot be reached costs that copy
+and nothing more.
+
+Timing is corrected last among the stages that change the words, after the
+text is final. Measuring where words
 fall in the audio and then changing the words would leave the measurements
 describing something that is no longer there. That is the whole reason
 section 20 puts forced alignment where it does.
@@ -50,6 +56,7 @@ from vox_verbatim.transcription import (
     language as language_rules,
     passes,
     reconcile as reconcile_rules,
+    smoothing,
     timing as timing_rules,
 )
 from vox_verbatim.transcription.alignment import build_aligned_table, choose_backbone
@@ -129,13 +136,14 @@ CancelCheck = Callable[[], bool]
 #: would leave the bar apparently stuck for most of the run and then sprint.
 _STAGE_SHARES: tuple[tuple[str, float], ...] = (
     ("preparing", 0.04),
-    ("services", 0.62),
+    ("services", 0.58),
     ("aligning", 0.06),
     ("reconciling", 0.06),
     ("escalating", 0.12),
     ("adjudicating", 0.06),
     ("timing", 0.03),
     ("saving", 0.01),
+    ("smoothing", 0.04),
 )
 
 
@@ -165,6 +173,15 @@ def transcribe_recording(
         effective_settings=settings.for_provenance(),
     )
 
+    def finish(stopped: bool) -> Transcript:
+        return _finish(
+            transcript,
+            store,
+            started,
+            stopped=stopped,
+            smooth=lambda: _smooth(transcript, settings, store, reporter),
+        )
+
     # -- Prepare the one file and the one clock everything measures against
     reporter.stage("preparing", 0.0, f"Preparing {recording.name}.")
     canonical = canonical_audio.prepare_canonical_audio(recording, store.folder)
@@ -172,7 +189,7 @@ def transcribe_recording(
     reporter.stage("preparing", 1.0, "The recording is ready.")
 
     if _stopped(cancelled):
-        return _finish(transcript, store, started, stopped=True)
+        return finish(stopped=True)
 
     # -- Work out what to tell the services about this recording
     terms = folder_terms_first(
@@ -209,10 +226,10 @@ def transcribe_recording(
             "No transcription service produced a result, so there is no transcript. "
             "Check the API keys in Settings and that this computer is online."
         )
-        return _finish(transcript, store, started, stopped=outcome.cancelled)
+        return finish(stopped=outcome.cancelled)
 
     if _stopped(cancelled):
-        return _finish(transcript, store, started, stopped=True)
+        return finish(stopped=True)
 
     # -- Put every service's words beside each other on one timeline
     reporter.stage("aligning", 0.0, "Comparing what each service heard.")
@@ -223,7 +240,7 @@ def transcribe_recording(
             "No service returned any words, so there is nothing to build a transcript "
             "from. The raw answers are kept in the transcript folder."
         )
-        return _finish(transcript, store, started, stopped=False)
+        return finish(stopped=False)
     if backbone_provider is not Provider.ELEVENLABS and not (
         timed_by_fallback and backbone_provider is Provider.ASSEMBLYAI
     ):
@@ -273,7 +290,7 @@ def transcribe_recording(
             f"reconciled: {error}. Each service's words are kept in the raw-responses "
             "folder, and in the transcript file when this run saves one."
         )
-        return _finish(transcript, store, started, stopped=False)
+        return finish(stopped=False)
     reporter.stage("reconciling", 1.0, _reconciled_sentence(tokens))
 
     # From here on the transcript has words. They go onto it now rather
@@ -322,7 +339,7 @@ def transcribe_recording(
     )
 
     transcript.speakers = _speakers_in(tokens, configuration)
-    return _finish(transcript, store, started, stopped=_stopped(cancelled))
+    return finish(stopped=_stopped(cancelled))
 
 
 def _gave_word_times(result: ProviderResult | None) -> bool:
@@ -1027,6 +1044,7 @@ def _finish(
     store: TranscriptStore,
     started: float,
     stopped: bool,
+    smooth: Callable[[], bool] | None = None,
 ) -> Transcript:
     """Save the transcript and its exports, and say how it went.
 
@@ -1034,6 +1052,12 @@ def _finish(
     may hold them. That earlier file is where the user's review corrections
     live, and a run that failed or was stopped has nothing to put in its
     place.
+
+    ``smooth`` makes the smooth transcript. It runs after the transcript and
+    transcript.txt are saved, so a slow or failed language model never puts
+    them at risk, and before the review report is written, so the report can
+    say what smoothing did and cost. It returns whether it changed the
+    transcript, which is then saved again.
     """
     transcript.completed_at = _now()
     if stopped:
@@ -1052,13 +1076,26 @@ def _finish(
             transcript.recording_name,
         )
         return transcript
-    if not store.save(transcript):
+    saved = store.save(transcript)
+    if not saved:
         transcript.warnings.append(
             f"The transcript could not be saved to {store.transcript_path}. If another "
             "program was holding the old file open, a copy of the new one was kept at "
             f"{store.unsaved_transcript_path}; close that program and move it into place."
         )
-    _write_exports(transcript, store)
+    _write_exports(transcript, store, (exports.TEXT_EXPORT_NAME,))
+    if smooth is not None:
+        try:
+            changed = smooth()
+        except Exception as error:  # noqa: BLE001 - the smooth copy must not cost the transcript
+            _log.exception("Making the smooth transcript failed.")
+            _forget_smooth_transcript(transcript, store)
+            transcript.warnings.append(f"{smoothing.NOT_MADE}. {error}")
+            changed = True
+        if changed and saved:
+            # Its requests and any warning belong in the saved record too.
+            store.save(transcript)
+    _write_exports(transcript, store, (exports.REPORT_EXPORT_NAME,))
     _log.info(
         "Transcribed %s in %.1f seconds: %d words, %d needing review.",
         transcript.recording_name,
@@ -1084,16 +1121,88 @@ def _keeps_earlier_transcript(transcript: Transcript, store: TranscriptStore) ->
     return earlier is None or bool(earlier.tokens)
 
 
-def _write_exports(transcript: Transcript, store: TranscriptStore) -> None:
-    """Write the two readable documents, without letting either stop the run.
+def _write_exports(
+    transcript: Transcript, store: TranscriptStore, names: Sequence[str]
+) -> None:
+    """Write the readable documents named, without letting one stop the run.
 
     An export that fails has cost the user a convenience, not their
     transcript, which is safely saved by this point. So it is reported and
     stepped over rather than raised. The writing itself is shared with the
     review window; see :func:`~vox_verbatim.transcription.exports.write_exports`.
     """
-    for name in exports.write_exports(transcript, store):
+    for name in exports.write_exports(transcript, store, names=names):
         transcript.warnings.append(f"The {name} export could not be written.")
+
+
+def _build_smoother(settings: TranscriptionSettings, folder: Path) -> smoothing.Smoother:
+    """The smoothing engine, set up from Settings for the recording's folder.
+
+    It goes through :func:`smoothing.smoother_for`, so a folder's own style
+    prompt is used where one is saved. It uses the OpenAI API key entered for
+    adjudication, and the same timeout as every other request. A test
+    replaces this to hand in a fake.
+    """
+    return smoothing.smoother_for(settings, folder)
+
+
+def _smooth(
+    transcript: Transcript,
+    settings: TranscriptionSettings,
+    store: TranscriptStore,
+    reporter: "_Reporter",
+) -> bool:
+    """Make the smooth transcript, if Settings ask for it.
+
+    Returns whether the transcript changed: the requests made, and any
+    warning about the result.
+
+    An older ``transcript-smooth.txt`` is removed whenever no new one is
+    written. It was made from an earlier transcript, and a smooth copy that
+    does not match the transcript beside it would mislead whoever reads it.
+    """
+    if (
+        not settings.smoothing.run_after_transcription
+        or transcript.stopped
+        or not transcript.tokens
+    ):
+        return _forget_smooth_transcript(transcript, store)
+
+    reporter.stage("smoothing", 0.0, "Making the smooth transcript with the language model.")
+    outcome = smoothing.write_smooth_transcript(
+        transcript, store, _build_smoother(settings, store.recording_path.parent)
+    )
+    transcript.requests.extend(outcome.requests)
+    if outcome.error:
+        _forget_smooth_transcript(transcript, store)
+        transcript.warnings.append(outcome.error)
+        reporter.stage("smoothing", 1.0, outcome.error)
+        return True
+    if outcome.warnings:
+        parts = len(outcome.warnings)
+        transcript.warnings.append(
+            "The smooth transcript was made, but the language model's edit of "
+            f"{_count(parts, 'part')} did not pass its check. A warning line in "
+            f"{smoothing.SMOOTH_EXPORT_NAME} marks each one, to compare with "
+            f"{exports.TEXT_EXPORT_NAME}."
+        )
+    reporter.stage("smoothing", 1.0, "The smooth transcript is ready.")
+    return True
+
+
+def _forget_smooth_transcript(transcript: Transcript, store: TranscriptStore) -> bool:
+    """Remove an older smooth transcript. Returns whether a warning was added."""
+    if store.remove_export(smoothing.SMOOTH_EXPORT_NAME):
+        return False
+    transcript.warnings.append(
+        f"An older {smoothing.SMOOTH_EXPORT_NAME} could not be removed, and it does not "
+        "match this transcript. Close any program that has it open, and delete it."
+    )
+    return True
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
 def _speakers_in(

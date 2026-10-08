@@ -97,6 +97,10 @@ class CostEstimate:
     adjudication_requests: int
     adjudication_rate_per_request: float
     currency: str
+    smoothing_requests: int = 0
+    """About how many requests make the smooth transcripts, or 0 when they
+    are not made."""
+    smoothing_rate_per_request: float = 0.0
 
     @property
     def summary(self) -> str:
@@ -112,8 +116,12 @@ class CostEstimate:
         return self.adjudication_requests * self.adjudication_rate_per_request
 
     @property
+    def smoothing_total(self) -> float:
+        return self.smoothing_requests * self.smoothing_rate_per_request
+
+    @property
     def total(self) -> float:
-        return self.transcription_total + self.adjudication_total
+        return self.transcription_total + self.adjudication_total + self.smoothing_total
 
     @property
     def unpriced_providers(self) -> tuple[Provider, ...]:
@@ -140,6 +148,8 @@ def estimate_cost(
     adjudication_rate_per_request: float | None = None,
     currency: str = DEFAULT_CURRENCY,
     vocabulary_terms_sent: bool = False,
+    smoothing_requests: int = 0,
+    smoothing_rate_per_request: float | None = None,
 ) -> CostEstimate:
     """Estimate what transcribing one recording with these services will cost.
 
@@ -160,11 +170,17 @@ def estimate_cost(
     request that carries them, and its line is raised by that much so that
     the estimate matches the invoice. Left false, which is the default, the
     estimate is the one for a run with no vocabulary.
+
+    ``smoothing_requests`` is how many requests the caller expects the smooth
+    transcripts to take, or zero when none will be made. Unlike adjudication
+    it can be worked out before the run, from the length of the audio.
     """
     minutes = max(0.0, duration_seconds) / 60.0
     table = rates_mapping(rates)
     if adjudication_rate_per_request is None:
         adjudication_rate_per_request = adjudication_rate(rates)
+    if smoothing_rate_per_request is None:
+        smoothing_rate_per_request = smoothing_rate(rates)
     costs = tuple(
         _provider_cost(provider, minutes, table.get(provider), vocabulary_terms_sent)
         for provider in providers
@@ -175,6 +191,8 @@ def estimate_cost(
         adjudication_requests=max(0, adjudication_requests),
         adjudication_rate_per_request=max(0.0, adjudication_rate_per_request),
         currency=currency,
+        smoothing_requests=max(0, smoothing_requests),
+        smoothing_rate_per_request=max(0.0, smoothing_rate_per_request),
     )
 
 
@@ -243,6 +261,18 @@ def describe_estimate(estimate: CostEstimate) -> str:
             f"A further {describe_money(estimate.adjudication_total, estimate.currency)} is "
             f"allowed for {estimate.adjudication_requests} adjudication requests, giving "
             f"about {describe_money(estimate.total, estimate.currency)} in all."
+        )
+
+    if estimate.smoothing_requests:
+        requests = (
+            "1 request" if estimate.smoothing_requests == 1
+            else f"about {estimate.smoothing_requests} requests"
+        )
+        sentences.append(
+            f"Making the smooth transcript takes {requests} to the language model, "
+            f"estimated at {describe_money(estimate.smoothing_total, estimate.currency)}, "
+            f"which is in the total of about "
+            f"{describe_money(estimate.total, estimate.currency)}."
         )
 
     sentences.append(
@@ -361,6 +391,27 @@ def adjudication_rate(source: Any | None) -> float:
         if isinstance(value, (int, float)):
             return float(value)
     return 0.0
+
+
+def smoothing_rate(source: Any | None) -> float:
+    """What one smoothing request costs, according to these settings.
+
+    Zero where the settings do not say, as for adjudication.
+    """
+    if source is None:
+        source = _settings_cost_defaults()
+    if source is None:
+        return 0.0
+    if isinstance(source, Mapping):
+        return float(source.get(_SMOOTHING_ATTRIBUTE_NAME) or 0.0)
+    value = getattr(source, _SMOOTHING_ATTRIBUTE_NAME, None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return 0.0
+
+
+#: Where a settings object keeps the price of one smoothing request.
+_SMOOTHING_ATTRIBUTE_NAME = "smoothing_per_request"
 
 
 def _from_mapping(source: Mapping[Any, Any]) -> dict[Provider, float]:

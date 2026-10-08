@@ -956,6 +956,30 @@ It matters most on difficult recordings, where the number of requests is large.
 Multiply it by the ceiling on escalations to see the worst case a single
 recording can reach.""",
     ),
+    SettingNote(
+        key="cost.smoothing_per_request",
+        category=COSTS,
+        title="Smoothing cost per request",
+        summary=(
+            "What one request that edits about 2,000 words into the smooth transcript "
+            "is expected to cost. Used for the estimate, never for billing."
+        ),
+        note="""\
+This is what you expect one smoothing request to cost. The smooth transcript is
+made by sending the finished transcript to the language model in parts of about
+2,000 words, one request for each part.
+
+Unlike adjudication, the number of requests can be worked out before the run.
+People say about 150 words a minute, so the estimate counts one request for
+about every 13 minutes of audio. A part whose edit fails its check is sent once
+more, which the estimate does not count.
+
+The price follows the model and the reasoning effort on the Smooth transcript
+page. The default figure is an estimate that was not checked against what OpenAI
+charges, so check it before you trust it.
+
+It is used only when the smooth transcript is made after each transcription.""",
+    ),
     # -- ElevenLabs --------------------------------------------------------
     SettingNote(
         key="elevenlabs.enabled",

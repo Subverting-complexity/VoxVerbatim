@@ -59,6 +59,14 @@ _log = logging.getLogger(__name__)
 TEXT_EXPORT_NAME = "transcript.txt"
 REPORT_EXPORT_NAME = "review-report.md"
 
+#: The smooth transcript's file name, its request purpose and how its
+#: failure message begins. They are defined here rather than in
+#: :mod:`.smoothing`, because that module imports this one and the report
+#: below needs them.
+SMOOTH_EXPORT_NAME = "transcript-smooth.txt"
+SMOOTHING_PURPOSE = "smoothing"
+SMOOTHING_NOT_MADE = "The smooth transcript was not made"
+
 #: Where the text export wraps. Wide enough not to look like a poem, narrow
 #: enough to read comfortably in a plain editor and in a screen magnifier.
 DEFAULT_WRAP_WIDTH = 78
@@ -312,12 +320,18 @@ def render_review_report(
         _report_review_queue(transcript),
         _report_speaker_doubts(transcript),
         _report_escalation(transcript),
+        _report_smoothing(transcript),
         _report_warnings(transcript),
     ]
     return "\n".join(part for part in parts if part).rstrip() + "\n"
 
 
-def write_exports(transcript: Transcript, store: Any, patient: bool = True) -> list[str]:
+def write_exports(
+    transcript: Transcript,
+    store: Any,
+    patient: bool = True,
+    names: Sequence[str] = (),
+) -> list[str]:
     """Write the two readable documents for a transcript, and name any that failed.
 
     ``store`` is the recording's
@@ -334,12 +348,18 @@ def write_exports(transcript: Transcript, store: Any, patient: bool = True) -> l
 
     ``patient`` is passed on to the store: False writes once, without waiting
     for a program that holds a file open to let go of it.
+
+    ``names`` limits the writing to those documents; empty means both. The
+    pipeline writes transcript.txt before the smooth transcript is made and
+    the report after it, so the report can say what smoothing did.
     """
     failed: list[str] = []
     for name, render in (
         (TEXT_EXPORT_NAME, render_plain_text),
         (REPORT_EXPORT_NAME, render_review_report),
     ):
+        if names and name not in names:
+            continue
         try:
             written = store.write_export(name, render(transcript), patient=patient)
         except Exception:  # an export is a convenience, never the transcript
@@ -798,7 +818,9 @@ def _what_the_services_heard(transcript: Transcript, token: FinalToken) -> str:
 def _report_escalation(transcript: Transcript) -> str:
     """What was asked a second time, and what the language model made of it."""
     second_opinions = [
-        request for request in transcript.requests if request.purpose != "transcription"
+        request
+        for request in transcript.requests
+        if request.purpose not in ("transcription", SMOOTHING_PURPOSE)
     ]
     decided = [token for token in transcript.tokens if token.llm_decision]
     if not second_opinions and not decided:
@@ -865,6 +887,62 @@ def _report_escalation(transcript: Transcript) -> str:
         lines.append("The language model was not asked to decide anything here.")
         lines.append("")
     return "\n".join(lines)
+
+
+def _report_smoothing(transcript: Transcript) -> str:
+    """Whether the smooth transcript was made, what it took and what it cost.
+
+    Left out when smoothing was not asked for, so a run without it says
+    nothing about it.
+    """
+    requests = [
+        request for request in transcript.requests if request.purpose == SMOOTHING_PURPOSE
+    ]
+    failure = next(
+        (warning for warning in transcript.warnings if warning.startswith(SMOOTHING_NOT_MADE)),
+        None,
+    )
+    if not requests and failure is None:
+        return ""
+
+    lines = ["## The smooth transcript", ""]
+    if failure is not None:
+        lines.append(f"{failure} No {SMOOTH_EXPORT_NAME} was left beside this transcript.")
+    else:
+        lines.append(
+            f"{SMOOTH_EXPORT_NAME} is an edited copy of this transcript for easy reading. "
+            f"{TEXT_EXPORT_NAME} keeps the literal words."
+        )
+    lines.append("")
+    if requests:
+        answered = sum(1 for request in requests if request.succeeded)
+        took = sum(request.processing_seconds for request in requests)
+        models = sorted({_model_description(request) for request in requests})
+        sentence = (
+            f"It took {_count(len(requests), 'request')} to the language model "
+            f"({', '.join(models)}), of which {answered} answered, in "
+            f"{format_duration(took)} of request time."
+        )
+        rate = _smoothing_rate(transcript)
+        if rate is not None:
+            sentence += (
+                f" At the rate in Settings that is an estimated "
+                f"{describe_money(len(requests) * rate)}."
+            )
+        lines.append(sentence)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _smoothing_rate(transcript: Transcript) -> float | None:
+    """The price of one smoothing request this run was made with, if recorded."""
+    cost = transcript.effective_settings.get("cost")
+    if not isinstance(cost, dict):
+        return None
+    value = cost.get("smoothing_per_request")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _report_warnings(transcript: Transcript) -> str:

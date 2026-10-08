@@ -839,6 +839,9 @@ class CostsPage(SettingsPage):
         self._adjudication_box = self._add_rate(
             form, "Ad&judication cost per request", "cost.adjudication_per_request"
         )
+        self._smoothing_box = self._add_rate(
+            form, "Smoot&hing cost per request", "cost.smoothing_per_request"
+        )
         layout.addWidget(rates)
 
         form = self._new_form(None)
@@ -875,6 +878,7 @@ class CostsPage(SettingsPage):
         self._assemblyai_box.setValue(cost.assemblyai_per_minute)
         self._deepgram_box.setValue(cost.deepgram_per_minute)
         self._adjudication_box.setValue(cost.adjudication_per_request)
+        self._smoothing_box.setValue(cost.smoothing_per_request)
         self._confirm_box.setChecked(cost.confirm_before_running)
 
     def apply_to(self, settings: Settings) -> None:
@@ -885,6 +889,7 @@ class CostsPage(SettingsPage):
             assemblyai_per_minute=self._assemblyai_box.value(),
             deepgram_per_minute=self._deepgram_box.value(),
             adjudication_per_request=self._adjudication_box.value(),
+            smoothing_per_request=self._smoothing_box.value(),
             confirm_before_running=self._confirm_box.isChecked(),
         )
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import textwrap
 from collections import Counter
@@ -47,6 +48,9 @@ from vox_verbatim.transcription.adjudication import (
 )
 from vox_verbatim.transcription.exports import (
     DEFAULT_WRAP_WIDTH,
+    SMOOTH_EXPORT_NAME,
+    SMOOTHING_NOT_MADE,
+    SMOOTHING_PURPOSE,
     _join_tokens,
     _speaker_name,
     _turns,
@@ -57,11 +61,9 @@ from vox_verbatim.transcription.providers.base import describe_api_key_character
 
 _log = logging.getLogger(__name__)
 
-#: What the smooth transcript is called inside the transcript folder.
-SMOOTH_EXPORT_NAME = "transcript-smooth.txt"
-
-#: What these requests are called in provenance.
-SMOOTHING_PURPOSE = "smoothing"
+# SMOOTH_EXPORT_NAME, the file name, and SMOOTHING_PURPOSE, what these
+# requests are called in provenance, are defined in exports, because the
+# review report needs them and this module imports that one.
 
 #: The name the strict schema is registered under on the request.
 SCHEMA_NAME = "transcript_smoothing"
@@ -72,6 +74,14 @@ DEFAULT_PART_WORDS = 2_000
 
 #: How many parts are sent at the same time.
 DEFAULT_PARALLEL_REQUESTS = 4
+
+#: About how many words a minute people say in a conversation. Used only to
+#: estimate, before a run, how many parts a recording will be sent in.
+SPOKEN_WORDS_PER_MINUTE = 150
+
+#: How every message that says there is no smooth transcript begins, so the
+#: window and the review report can tell that message from the others.
+NOT_MADE = SMOOTHING_NOT_MADE
 
 #: How many times a part is sent before its answer is kept with a warning.
 ATTEMPTS_PER_PART = 2
@@ -400,14 +410,14 @@ class Smoother:
         """
         problem = self.describe_configuration_problem()
         if problem is not None:
-            return SmoothOutcome(error=f"The smooth transcript was not made: {problem}.")
+            return SmoothOutcome(error=f"{NOT_MADE}: {problem}.")
         turns = build_turns(transcript)
         if not turns:
-            return SmoothOutcome(error="The smooth transcript was not made: there are no words.")
+            return SmoothOutcome(error=f"{NOT_MADE}: there are no words.")
         try:
             client = self._resolve_client()
         except AdjudicationUnavailable as error:
-            return SmoothOutcome(error=str(error))
+            return SmoothOutcome(error=f"{NOT_MADE}. {error}")
 
         parts = split_into_parts(turns, self._part_words)
         workers = min(len(parts), self._parallel_requests)
@@ -421,7 +431,7 @@ class Smoother:
             # good smooth file with nothing better than transcript.txt.
             outcome.requests = [record for result in results for record in result.requests]
             reason = outcome.requests[-1].error if outcome.requests else None
-            outcome.error = "The smooth transcript was not made: the language model did not answer"
+            outcome.error = f"{NOT_MADE}: the language model did not answer"
             outcome.error += f" ({reason})." if reason else "."
             return outcome
         for result in results:
@@ -627,7 +637,7 @@ def write_smooth_transcript(transcript: Transcript, store: Any, smoother: Smooth
     if not outcome.text:
         return outcome
     if store.write_export(SMOOTH_EXPORT_NAME, outcome.text) is None:
-        outcome.error = f"The {SMOOTH_EXPORT_NAME} file could not be written."
+        outcome.error = f"{NOT_MADE}: the {SMOOTH_EXPORT_NAME} file could not be written."
     return outcome
 
 
@@ -670,6 +680,20 @@ def smoother_for(settings: Any, folder: Path | str | None = None, **options: Any
         style_prompt=style_prompt_for(settings.smoothing.prompt, folder_prompt),
         **options,
     )
+
+def requests_for_duration(
+    duration_seconds: float, part_words: int = DEFAULT_PART_WORDS
+) -> int:
+    """About how many requests smoothing a recording of this length makes.
+
+    The words are not known before the run, so they are worked out from the
+    length at the pace people usually speak. A part that fails its check is
+    sent once more, which this does not count.
+    """
+    if duration_seconds <= 0:
+        return 0
+    words = duration_seconds / 60.0 * SPOKEN_WORDS_PER_MINUTE
+    return max(1, math.ceil(words / max(1, int(part_words))))
 
 
 def _failure_reason(error: Exception) -> str:

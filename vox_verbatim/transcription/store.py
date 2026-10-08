@@ -1157,6 +1157,20 @@ class TranscriptStore:
             return None
         return path
 
+    def remove_export(self, name: str) -> bool:
+        """Remove one export, if it is there. Returns whether it is now gone.
+
+        Used for an export that no longer matches the transcript beside it,
+        such as a smooth transcript made from an earlier run.
+        """
+        path = self.exports_folder / name
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            _log.warning("Could not remove the %s export.", name, exc_info=True)
+            return False
+        return True
+
 
 def transcript_folder_for(
     recording_path: Path | str,

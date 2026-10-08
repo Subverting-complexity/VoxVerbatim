@@ -256,6 +256,34 @@ def test_the_cost_estimate_names_every_service_and_the_total(qapp, recordings):
         dialog.close()
 
 
+def test_the_smooth_transcript_is_in_the_estimate_when_it_will_be_made(qapp, recordings):
+    settings = configured_settings()
+    settings.smoothing.run_after_transcription = True
+    settings.cost.smoothing_per_request = 0.5
+
+    dialog = open_dialog(recordings, settings)
+    try:
+        # One request for each of the two short recordings.
+        assert dialog.smoothing_requests() == 2
+        text = dialog.cost_text()
+        assert "Smooth transcript: about 1.00 USD." in text
+        assert dialog.cost_estimate().smoothing_total == 1.0
+    finally:
+        dialog.close()
+
+
+def test_the_smooth_transcript_is_left_out_when_it_will_not_be_made(qapp, recordings):
+    settings = configured_settings()
+    settings.smoothing.run_after_transcription = False
+
+    dialog = open_dialog(recordings, settings)
+    try:
+        assert dialog.smoothing_requests() == 0
+        assert "Smooth transcript" not in dialog.cost_text()
+    finally:
+        dialog.close()
+
+
 def test_only_the_services_that_are_switched_on_are_counted(qapp, recordings):
     settings = configured_settings()
     settings.microsoft.enabled = False

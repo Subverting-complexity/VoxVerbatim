@@ -890,6 +890,7 @@ def every_setting_changed() -> Settings:
                 assemblyai_per_minute=0.001,
                 deepgram_per_minute=0.0099,
                 adjudication_per_request=1.25,
+                smoothing_per_request=0.75,
                 confirm_before_running=False,
             ),
         ),

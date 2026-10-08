@@ -1066,6 +1066,43 @@ def test_a_date_only_one_service_heard_is_still_flagged() -> None:
     assert date.needs_review
 
 
+def test_a_repeated_digit_only_one_service_heard_is_still_flagged() -> None:
+    """The repeat rule must not settle a digit in a phone number."""
+    words = ["call", "me", "on", "0", "8", "2", "2", "5", "tomorrow"]
+    tidied = ["call", "me", "on", "0", "8", "2", "5", "tomorrow"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    assert texts_of(tokens) == words
+    digits = tokens[5:7]
+    assert all(token.risk_categories for token in digits)
+    assert any(ReviewReason.PROVIDER_DISAGREEMENT in token.review_reasons for token in digits)
+    assert any(token.needs_review for token in digits)
+
+
+def test_a_unit_spelled_like_a_filler_only_one_service_heard_is_still_flagged() -> None:
+    """"mm" is on the filler list, but after a number it is millimetres."""
+    words = ["cut", "it", "5", "mm", "deep", "please"]
+    tidied = ["cut", "it", "5", "deep", "please"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    unit = token_at(tokens, "mm")
+    assert unit.risk_categories
+    assert ReviewReason.PROVIDER_DISAGREEMENT in unit.review_reasons
+    assert unit.needs_review
+
+
 def test_a_date_a_service_heard_differently_names_the_kind_of_value() -> None:
     backbone = spoken(Provider.ELEVENLABS, ["we", "met", "on", "15", "March", "last", "year"])
     other = ["we", "met", "on", "16", "March", "last", "year"]

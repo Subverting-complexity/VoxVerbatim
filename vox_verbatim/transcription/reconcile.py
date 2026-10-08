@@ -1455,15 +1455,22 @@ def _contesting_silence(
     about which value was said. A value only one service heard keeps every
     silence against it, because nobody corroborated it.
 
+    High-risk values are decided first, and the filler and repeat rule does
+    not apply to them. Otherwise a digit only one service heard, as in
+    "0 8 2 2 5" against "0 8 2 5", was settled because it repeats the digit
+    beside it, and the unit "mm" in "5 mm deep" because it is spelled like
+    a filler. In a phone number or a measurement that is the very word that
+    must be checked.
+
     Only the confidence of the word uses this. Removing a word that nobody
     else heard still counts every silent service; see
     :func:`_is_hallucination`.
     """
     if runner_up is not None:
         return deletions
+    if risk:
+        return () if len(winner.providers) >= 2 else deletions
     if is_filler(winner.display) or _is_repeated_beside(scope, backbone_texts, winner.display):
-        return ()
-    if risk and len(winner.providers) >= 2:
         return ()
     return deletions
 

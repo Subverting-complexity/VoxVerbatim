@@ -115,6 +115,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -173,7 +174,9 @@ from vox_verbatim.transcription.project import (
     WordGroup,
 )
 from vox_verbatim.transcription.vocabulary import VocabularyIndex
+from vox_verbatim.settings import DEFAULT_SMOOTHING_PROMPT
 from vox_verbatim.ui.accessibility import announce, describe
+from vox_verbatim.ui.folder_prompt_dialog import FolderPromptDialog
 from vox_verbatim.ui.review_lists import (
     GroupRow,
     OccurrenceModel,
@@ -249,6 +252,27 @@ STATISTICS_FAILURE_TEXT = (
     "this change yet. Your change is saved, and the statistics will catch up the "
     "next time they can be saved."
 )
+
+
+
+def exports_failure_text(recording_name: str, failed: list[str]) -> str:
+    """Say that a correction is saved but the readable files did not follow it.
+
+    The correction comes first, because that is what a person worries about.
+    The files are named, because they are what the person will open later and
+    find showing the text from before the review.
+    """
+    files = " and ".join(failed)
+    if len(failed) == 1:
+        verb, still, held, written = "was", "the file still shows", "it", "it is"
+    else:
+        verb, still, held, written = "were", "the files still show", "them", "they are"
+    return (
+        f"Your change is saved, but {files} for {recording_name} {verb} not written "
+        f"again, so {still} the text from before. Close any program that has "
+        f"{held} open; {written} written again with your next change to that recording."
+    )
+
 
 NO_SPEAKER = "No speaker attributed"
 NO_RISK = "None recorded"
@@ -1273,9 +1297,14 @@ class ReviewWindow(QMainWindow):
         parent: QWidget | None = None,
         record_statistics: Callable[[StatisticsChange], bool] | None = None,
         vocabulary: VocabularyIndex | None = None,
+        app_smoothing_prompt: str = DEFAULT_SMOOTHING_PROMPT,
+        write_exports: Callable[[str, Transcript], list[str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._folder = Path(folder)
+        # The app's style prompt from Settings, offered as the starting point
+        # for a prompt of the folder's own; see edit_smoothing_prompt.
+        self._app_smoothing_prompt = app_smoothing_prompt
         self.setWindowTitle(f"Review: {self._folder.name}")
         self._recording_names = list(recording_names)
         self._load_transcript = load_transcript
@@ -1309,6 +1338,13 @@ class ReviewWindow(QMainWindow):
         # A sentence saying the statistics could not be saved, waiting to be
         # added to the next status announcement; see _hand_on.
         self._statistics_warning: str | None = None
+        # Writes a recording's transcript.txt and review-report.md again from
+        # its saved transcript, and answers the names of any that failed.
+        # Nothing given means there are no files to keep up to date.
+        self._write_exports = write_exports
+        # Sentences saying the readable files did not follow a saved change,
+        # waiting to be added to the next status announcement; see _hand_on.
+        self._exports_warnings: list[str] = []
 
         self._note_keys: dict[QWidget, str] = {}
         self._showing_note: str | None = None
@@ -2384,6 +2420,10 @@ class ReviewWindow(QMainWindow):
         self._delay_action = self._add_action(
             project_menu, "Set the &Wait before Playing", None, self.focus_auto_play_delay
         )
+        project_menu.addSeparator()
+        self._smoothing_prompt_action = self._add_action(
+            project_menu, "Set the &Smoothing Prompt...", None, self.edit_smoothing_prompt
+        )
 
         word_menu = menu_bar.addMenu("&Word")
         self._next_group_action = self._add_action(
@@ -2909,6 +2949,39 @@ class ReviewWindow(QMainWindow):
         self.set_show_details(True)
         self._delay_spin.setFocus(Qt.FocusReason.OtherFocusReason)
         self._delay_spin.selectAll()
+
+    def edit_smoothing_prompt(self) -> None:
+        """Open the editor for this folder's own smoothing prompt.
+
+        Modal, so the focus goes back to where it was when the editor closes.
+        """
+        dialog = FolderPromptDialog(
+            self._folder.name,
+            self._app_smoothing_prompt,
+            self._state.settings.smoothing_prompt,
+            self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.set_smoothing_prompt(dialog.chosen_prompt())
+
+    def set_smoothing_prompt(self, prompt: str) -> None:
+        """Keep a prompt of the folder's own, or none, and say which.
+
+        An empty prompt removes the folder's own, so the app's prompt is used.
+        The answer is saved with the folder's review settings at once, and the
+        sentence that says so also says when the save failed.
+        """
+        prompt = prompt if prompt.strip() else ""
+        had_prompt = bool(self._state.settings.smoothing_prompt)
+        self._state.settings.smoothing_prompt = prompt
+        if prompt:
+            self._save_and_say("This folder's smoothing prompt is saved.")
+        elif had_prompt:
+            self._save_and_say(
+                "This folder's own smoothing prompt is removed. It uses the app's prompt."
+            )
+        else:
+            self._set_status("This folder uses the app's smoothing prompt.", alert=True)
 
     # -- What the window is showing ---------------------------------------
 
@@ -5366,6 +5439,7 @@ class ReviewWindow(QMainWindow):
             kept = noted
             self._statistics_warning = STATISTICS_FAILURE_TEXT
         transcript = kept
+        self._rewrite_exports(recording_name, transcript)
         if teach and before is not None:
             self._learn_names(before, transcript)
         self._cached_name = recording_name
@@ -5422,6 +5496,22 @@ class ReviewWindow(QMainWindow):
         noted = note_settled_words(before, transcript, excluded, self._vocabulary)
         change, counted = count_settled_words(noted)
         return noted, change, counted
+
+    def _rewrite_exports(self, recording_name: str, transcript: Transcript) -> None:
+        """Write the recording's readable files again from its saved transcript.
+
+        Called only once the transcript itself is saved, so the files never
+        show a change the transcript does not hold. A file that cannot be
+        written leaves the correction in place: the failure is added to the
+        next status announcement, as a statistics failure is, because the
+        caller is about to say what it did and a second announcement would cut
+        across it.
+        """
+        if self._write_exports is None:
+            return
+        failed = self._write_exports(recording_name, transcript)
+        if failed:
+            self._exports_warnings.append(exports_failure_text(recording_name, failed))
 
     @staticmethod
     def _correction_failure_text(recording_names: list[str]) -> str:
@@ -5569,6 +5659,11 @@ class ReviewWindow(QMainWindow):
             message = f"{message} {self._statistics_warning}"
             self._statistics_warning = None
             alert = True
+        if self._exports_warnings:
+            message = " ".join([message, *self._exports_warnings])
+            self._exports_warnings = []
+            alert = True
+            urgent = True
         self._status_label.setText(message)
         if alert:
             announce(self._status_label, message, urgent=urgent)

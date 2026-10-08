@@ -156,6 +156,17 @@ def _text(value: Any, default: str = "") -> str:
     return value if isinstance(value, str) else default
 
 
+def _prompt(value: Any) -> str:
+    """A prompt kept as typed, or empty when there is no real text in it.
+
+    Not stripped, because line breaks and indentation are part of how a
+    person laid the prompt out. Blank text means no prompt of its own.
+    """
+    if isinstance(value, str) and value.strip():
+        return value
+    return ""
+
+
 def _optional_text(value: Any) -> str | None:
     return value if isinstance(value, str) and value != "" else None
 
@@ -788,6 +799,15 @@ class ProjectSettings:
     turned their screen reader's speech off will want.
     """
 
+    smoothing_prompt: str = ""
+    """This folder's own style prompt for the smooth transcript, or empty.
+
+    Empty means the folder uses the app's prompt from Settings. It is kept
+    with the folder, because the right style belongs to the recordings: a
+    folder of family interviews in Afrikaans wants a different prompt from
+    the rest, and the folder carries it when it is handed to someone else.
+    """
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -817,6 +837,7 @@ class ProjectSettings:
                 DEFAULT_AUTO_PLAY_DELAY_SECONDS,
                 MAXIMUM_AUTO_PLAY_DELAY_SECONDS,
             ),
+            smoothing_prompt=_prompt(data.get("smoothing_prompt")),
         )
 
 

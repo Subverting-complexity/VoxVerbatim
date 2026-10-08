@@ -41,6 +41,11 @@ from vox_verbatim.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     CalibrationStore,
 )
+from vox_verbatim.transcription.exports import (
+    REPORT_EXPORT_NAME,
+    TEXT_EXPORT_NAME,
+    write_exports,
+)
 from vox_verbatim.transcription.learning import user_terms_index
 from vox_verbatim.transcription.model import SPEAKER_ONLY_REASONS, Transcript
 from vox_verbatim.transcription.project import (
@@ -1113,6 +1118,8 @@ class MainWindow(QMainWindow):
             parent=self,
             record_statistics=lambda change: self._calibration_store.apply(change.apply),
             vocabulary=user_terms_index(self._vocabulary_store.load()),
+            app_smoothing_prompt=self._settings.transcription.smoothing.prompt,
+            write_exports=reader.write_exports,
         )
         # Given its parent after the window exists rather than before, so that
         # Qt destroys the player along with the window it belongs to. A player
@@ -2004,6 +2011,19 @@ class _TranscriptReader:
         self._name = recording_name
         self._transcript = transcript
         return True
+
+    def write_exports(self, recording_name: str, transcript: Transcript) -> list[str]:
+        """Write the readable files again from a saved transcript.
+
+        Answers the names of the files that could not be written. A recording
+        this reader does not know has nowhere to write to, so both are named.
+        It writes once without waiting, because the review window calls it
+        after every correction and waiting would freeze the window.
+        """
+        store = self._stores.get(recording_name)
+        if store is None:
+            return [TEXT_EXPORT_NAME, REPORT_EXPORT_NAME]
+        return write_exports(transcript, store, patient=False)
 
     def transcript_path(self, recording_name: str) -> Path | None:
         store = self._stores.get(recording_name)

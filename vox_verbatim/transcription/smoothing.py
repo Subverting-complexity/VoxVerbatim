@@ -34,6 +34,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Sequence
 
 from vox_verbatim.transcription.adjudication import (
@@ -51,6 +52,7 @@ from vox_verbatim.transcription.exports import (
     _turns,
 )
 from vox_verbatim.transcription.model import Provider, ProviderRequestRecord, Transcript
+from vox_verbatim.transcription.project import ProjectStore
 from vox_verbatim.transcription.providers.base import describe_api_key_characters
 
 _log = logging.getLogger(__name__)
@@ -627,6 +629,47 @@ def write_smooth_transcript(transcript: Transcript, store: Any, smoother: Smooth
     if store.write_export(SMOOTH_EXPORT_NAME, outcome.text) is None:
         outcome.error = f"The {SMOOTH_EXPORT_NAME} file could not be written."
     return outcome
+
+
+def style_prompt_for(app_prompt: str, folder_prompt: str = "") -> str:
+    """The style prompt to smooth with: the folder's own, or else the app's.
+
+    A folder prompt with no real text in it counts as none, so a folder whose
+    prompt was cleared goes back to the app's prompt rather than sending the
+    model an empty one.
+    """
+    if folder_prompt and folder_prompt.strip():
+        return folder_prompt
+    return app_prompt
+
+
+def folder_smoothing_prompt(folder: Path | str) -> str:
+    """The folder's own style prompt from its project file, or empty.
+
+    Read fresh each time, so a prompt saved in the review window is used by
+    the next smoothing without anything being reloaded. A folder with no
+    project file, or one that cannot be read, has no prompt of its own.
+    """
+    return ProjectStore(folder).load().settings.smoothing_prompt
+
+
+def smoother_for(settings: Any, folder: Path | str | None = None, **options: Any) -> Smoother:
+    """Build the smoother for one folder's recordings from the app's settings.
+
+    ``settings`` is the app's transcription settings. Every smoothing goes
+    through this, after a transcription and on demand alike, so the folder's
+    own prompt is used wherever one is saved and the app's prompt otherwise.
+    ``options`` are passed on to :class:`Smoother`, such as a test client.
+    """
+    folder_prompt = "" if folder is None else folder_smoothing_prompt(folder)
+    options.setdefault("timeout_seconds", settings.processing.provider_timeout_seconds)
+    return Smoother(
+        api_key=settings.openai_adjudication.api_key,
+        model=settings.smoothing.model,
+        reasoning_effort=settings.smoothing.reasoning_effort,
+        style_prompt=style_prompt_for(settings.smoothing.prompt, folder_prompt),
+        **options,
+    )
 
 
 def _failure_reason(error: Exception) -> str:

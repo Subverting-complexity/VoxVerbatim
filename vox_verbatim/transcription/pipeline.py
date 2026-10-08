@@ -1089,17 +1089,11 @@ def _write_exports(transcript: Transcript, store: TranscriptStore) -> None:
 
     An export that fails has cost the user a convenience, not their
     transcript, which is safely saved by this point. So it is reported and
-    stepped over rather than raised.
+    stepped over rather than raised. The writing itself is shared with the
+    review window; see :func:`~vox_verbatim.transcription.exports.write_exports`.
     """
-    for name, render in (
-        (exports.TEXT_EXPORT_NAME, exports.render_plain_text),
-        (exports.REPORT_EXPORT_NAME, exports.render_review_report),
-    ):
-        try:
-            store.write_export(name, render(transcript))
-        except Exception:  # an export is a convenience, never the transcript
-            _log.exception("Could not write the %s export.", name)
-            transcript.warnings.append(f"The {name} export could not be written.")
+    for name in exports.write_exports(transcript, store):
+        transcript.warnings.append(f"The {name} export could not be written.")
 
 
 def _speakers_in(

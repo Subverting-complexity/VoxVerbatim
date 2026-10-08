@@ -33,7 +33,7 @@ class RefusingStore:
         self.refuse = refuse
         self.written: dict[str, str] = {}
 
-    def write_export(self, name: str, text: str, patient: bool = True):
+    def write_export(self, name: str, text: str, patient: bool = True, rebuildable: bool = False):
         if name in self.refuse:
             return None
         self.written[name] = text

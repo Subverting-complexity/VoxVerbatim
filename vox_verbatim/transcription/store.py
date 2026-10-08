@@ -1137,7 +1137,9 @@ class TranscriptStore:
 
     # -- The readable exports
 
-    def write_export(self, name: str, text: str, patient: bool = True) -> Path | None:
+    def write_export(
+        self, name: str, text: str, patient: bool = True, rebuildable: bool = False
+    ) -> Path | None:
         """Write one export, replacing any previous copy, and return its path.
 
         ``patient`` waits and tries again while another program holds the old
@@ -1150,11 +1152,25 @@ class TranscriptStore:
         They hold nothing that is not derived from the transcript, so a fresh
         run producing a fresh report loses nothing, which is the opposite of
         the rule that governs the responses next door.
+
+        ``rebuildable`` is for an export made from the saved transcript alone.
+        When the old file is held open, the new data is deleted rather than
+        kept beside it as ``.unsaved``: the next write makes it again, and a
+        stray copy in the folder a person hands on would only mislead. A
+        successful write also removes any such copy an earlier version left.
+        An export that cost a paid call to make, such as the smooth
+        transcript, is not rebuildable and keeps its copy.
         """
         path = self.exports_folder / name
         sleep = time.sleep if patient else _no_wait
-        if not _write_bytes(path, text.encode("utf-8"), sleep):
+        if not _write_bytes(path, text.encode("utf-8"), sleep, keep_unsaved=not rebuildable):
             return None
+        if rebuildable:
+            stale = unsaved_copy_path(path)
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                _log.warning("Could not remove the old unsaved copy %s.", stale, exc_info=True)
         return path
 
     def remove_export(self, name: str) -> bool:
@@ -1230,7 +1246,10 @@ def _no_wait(_seconds: float) -> None:
 
 
 def _write_bytes(
-    path: Path, body: bytes, sleep: Callable[[float], None] | None = None
+    path: Path,
+    body: bytes,
+    sleep: Callable[[float], None] | None = None,
+    keep_unsaved: bool = True,
 ) -> bool:
     """Write bytes to ``path`` atomically, returning whether it worked.
 
@@ -1242,6 +1261,9 @@ def _write_bytes(
 
     ``sleep`` is how to wait between attempts to move the file into place.
     None means the real clock, looked up when the call is made.
+
+    ``keep_unsaved`` False deletes the data when the move fails, for a file
+    that the next write rebuilds anyway.
     """
     if sleep is None:
         sleep = time.sleep
@@ -1266,8 +1288,9 @@ def _write_bytes(
             raise
         # The move is retried and, failing that, the data is kept beside the
         # target rather than deleted, for the same reason as the transcript
-        # itself: an export somebody has open in an editor is the commonest
-        # thing here to be held, and the answer from a service is evidence.
+        # itself: the answer from a service is evidence, and the smooth
+        # transcript cost a paid call. Only a file the caller can rebuild
+        # from the saved transcript is let go.
         try:
             moved = replace_with_retries(temp_name, path, sleep)
         except BaseException:
@@ -1279,7 +1302,13 @@ def _write_bytes(
                 pass
             raise
         if not moved:
-            keep_unsaved_copy(temp_name, path)
+            if keep_unsaved:
+                keep_unsaved_copy(temp_name, path)
+            else:
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    _log.warning("Could not remove %s", temp_name, exc_info=True)
             return False
     except OSError:
         _log.warning("Could not write %s", path, exc_info=True)

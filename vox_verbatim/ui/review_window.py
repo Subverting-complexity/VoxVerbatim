@@ -3064,7 +3064,9 @@ class ReviewWindow(QMainWindow):
         self._set_status(message, alert=True, urgent=not opened)
 
     def _on_smooth_finished(self, result: SmoothResult, requester: object) -> None:
-        if requester is not self:
+        # A closed window is only hidden, and nobody hears it; the main
+        # window says the result instead.
+        if requester is not self or not self.isVisible():
             return
         self._set_status(result.message, alert=True, urgent=not result.succeeded)
 

@@ -321,6 +321,37 @@ def test_a_shared_runner_refuses_a_second_run_and_only_the_asker_announces(
             window.deleteLater()
 
 
+def test_the_main_window_says_the_result_when_the_review_window_closed_first(
+    qapp, tmp_path, window
+):
+    release = threading.Event()
+
+    class Slow(FakeSmoother):
+        def smooth(self, transcript):
+            release.wait(5)
+            return super().smooth(transcript)
+
+    review = _review_window(
+        tmp_path,
+        lambda name: TranscriptStore(tmp_path / name),
+        Slow,
+        window._smooth_runner,
+    )
+    window._review_window = review
+    try:
+        review.make_smooth_transcript_again()
+        # Its own close button hides the window; the main window still holds it.
+        review.close()
+        release.set()
+
+        assert wait_until(qapp, lambda: "is ready" in window._status_label.text())
+    finally:
+        release.set()
+        window._smooth_runner.wait(5)
+        window._review_window = None
+        review.deleteLater()
+
+
 def test_the_review_window_says_when_there_is_no_smooth_file_to_open(qapp, tmp_path):
     window = _review_window(tmp_path, lambda name: TranscriptStore(tmp_path / name))
     try:

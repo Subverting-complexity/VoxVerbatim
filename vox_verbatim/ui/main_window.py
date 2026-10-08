@@ -1035,8 +1035,12 @@ class MainWindow(QMainWindow):
 
         A run the review window asked for is said here only when that window
         has closed since, so the result is never lost and never said twice.
+        Closing the review window with its own close button hides it rather
+        than deleting it, so it is still held here; whether it is on screen
+        is what tells.
         """
-        if requester is not self and requester is self._review_window:
+        window = self._review_window
+        if requester is not self and requester is window and window.isVisible():
             return
         self._set_status(result.message, alert=True, urgent=not result.succeeded)
 

@@ -1216,7 +1216,7 @@ def _no_wait(_seconds: float) -> None:
 
 
 def _write_bytes(
-    path: Path, body: bytes, sleep: Callable[[float], None] = time.sleep
+    path: Path, body: bytes, sleep: Callable[[float], None] | None = None
 ) -> bool:
     """Write bytes to ``path`` atomically, returning whether it worked.
 
@@ -1225,7 +1225,12 @@ def _write_bytes(
     the disk byte for byte as it arrived. Parsing it and writing it out again
     would quietly change the spacing, the key order and the escaping, and the
     whole reason for keeping it is that it has not been changed.
+
+    ``sleep`` is how to wait between attempts to move the file into place.
+    None means the real clock, looked up when the call is made.
     """
+    if sleep is None:
+        sleep = time.sleep
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = tempfile.NamedTemporaryFile(

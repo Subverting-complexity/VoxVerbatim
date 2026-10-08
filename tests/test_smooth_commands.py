@@ -7,6 +7,8 @@ correction reaches the smooth file.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QMenu
@@ -29,7 +31,7 @@ from vox_verbatim.ui.smooth_commands import (
 )
 
 from tests.conftest import wait_until, write_fake_audio
-from tests.test_review_window import FakePlayer, two_file_folder
+from tests.test_review_window import FakePlayer, select_word, two_file_folder
 
 
 class FakeSmoother:
@@ -127,14 +129,15 @@ def test_the_runner_works_in_the_background_on_a_copy(qapp, tmp_path):
     transcript = _transcript("one", "two")
     runner = SmoothRunner()
     results = []
-    runner.finished.connect(results.append)
+    runner.finished.connect(lambda result, requester: results.append((result, requester)))
 
-    assert runner.start("interview.wav", transcript, store, FakeSmoother())
+    assert runner.start("interview.wav", transcript, store, FakeSmoother(), requester="me")
+    assert not runner.start("interview.wav", transcript, store, FakeSmoother())
     # A correction made while the request is out does not reach this run.
     transcript.tokens[0].text = "changed"
 
     assert wait_until(qapp, lambda: bool(results))
-    assert results[0].succeeded
+    assert results[0][0].succeeded and results[0][1] == "me"
     assert "one two" in smooth_path(store).read_text(encoding="utf-8")
 
 
@@ -185,6 +188,24 @@ def test_the_main_window_makes_the_highlighted_recordings_smooth_file(
     assert fake.seen == ["corrected words"]
 
 
+def test_the_main_window_announces_a_failure_and_removes_the_older_file(
+    qapp, window, monkeypatch
+):
+    error = f"{smoothing.NOT_MADE}: no OpenAI API key has been entered."
+    monkeypatch.setattr(
+        smoothing, "smoother_for", lambda *_args, **_kw: FakeSmoother(error=error)
+    )
+    window._table.select_row(0)
+    store = TranscriptStore(window._model.file_at(0).path)
+    store.save(_transcript("words"))
+    store.write_export(SMOOTH_EXPORT_NAME, "older\n")
+
+    window.make_smooth_transcript_again()
+
+    assert wait_until(qapp, lambda: error in window._status_label.text())
+    assert not smooth_path(store).exists()
+
+
 def test_the_main_window_says_when_there_is_no_transcript_to_smooth(window):
     window._table.select_row(0)
 
@@ -204,7 +225,9 @@ def test_the_main_window_says_when_there_is_no_smooth_file_to_open(window):
 # -- The review window -----------------------------------------------------
 
 
-def _review_window(tmp_path, transcript_store_for=None, build_smoother=None) -> ReviewWindow:
+def _review_window(
+    tmp_path, transcript_store_for=None, build_smoother=None, smooth_runner=None
+) -> ReviewWindow:
     folder = two_file_folder()
     window = ReviewWindow(
         tmp_path,
@@ -216,6 +239,7 @@ def _review_window(tmp_path, transcript_store_for=None, build_smoother=None) -> 
         folder.save,
         transcript_store_for=transcript_store_for,
         build_smoother=build_smoother,
+        smooth_runner=smooth_runner,
     )
     window.show()
     window.process_low_confidence_words()
@@ -248,18 +272,53 @@ def test_the_review_window_smooths_the_selected_occurrences_recording(qapp, tmp_
 
     window = _review_window(tmp_path, store_for, lambda: fake)
     try:
+        select_word(window, "Bosch")
+        window._replacement_edit.setText("Bausch")
+        assert window.apply_replacement_to_word() is True
         occurrence = window.current_occurrence()
         assert occurrence is not None
 
         window.make_smooth_transcript_again()
 
         assert wait_until(qapp, lambda: "is ready" in window._status_label.text())
-        assert smooth_path(stores[occurrence.recording_name]).is_file()
-        assert fake.seen
+        text = smooth_path(stores[occurrence.recording_name]).read_text(encoding="utf-8")
+        assert "Bausch" in text
     finally:
         window._smooth_runner.wait(5)
         window.close()
         window.deleteLater()
+
+
+def test_a_shared_runner_refuses_a_second_run_and_only_the_asker_announces(
+    qapp, tmp_path
+):
+    """The main window lends its runner, so the two windows never race on one file."""
+    runner = SmoothRunner()
+    release = threading.Event()
+
+    class Slow(FakeSmoother):
+        def smooth(self, transcript):
+            release.wait(5)
+            return super().smooth(transcript)
+
+    first = _review_window(tmp_path, lambda name: TranscriptStore(tmp_path / name), Slow, runner)
+    second = _review_window(
+        tmp_path, lambda name: TranscriptStore(tmp_path / name), FakeSmoother, runner
+    )
+    try:
+        first.make_smooth_transcript_again()
+        second.make_smooth_transcript_again()
+        assert "already being made" in second._status_label.text()
+
+        release.set()
+        assert wait_until(qapp, lambda: "is ready" in first._status_label.text())
+        assert "is ready" not in second._status_label.text()
+    finally:
+        release.set()
+        runner.wait(5)
+        for window in (first, second):
+            window.close()
+            window.deleteLater()
 
 
 def test_the_review_window_says_when_there_is_no_smooth_file_to_open(qapp, tmp_path):

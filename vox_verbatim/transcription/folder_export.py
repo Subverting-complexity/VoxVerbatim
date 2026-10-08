@@ -120,9 +120,28 @@ def plan_export(
     one with no smooth transcript gives no smooth transcript. Each is listed
     as skipped with the reason, and its other files are still exported.
     """
-    wanted = [kind for kind in ExportKind if kind in set(kinds)]
+    chosen = set(kinds)
+    wanted = [kind for kind in ExportKind if kind in chosen]
     plan = ExportPlan(folder=folder)
+    # Two recordings that differ only in their audio extension, such as an
+    # interview and its enhanced copy, would export to the same names, and
+    # the second would overwrite the first without anybody being asked.
+    # Neither is exported; both are named as skipped, so the person can
+    # export them one at a time.
+    stems: dict[str, list[Path]] = {}
     for recording in recordings:
+        stems.setdefault(recording.stem.casefold(), []).append(recording)
+    for recording in recordings:
+        sharing = [other for other in stems[recording.stem.casefold()] if other != recording]
+        if sharing:
+            plan.skipped.append(
+                SkippedFile(
+                    recording.name,
+                    f"it would export to the same file names as {sharing[0].name}, so neither "
+                    "was exported. Export them one at a time",
+                )
+            )
+            continue
         store = store_for(recording)
         for kind in wanted:
             if kind is ExportKind.SMOOTH_TRANSCRIPT:
@@ -230,4 +249,5 @@ def summary_text(result: ExportResult) -> str:
 
 
 def _kinds_text(kinds: Iterable[ExportKind]) -> str:
-    return " and ".join(kind.value for kind in ExportKind if kind in set(kinds))
+    chosen = set(kinds)
+    return " and ".join(kind.value for kind in ExportKind if kind in chosen)

@@ -1014,7 +1014,7 @@ class MainWindow(QMainWindow):
             )
             return
         smoother = smoothing.smoother_for(self._settings.transcription, audio_file.path.parent)
-        self._smooth_runner.start(name, transcript, store, smoother)
+        self._smooth_runner.start(name, transcript, store, smoother, requester=self)
         self._set_status(starting_message(name), alert=True)
 
     def open_smooth_transcript(self) -> None:
@@ -1030,7 +1030,14 @@ class MainWindow(QMainWindow):
         )
         self._set_status(message, alert=True, urgent=not opened)
 
-    def _on_smooth_finished(self, result: SmoothResult) -> None:
+    def _on_smooth_finished(self, result: SmoothResult, requester: object) -> None:
+        """Say how a run went, unless the review window that asked will say it.
+
+        A run the review window asked for is said here only when that window
+        has closed since, so the result is never lost and never said twice.
+        """
+        if requester is not self and requester is self._review_window:
+            return
         self._set_status(result.message, alert=True, urgent=not result.succeeded)
 
     def _previous_run_is_still_stopping(self) -> bool:
@@ -1313,6 +1320,7 @@ class MainWindow(QMainWindow):
             build_smoother=(
                 lambda: smoothing.smoother_for(self._settings.transcription, folder)
             ),
+            smooth_runner=self._smooth_runner,
         )
         # Given its parent after the window exists rather than before, so that
         # Qt destroys the player along with the window it belongs to. A player

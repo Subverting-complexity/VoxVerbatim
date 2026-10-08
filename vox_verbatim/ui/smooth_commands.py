@@ -133,10 +133,17 @@ def open_smooth_transcript(recording_name: str, store: TranscriptStore) -> tuple
 
 
 class SmoothRunner(QObject):
-    """Makes one smooth transcript at a time on a background thread."""
+    """Makes one smooth transcript at a time on a background thread.
 
-    finished = Signal(object)
-    """The run has stopped, carrying its :class:`SmoothResult`."""
+    The main window owns the one runner and lends it to the review window,
+    so the two windows can never smooth at the same time. Two runs at once
+    could race on one file: a run that failed would remove the file the
+    other had just written, after the person had heard that it was ready.
+    """
+
+    finished = Signal(object, object)
+    """The run has stopped, carrying its :class:`SmoothResult` and whoever
+    asked for it, so only that window announces it."""
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -151,19 +158,20 @@ class SmoothRunner(QObject):
         transcript: Transcript,
         store: TranscriptStore,
         smoother: Smoother,
+        requester: object = None,
     ) -> bool:
         """Start a run. Returns False, and starts nothing, if one is running.
 
         The transcript is copied first, so a correction the person makes while
         the request is out cannot change the words under the thread reading
-        them.
+        them. ``requester`` travels with the result.
         """
         if self.is_running():
             return False
         words = copy.deepcopy(transcript)
         self._thread = threading.Thread(
             target=self._run,
-            args=(recording_name, words, store, smoother),
+            args=(recording_name, words, store, smoother, requester),
             name="smooth-transcript",
             daemon=True,
         )
@@ -182,10 +190,11 @@ class SmoothRunner(QObject):
         transcript: Transcript,
         store: TranscriptStore,
         smoother: Smoother,
+        requester: object,
     ) -> None:
         result = make_smooth_transcript(recording_name, transcript, store, smoother)
         try:
-            self.finished.emit(result)
+            self.finished.emit(result, requester)
         except RuntimeError:
             # The window was closed while the request was out. The file is
             # written anyway; there is just nobody left to tell.

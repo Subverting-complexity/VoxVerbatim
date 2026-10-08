@@ -1312,6 +1312,7 @@ class ReviewWindow(QMainWindow):
         write_exports: Callable[[str, Transcript], list[str]] | None = None,
         transcript_store_for: Callable[[str], TranscriptStore | None] | None = None,
         build_smoother: Callable[[], Smoother] | None = None,
+        smooth_runner: SmoothRunner | None = None,
     ) -> None:
         super().__init__(parent)
         # Where each recording's transcript folder is, and how to build the
@@ -1320,7 +1321,9 @@ class ReviewWindow(QMainWindow):
         # the commands say they are not available here.
         self._transcript_store_for = transcript_store_for
         self._build_smoother = build_smoother
-        self._smooth_runner = SmoothRunner(self)
+        # The main window lends its runner, so the two windows never smooth
+        # at the same time; see SmoothRunner.
+        self._smooth_runner = smooth_runner or SmoothRunner(self)
         self._smooth_runner.finished.connect(self._on_smooth_finished)
         self._folder = Path(folder)
         # The app's style prompt from Settings, offered as the starting point
@@ -3047,7 +3050,9 @@ class ReviewWindow(QMainWindow):
                 urgent=True,
             )
             return
-        self._smooth_runner.start(name, transcript, store, self._build_smoother())
+        self._smooth_runner.start(
+            name, transcript, store, self._build_smoother(), requester=self
+        )
         self._set_status(starting_message(name), alert=True)
 
     def open_smooth_transcript(self) -> None:
@@ -3058,7 +3063,9 @@ class ReviewWindow(QMainWindow):
         opened, message = open_smooth_transcript(*target)
         self._set_status(message, alert=True, urgent=not opened)
 
-    def _on_smooth_finished(self, result: SmoothResult) -> None:
+    def _on_smooth_finished(self, result: SmoothResult, requester: object) -> None:
+        if requester is not self:
+            return
         self._set_status(result.message, alert=True, urgent=not result.succeeded)
 
     def set_smoothing_prompt(self, prompt: str) -> None:

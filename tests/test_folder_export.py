@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QApplication, QDialog
 
 from vox_verbatim.session import SessionStore
 from vox_verbatim.settings import ExportSettings, Settings, SettingsStore
@@ -134,6 +134,23 @@ def test_a_recording_with_no_smooth_transcript_exports_the_rest_and_is_named(rec
     message = summary_text(result)
     assert message.startswith(f"Exported 5 files to {out}.")
     assert "Skipped: beta.m4a: it has no smooth transcript." in message
+
+
+def test_two_recordings_that_share_a_name_are_both_skipped_rather_than_overwritten(
+    recordings, out
+):
+    _transcribe(recordings[0], "original")
+    copy = recordings[0].with_suffix(".wav")
+    write_fake_audio(copy)
+    _transcribe(copy, "enhanced")
+
+    plan = plan_export([recordings[0], copy, recordings[1]], out, ALL_KINDS, TranscriptStore)
+    result = run_export(plan, TranscriptStore, replace_existing=True)
+
+    assert not (out / "alpha - transcript.txt").exists()
+    message = summary_text(result)
+    assert "alpha.m4a: it would export to the same file names as alpha.wav" in message
+    assert "alpha.wav: it would export to the same file names as alpha.m4a" in message
 
 
 def test_a_recording_never_transcribed_is_skipped_with_its_reason(recordings, out):
@@ -313,6 +330,29 @@ def test_files_already_there_are_asked_about_once_and_cancel_writes_nothing(
         "beta - transcript.txt",
     ]
     assert "cancelled" in window._status_label.text()
+
+
+def test_the_dialog_is_a_modal_child_of_the_main_window(qapp, window):
+    """Qt gives the focus back to the parent window when a modal child closes.
+
+    The offscreen test platform has no window activation, so the focus
+    itself cannot be watched here; what makes Qt return it can.
+    """
+    window._table.select_row(0)
+    seen = []
+
+    def close_the_dialog():
+        dialog = QApplication.activeModalWidget()
+        seen.append((dialog, dialog.parent(), dialog.isModal()))
+        dialog.reject()
+
+    QTimer.singleShot(50, close_the_dialog)
+    window.show_export()
+
+    dialog, parent, modal = seen[0]
+    assert isinstance(dialog, ExportDialog)
+    assert parent is window and modal
+    assert "closed without exporting" in window._status_label.text()
 
 
 def test_the_summarys_button_opens_the_folder(window, recordings, out, monkeypatch):

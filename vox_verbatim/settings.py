@@ -786,6 +786,10 @@ class CostSettings:
     disputed region carries and on how hard the model is asked to think, so
     it is an average of very unequal requests rather than a price."""
 
+    smoothing_per_request: float = 0.03
+    """One request that edits about 2,000 words into the smooth transcript.
+    Estimate. Not checked."""
+
     confirm_before_running: bool = True
     """Whether the estimate is shown and agreed to before a run starts."""
 
@@ -809,6 +813,7 @@ class CostSettings:
             "assemblyai_per_minute",
             "deepgram_per_minute",
             "adjudication_per_request",
+            "smoothing_per_request",
         ):
             setattr(
                 settings,

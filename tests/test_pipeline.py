@@ -24,7 +24,7 @@ import logging
 import pytest
 
 from vox_verbatim.settings import TranscriptionSettings
-from vox_verbatim.transcription import exports, pipeline
+from vox_verbatim.transcription import exports, pipeline, smoothing
 from vox_verbatim.transcription.calibration import (
     CalibrationStore,
     Observation,
@@ -53,6 +53,8 @@ from tests.test_passes import (
     spoken_words,
     three_services,
 )
+from tests.test_smoothing import FakeClient as SmoothingClient
+from tests.test_smoothing import _transcript as smoothing_transcript
 
 
 # -- Setting a run up ----------------------------------------------------
@@ -64,12 +66,15 @@ def offline_settings(**processing) -> TranscriptionSettings:
     Escalation, adjudication and forced alignment are switched off because
     each of them would otherwise reach for a real service through the real
     registry. They have their own tests; what is being tested here is the
-    shape of a run and what happens to it when a service fails.
+    shape of a run and what happens to it when a service fails. The smooth
+    transcript is switched off for the same reason; the tests at the end of
+    this file switch it on with a fake model.
     """
     settings = TranscriptionSettings()
     settings.processing.escalation_enabled = False
     settings.processing.adjudication_enabled = False
     settings.processing.forced_alignment_enabled = False
+    settings.smoothing.run_after_transcription = False
     for name, value in processing.items():
         setattr(settings.processing, name, value)
     return settings
@@ -1346,3 +1351,255 @@ def test_a_word_with_only_a_start_still_places_its_phrase():
     phrases = pipeline._phrases_to_realign([start_only, whole])
 
     assert pipeline._phrase_audio_span(phrases[0]) == Span(1.0, 1.8)
+
+
+# -- The smooth transcript at the end of a run -----------------------------
+
+
+def smoothing_settings() -> TranscriptionSettings:
+    """Offline settings with the smooth transcript switched on."""
+    settings = offline_settings()
+    settings.smoothing.run_after_transcription = True
+    settings.openai_adjudication.api_key = "sk-test-key"
+    return settings
+
+
+def fake_smoother(monkeypatch, client) -> list[TranscriptionSettings]:
+    """Hand the pipeline a smoother that talks to ``client``.
+
+    Returns the settings each smoother was built from, so a test can tell
+    whether one was built at all.
+    """
+    built: list[TranscriptionSettings] = []
+
+    def build(settings, _folder):
+        built.append(settings)
+        return smoothing.Smoother(
+            api_key=settings.openai_adjudication.api_key,
+            model=settings.smoothing.model,
+            reasoning_effort=settings.smoothing.reasoning_effort,
+            style_prompt=settings.smoothing.prompt,
+            client=client,
+        )
+
+    monkeypatch.setattr(pipeline, "_build_smoother", build)
+    return built
+
+
+def echo(turns, _index):
+    return [(number, text) for number, _speaker, text in turns]
+
+
+def smooth_file(run: Run):
+    return run.store.exports_folder / smoothing.SMOOTH_EXPORT_NAME
+
+
+def report_of(run: Run) -> str:
+    return (run.store.exports_folder / exports.REPORT_EXPORT_NAME).read_text(encoding="utf-8")
+
+
+def test_with_the_setting_on_a_run_writes_the_smooth_transcript(transcribe, monkeypatch):
+    client = SmoothingClient(echo)
+    fake_smoother(monkeypatch, client)
+
+    run = transcribe(settings=smoothing_settings())
+
+    text = smooth_file(run).read_text(encoding="utf-8")
+    assert "Recording: meeting.wav" in text
+    assert "fifteen thousand rand" in text
+    assert (run.store.exports_folder / exports.TEXT_EXPORT_NAME).exists()
+    assert not run.transcript.warnings
+    assert len(client.calls) == 1
+    assert [request.purpose for request in run.transcript.requests].count("smoothing") == 1
+
+
+def test_the_smoothing_requests_are_saved_and_reported(transcribe, monkeypatch):
+    fake_smoother(monkeypatch, SmoothingClient(echo))
+
+    run = transcribe(settings=smoothing_settings())
+
+    saved = [request["purpose"] for request in run.saved["requests"]]
+    assert saved.count("smoothing") == 1
+    report = report_of(run)
+    assert "## The smooth transcript" in report
+    assert "1 request" in report
+    # The rate in Settings, times one request.
+    assert "0.03 USD" in report
+    # Smoothing is not a second opinion, so it is not listed as one.
+    assert "| Smoothing |" not in report
+
+
+def test_the_smoother_after_a_run_uses_the_folders_own_prompt(tmp_path, monkeypatch):
+    asked: list = []
+
+    def folder_prompt(folder):
+        asked.append(folder)
+        return "Folder style."
+
+    monkeypatch.setattr(smoothing, "folder_smoothing_prompt", folder_prompt)
+
+    smoother = pipeline._build_smoother(smoothing_settings(), tmp_path)
+
+    assert asked == [tmp_path]
+    assert smoother._style_prompt == "Folder style."
+
+
+def test_with_the_setting_off_no_smooth_file_and_no_request(transcribe, monkeypatch):
+    built = fake_smoother(monkeypatch, SmoothingClient(echo))
+
+    run = transcribe(settings=offline_settings())
+
+    assert built == []
+    assert not smooth_file(run).exists()
+    assert all(request.purpose != "smoothing" for request in run.transcript.requests)
+    assert "smooth transcript" not in report_of(run)
+
+
+def test_with_the_setting_off_an_older_smooth_file_is_removed(transcribe, monkeypatch):
+    fake_smoother(monkeypatch, SmoothingClient(echo))
+    first = transcribe(settings=smoothing_settings())
+    assert smooth_file(first).exists()
+
+    second = transcribe(settings=offline_settings())
+
+    assert not smooth_file(second).exists()
+
+
+def test_a_failed_smoothing_still_finishes_the_transcription(transcribe, monkeypatch):
+    fake_smoother(monkeypatch, SmoothingClient(echo))
+    first = transcribe(settings=smoothing_settings())
+    assert smooth_file(first).exists()
+
+    def refuse(_turns, _index):
+        raise ConnectionError("no network")
+
+    fake_smoother(monkeypatch, SmoothingClient(refuse))
+    run = transcribe(settings=smoothing_settings())
+
+    assert run.transcript.verbatim_text == SENTENCE
+    assert run.store.transcript_path.exists()
+    assert (run.store.exports_folder / exports.TEXT_EXPORT_NAME).exists()
+    # The older smooth file no longer matches, so it is gone.
+    assert not smooth_file(run).exists()
+    assert run.warned_about("The smooth transcript was not made", "did not answer")
+    report = report_of(run)
+    assert "## The smooth transcript" in report
+    assert "did not answer" in report
+    # The failed requests are still recorded.
+    assert any(request["purpose"] == "smoothing" for request in run.saved["requests"])
+
+
+def test_no_api_key_is_said_in_the_window_and_the_report(transcribe, monkeypatch):
+    fake_smoother(monkeypatch, SmoothingClient(echo))
+    settings = smoothing_settings()
+    settings.openai_adjudication.api_key = ""
+
+    run = transcribe(settings=settings)
+
+    assert run.warned_about("The smooth transcript was not made", "API key")
+    assert "no OpenAI API key" in report_of(run)
+
+
+def test_a_fault_in_smoothing_does_not_cost_the_transcript(transcribe, monkeypatch):
+    def broken(_settings, _folder):
+        raise RuntimeError("the engine broke")
+
+    monkeypatch.setattr(pipeline, "_build_smoother", broken)
+
+    run = transcribe(settings=smoothing_settings())
+
+    assert run.transcript.verbatim_text == SENTENCE
+    assert run.warned_about("The smooth transcript was not made", "the engine broke")
+
+
+def _two_part_smoothing(tmp_path, monkeypatch, answer):
+    """Smooth a two-speaker transcript sent in one part per turn."""
+    transcript = smoothing_transcript(("0", "we we went home"), ("1", "um and then we ate dinner beside the river"))
+    store = TranscriptStore(tmp_path / "talk.wav")
+    client = SmoothingClient(answer)
+
+    def build(settings, _folder):
+        return smoothing.Smoother(api_key="sk-test-key", model="m", client=client, part_words=1)
+
+    monkeypatch.setattr(pipeline, "_build_smoother", build)
+    pipeline._smooth(transcript, smoothing_settings(), store, pipeline._Reporter(None))
+    return transcript, store
+
+
+def test_a_part_with_no_answer_is_named_as_such(tmp_path, monkeypatch):
+    def second_part_fails(turns, _index):
+        if any(number == 2 for number, _speaker, _text in turns):
+            raise ConnectionError("no network")
+        return echo(turns, _index)
+
+    transcript, store = _two_part_smoothing(tmp_path, monkeypatch, second_part_fails)
+
+    # The file still matches the transcript: the failed part keeps its
+    # literal words under a warning line.
+    assert (store.exports_folder / smoothing.SMOOTH_EXPORT_NAME).exists()
+    assert len(transcript.warnings) == 1
+    warning = transcript.warnings[0]
+    assert "did not answer for 1 part, so the literal words are kept there" in warning
+    assert "did not pass its check" not in warning
+
+
+def test_a_part_that_fails_its_check_is_named_as_such(tmp_path, monkeypatch):
+    def drop_the_second_turn(turns, _index):
+        return [(number, "" if number == 2 else text) for number, _speaker, text in turns]
+
+    transcript, _store = _two_part_smoothing(tmp_path, monkeypatch, drop_the_second_turn)
+
+    assert len(transcript.warnings) == 1
+    assert "edit of 1 part did not pass its check" in transcript.warnings[0]
+    assert "did not answer" not in transcript.warnings[0]
+
+
+def test_the_run_finishes_when_the_smoothing_does(transcribe, monkeypatch):
+    # Started, saved before smoothing, then finished after it.
+    stamps = iter(["2026-10-08T10:00:00", "2026-10-08T10:01:00", "2026-10-08T10:05:00"])
+    monkeypatch.setattr(pipeline, "_now", lambda: next(stamps))
+    fake_smoother(monkeypatch, SmoothingClient(echo))
+
+    run = transcribe(settings=smoothing_settings())
+
+    assert run.transcript.completed_at == "2026-10-08T10:05:00"
+    assert run.saved["completed_at"] == "2026-10-08T10:05:00"
+
+
+def test_the_report_charges_only_the_answered_smoothing_requests(transcribe, monkeypatch):
+    def refuse(_turns, _index):
+        raise ConnectionError("no network")
+
+    fake_smoother(monkeypatch, SmoothingClient(refuse))
+
+    run = transcribe(settings=smoothing_settings())
+
+    report = report_of(run)
+    assert "of which 0 answered" in report
+    assert "an estimated 0.00 USD" in report
+
+
+def test_the_report_does_not_claim_a_stale_file_is_gone():
+    transcript = Transcript(
+        recording_name="talk.wav",
+        warnings=[
+            "The smooth transcript was not made: no OpenAI API key has been entered.",
+            f"An older {smoothing.SMOOTH_EXPORT_NAME} could not be removed, and it does "
+            "not match this transcript.",
+        ],
+    )
+
+    report = exports.render_review_report(transcript)
+
+    assert "## The smooth transcript" in report
+    assert "was left beside this transcript" not in report
+
+
+def test_smoothing_says_what_it_is_doing(transcribe, monkeypatch):
+    fake_smoother(monkeypatch, SmoothingClient(echo))
+    seen: list[str] = []
+
+    transcribe(settings=smoothing_settings(), progress=lambda update: seen.append(update.stage))
+
+    assert "Making the smooth transcript with the language model." in seen
+    assert seen[-1] == "The smooth transcript is ready."

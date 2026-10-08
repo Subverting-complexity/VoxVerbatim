@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from vox_verbatim.settings import (
     DEFAULT_ELEVENLABS_TRANSCRIPTION_MODEL,
+    DEFAULT_SMOOTHING_PROMPT,
     AssemblyAiSettings,
     CostSettings,
     DeepgramSettings,
@@ -39,6 +40,7 @@ from vox_verbatim.settings import (
     OpenAiTranscriptionSettings,
     ProcessingSettings,
     Settings,
+    SmoothingSettings,
     TranscriptionSettings,
 )
 from vox_verbatim.transcription.vocabulary import (
@@ -364,6 +366,83 @@ def test_showing_a_key_is_said_out_loud(qapp, monkeypatch):
         "The Deepgram API key is now shown.",
         "The Deepgram API key is now hidden.",
     ]
+
+
+# -- The smooth transcript page --------------------------------------------
+
+
+def test_the_smoothing_page_shows_the_saved_values_and_saves_a_change(all_pages):
+    page = _page(all_pages, notes.SMOOTHING)
+    settings = Settings()
+    settings.transcription.smoothing = SmoothingSettings(
+        run_after_transcription=False, model="edit-1", reasoning_effort="high", prompt="Be brief."
+    )
+
+    page.show_settings(settings)
+
+    assert page._run_box.isChecked() is False
+    assert page._model_edit.text() == "edit-1"
+    assert page._effort_edit.text() == "high"
+    assert page._prompt_box.toPlainText() == "Be brief."
+
+    page._run_box.setChecked(True)
+    page._prompt_box.setPlainText("Keep it plain.\n\nNo summaries.")
+    changed = Settings()
+    page.apply_to(changed)
+    assert changed.transcription.smoothing.run_after_transcription is True
+    # Kept as typed, line breaks and all.
+    assert changed.transcription.smoothing.prompt == "Keep it plain.\n\nNo summaries."
+
+
+def test_restore_default_prompt_puts_the_default_back_and_says_so(all_pages, monkeypatch):
+    said: list[str] = []
+    monkeypatch.setattr(
+        pages_module, "announce", lambda widget, message, urgent=False: said.append(message)
+    )
+    page = _page(all_pages, notes.SMOOTHING)
+    page.show_settings(Settings())
+    page._prompt_box.setPlainText("Something else.")
+
+    page._restore_button.click()
+
+    assert page._prompt_box.toPlainText() == DEFAULT_SMOOTHING_PROMPT
+    assert said == ["The default style prompt is back in the box."]
+
+
+def test_an_empty_smoothing_model_or_prompt_is_refused(all_pages):
+    page = _page(all_pages, notes.SMOOTHING)
+    page.show_settings(Settings())
+    page._model_edit.setText("  ")
+    page._prompt_box.setPlainText("  \n ")
+
+    problems = page.problems()
+
+    assert [problem.widget for problem in problems] == [page._model_edit, page._prompt_box]
+    assert "model name is empty" in problems[0].message
+    assert "style prompt is empty" in problems[1].message
+
+
+def test_an_empty_smoothing_reasoning_effort_is_accepted(all_pages):
+    page = _page(all_pages, notes.SMOOTHING)
+    page.show_settings(Settings())
+    page._effort_edit.setText("")
+
+    assert page.problems() == []
+
+
+def test_the_restore_button_is_named_and_explained(all_pages):
+    page = _page(all_pages, notes.SMOOTHING)
+
+    assert page._restore_button.accessibleName() == "Restore default prompt"
+    assert page._restore_button.accessibleDescription()
+    assert page.note_keys[page._restore_button] == "smoothing.prompt"
+
+
+def test_the_smoothing_notes_say_which_key_it_uses_and_who_adds_the_format():
+    assert "OpenAI API key already entered" in notes.note_text(
+        "smoothing.run_after_transcription"
+    )
+    assert "added by the application" in notes.note_text("smoothing.prompt")
 
 
 # -- Saying whether a service is set up ------------------------------------
@@ -890,7 +969,14 @@ def every_setting_changed() -> Settings:
                 assemblyai_per_minute=0.001,
                 deepgram_per_minute=0.0099,
                 adjudication_per_request=1.25,
+                smoothing_per_request=0.75,
                 confirm_before_running=False,
+            ),
+            smoothing=SmoothingSettings(
+                run_after_transcription=False,
+                model="edit-9",
+                reasoning_effort="medium",
+                prompt="Edit gently.\n\nKeep every name.",
             ),
         ),
     )

@@ -58,6 +58,7 @@ COSTS = "Costs"
 ELEVENLABS = "ElevenLabs"
 OPENAI_TRANSCRIPTION = "OpenAI transcription"
 OPENAI_ADJUDICATION = "OpenAI adjudication"
+SMOOTHING = "Smooth transcript"
 MICROSOFT = "Microsoft MAI"
 ASSEMBLYAI = "AssemblyAI"
 DEEPGRAM = "Deepgram"
@@ -74,6 +75,7 @@ CATEGORIES: tuple[str, ...] = (
     ELEVENLABS,
     OPENAI_TRANSCRIPTION,
     OPENAI_ADJUDICATION,
+    SMOOTHING,
     MICROSOFT,
     ASSEMBLYAI,
     DEEPGRAM,
@@ -115,6 +117,11 @@ CATEGORY_SUMMARIES: dict[str, str] = {
     OPENAI_ADJUDICATION: (
         "How the application asks an OpenAI reasoning model to settle a word the "
         "other services could not agree on."
+    ),
+    SMOOTHING: (
+        "How the application makes the smooth transcript: an edited copy that is easy "
+        "to read, made by the OpenAI language model with the key already entered for "
+        "adjudication."
     ),
     MICROSOFT: (
         "How the application talks to Microsoft MAI-Transcribe through your own "
@@ -956,6 +963,30 @@ It matters most on difficult recordings, where the number of requests is large.
 Multiply it by the ceiling on escalations to see the worst case a single
 recording can reach.""",
     ),
+    SettingNote(
+        key="cost.smoothing_per_request",
+        category=COSTS,
+        title="Smoothing cost per request",
+        summary=(
+            "What one request that edits about 2,000 words into the smooth transcript "
+            "is expected to cost. Used for the estimate, never for billing."
+        ),
+        note="""\
+This is what you expect one smoothing request to cost. The smooth transcript is
+made by sending the finished transcript to the language model in parts of about
+2,000 words, one request for each part.
+
+Unlike adjudication, the number of requests can be worked out before the run.
+People say about 150 words a minute, so the estimate counts one request for
+about every 13 minutes of audio. A part whose edit fails its check is sent once
+more, which the estimate does not count.
+
+The price follows the model and the reasoning effort on the Smooth transcript
+page. The default figure is an estimate that was not checked against what OpenAI
+charges, so check it before you trust it.
+
+It is used only when the smooth transcript is made after each transcription.""",
+    ),
     # -- ElevenLabs --------------------------------------------------------
     SettingNote(
         key="elevenlabs.enabled",
@@ -1283,6 +1314,94 @@ because it does not know the parameter.""",
         "These are added to every adjudication request, on top of the model and the "
         "reasoning effort above.",
         '{"max_output_tokens": 2000}',
+    ),
+    # -- Smooth transcript --------------------------------------------------
+    SettingNote(
+        key="smoothing.run_after_transcription",
+        category=SMOOTHING,
+        title="Make the smooth transcript after each transcription",
+        summary=(
+            "Whether transcript-smooth.txt is made as soon as a transcription "
+            "finishes. Switched off, nothing is sent for it."
+        ),
+        note="""\
+The smooth transcript is an edited copy of the transcript that is easy to read.
+The language model removes fillers, stutters, repeats and false starts, fixes
+punctuation, and joins the turns of each speaker. It is written to
+transcript-smooth.txt beside transcript.txt, which keeps the literal words and
+is never changed.
+
+When this is on, the smooth transcript is made at the end of each
+transcription. It uses the OpenAI API key already entered on the OpenAI
+adjudication page, so it needs no key of its own, and its cost is in the
+estimate shown before a run.
+
+If it cannot be made, for example because there is no key or no network, the
+transcription still finishes. The window and the review report say why, and no
+older smooth file is left beside the new transcript, because it would not match
+it.
+
+When this is off, no request is sent and no smooth file is written.""",
+    ),
+    SettingNote(
+        key="smoothing.model",
+        category=SMOOTHING,
+        title="Smoothing model",
+        summary=(
+            "Which OpenAI model edits the transcript into the smooth copy. It cannot "
+            "be empty."
+        ),
+        note="""\
+This is the OpenAI model that edits the transcript. It is plain text rather than
+a list, because OpenAI adds and renames models more often than this application
+is released. A name that does not exist is refused by OpenAI, and the review
+report then says that the smooth transcript was not made.
+
+The default is gpt-6.1-sol. A more capable model edits more naturally and costs
+more for each request.
+
+The box cannot be empty. An empty name would be replaced by the default the next
+time the settings were loaded, so OK refuses it and says so.""",
+    ),
+    SettingNote(
+        key="smoothing.reasoning_effort",
+        category=SMOOTHING,
+        title="Smoothing reasoning effort",
+        summary=(
+            "How hard the model is asked to think. Leave it empty to leave the "
+            "parameter out of the request."
+        ),
+        note="""\
+This says how much thinking the model does before it answers. More thinking
+costs more for each request, and editing for readability rarely needs much.
+
+Empty is a real answer: it leaves the parameter out of the request, which a
+model with no reasoning control needs. The words a model accepts are its own;
+recent models take low, medium, high, xhigh and max. The default is low.""",
+    ),
+    SettingNote(
+        key="smoothing.prompt",
+        category=SMOOTHING,
+        title="Style prompt",
+        summary=(
+            "What the model is told about how to edit the transcript. The format "
+            "rules the application needs are added by the application."
+        ),
+        note="""\
+This is what the model is told about the style of the smooth transcript: what to
+remove, what to keep, and what it must never do. Change it to suit how you want
+the transcript to read.
+
+It describes only the style. The rules the application depends on, such as
+returning every turn by its number and keeping every [UNCERTAIN: ...] marker
+exactly as it is, are added by the application after this prompt. They are not
+part of this box and cannot be edited, because the application checks each
+answer against them.
+
+Restore default prompt puts the prompt the application came with back in the
+box. Nothing is saved until you press OK.
+
+The box cannot be empty. OK refuses an empty prompt and says so.""",
     ),
     # -- Microsoft MAI ------------------------------------------------------
     SettingNote(

@@ -94,6 +94,7 @@ from vox_verbatim.transcription.project import (
     remove_learned_name,
 )
 from vox_verbatim.transcription.providers.registry import DEFAULT_FULL_PASS_PROVIDERS
+from vox_verbatim.transcription.smoothing import requests_for_duration
 from vox_verbatim.transcription.runner import (
     RecordingOutcome,
     RunSummary,
@@ -1200,12 +1201,26 @@ class TranscribeDialog(QDialog):
         services disagree, which cannot be known until they have answered, and
         a made-up number presented as a figure would be worse than saying
         plainly that it cannot be predicted.
+
+        The smooth transcript is included when Settings make it after each
+        transcription. Its requests follow from the length of each recording.
         """
         return estimate_cost(
             self.known_duration_seconds(),
             self.services_that_will_run(),
             rates=self._settings.cost,
             vocabulary_terms_sent=self.vocabulary_terms_will_be_sent(),
+            smoothing_requests=self.smoothing_requests(),
+        )
+
+    def smoothing_requests(self) -> int:
+        """About how many requests the smooth transcripts of this run take."""
+        if not self._settings.smoothing.run_after_transcription:
+            return 0
+        return sum(
+            requests_for_duration(recording.duration_seconds)
+            for recording in self._recordings
+            if recording.duration_seconds
         )
 
     def vocabulary_terms_will_be_sent(self) -> bool:
@@ -1240,6 +1255,11 @@ class TranscribeDialog(QDialog):
                     f"{cost.provider.display_name}: unpriced, because no rate has been "
                     "entered for it in Settings. It is not in the total."
                 )
+        if estimate.smoothing_requests:
+            lines.append(
+                f"Smooth transcript: about "
+                f"{describe_money(estimate.smoothing_total, estimate.currency)}."
+            )
         if any(cost.is_priced for cost in estimate.per_provider):
             lines.append(
                 f"Estimated total: {describe_money(estimate.total, estimate.currency)}."

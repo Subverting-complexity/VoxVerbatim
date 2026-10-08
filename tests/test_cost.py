@@ -17,8 +17,10 @@ from vox_verbatim.transcription.cost import (
     describe_money,
     estimate_cost,
     rates_mapping,
+    smoothing_rate,
 )
 from vox_verbatim.transcription.model import Provider
+from vox_verbatim.transcription.smoothing import requests_for_duration
 
 #: A minute of audio at these rates, chosen so the sums are easy to follow.
 RATES = {
@@ -255,3 +257,43 @@ def test_an_unpriced_elevenlabs_is_still_unpriced_with_a_vocabulary():
     assert not estimate.per_provider[0].is_priced
     assert estimate.per_provider[0].amount is None
     assert estimate.surcharged == ()
+
+
+def test_the_smooth_transcript_is_added_to_the_total_and_said():
+    estimate = estimate_cost(
+        600.0,
+        [Provider.ELEVENLABS],
+        RATES,
+        smoothing_requests=3,
+        smoothing_rate_per_request=0.05,
+    )
+
+    assert estimate.smoothing_total == pytest.approx(0.15)
+    # Ten minutes of ElevenLabs at a cent a minute, and the smoothing.
+    assert estimate.total == pytest.approx(0.25)
+    assert "smooth transcript takes about 3 requests" in estimate.summary
+    assert "0.15 USD" in estimate.summary
+
+
+def test_no_smoothing_requests_leaves_smoothing_out():
+    estimate = estimate_cost(600.0, [Provider.ELEVENLABS], RATES, smoothing_rate_per_request=1.0)
+
+    assert estimate.smoothing_total == 0.0
+    assert "smooth transcript" not in estimate.summary
+
+
+def test_the_price_of_a_smoothing_request_comes_from_the_cost_settings():
+    from vox_verbatim.settings import CostSettings
+
+    assert smoothing_rate(CostSettings(smoothing_per_request=0.04)) == 0.04
+    assert smoothing_rate({"smoothing_per_request": 0.5}) == 0.5
+    assert smoothing_rate({}) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("seconds", "requests"),
+    [(0.0, 0), (60.0, 1), (13 * 60.0, 1), (14 * 60.0, 2), (3600.0, 5)],
+)
+def test_the_smoothing_requests_follow_the_length_of_the_recording(seconds, requests):
+    """At 150 words a minute, one part of 2,000 words is about 13 minutes."""
+    assert requests_for_duration(seconds) == requests

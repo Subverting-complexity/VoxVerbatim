@@ -994,7 +994,7 @@ It is used only when the smooth transcript is made after each transcription.""",
         title="Use ElevenLabs Scribe",
         summary=(
             "Whether ElevenLabs is called at all. It supplies the timings and speaker "
-            "labels every transcript is built on, so a run without it is not a run."
+            "labels. Without it a transcript has the words only."
         ),
         note="""\
 This switches ElevenLabs Scribe on and off.
@@ -1123,7 +1123,7 @@ it, and none of them currently does.""",
         title="Use OpenAI for transcription",
         summary=(
             "Whether OpenAI is asked what was said. It is the second full reading "
-            "that ElevenLabs is checked against, so a run needs it."
+            "that ElevenLabs is checked against."
         ),
         note="""\
 This switches OpenAI transcription on and off.
@@ -1135,8 +1135,10 @@ without a second one there is nothing to disagree, nothing to escalate and
 nothing to adjudicate, and the confidence figures have nothing to check
 themselves against.
 
-So a run with this off is not a run. You are told before anything is sent
-rather than at the end.
+You can switch it off, and a run still goes ahead with the other services
+that are on. But with fewer readings, fewer words can be checked against each
+other, so more of them wait for you in review. A run needs at least one of
+ElevenLabs, OpenAI or Microsoft switched on.
 
 It is asked for words only. It is not asked for timing or for speakers, both
 of which come from ElevenLabs, so nothing on this page mentions either.""",

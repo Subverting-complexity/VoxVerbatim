@@ -75,6 +75,7 @@ from vox_verbatim.json_store import (
     write_json_object,
 )
 from vox_verbatim.transcription.model import Confidence, Language
+from vox_verbatim.transcription.normalise import normalise
 
 _log = logging.getLogger(__name__)
 
@@ -354,6 +355,13 @@ class Occurrence:
         moment ago, so the occurrence would come back as a loose word with no
         history, looking like a fresh finding rather than like damage. The
         analysis finds the word again on the next run in any case.
+
+        The comparison form is worked out again from ``detected_text``, as
+        :meth:`ReplacementRule.from_dict` does for a rule. The review window
+        finds the rule an occurrence taught by comparing the two forms, so if
+        only the rule's form were brought up to date, a project saved before
+        the comparison forms changed would load with the two disagreeing, and
+        reversing a correction would leave its rule behind to go on applying.
         """
         if not isinstance(data, dict):
             return None
@@ -366,7 +374,9 @@ class Occurrence:
             recording_name=_text(data.get("recording_name")),
             token_id=_text(data.get("token_id")),
             detected_text=_text(data.get("detected_text")),
-            normalised_text=_text(data.get("normalised_text")),
+            normalised_text=(
+                normalise(_text(data.get("detected_text"))) or _text(data.get("normalised_text"))
+            ),
             start=_optional_number(data.get("start")),
             end=_optional_number(data.get("end")),
             confidence_strength=_optional_number(data.get("confidence_strength")),
@@ -653,6 +663,15 @@ class ReplacementRule:
         throw away a correction the person accepted. What cannot be repaired
         is a rule with nothing to match or nothing to put in its place, since
         that rule could never do anything but confuse whoever read the list.
+
+        The comparison form is worked out again from ``matched_text`` rather
+        than read from the file. The stored form is whatever the code said
+        when the rule was saved, and :meth:`ProjectState.rule_for` matches
+        against it exactly, so once the comparison forms change -- as they
+        did when "ja" came to compare as "yeah" -- every older rule would
+        stop matching and nothing would say so. The stored form is kept only
+        for text that normalises to nothing, where the window saved a
+        case-folded form of its own.
         """
         if not isinstance(data, dict):
             return None
@@ -668,7 +687,9 @@ class ReplacementRule:
         return cls(
             id=identifier,
             matched_text=matched,
-            normalised_text=_text(data.get("normalised_text")),
+            normalised_text=(
+                normalise(matched) or _text(data.get("normalised_text")) or matched.casefold()
+            ),
             replacement=replacement,
             language=_language(data.get("language")),
             created_at=_text(data.get("created_at")),

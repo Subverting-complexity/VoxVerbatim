@@ -14,17 +14,20 @@ that must.
 from __future__ import annotations
 
 import pytest
+from vox_verbatim.transcription.model import Language
 
 from vox_verbatim.transcription.normalise import (
     EquivalenceKind,
     are_equivalent,
     equivalence_kind,
+    is_filler,
     is_number_word,
     is_punctuation_only,
     normalise,
     normalise_phrase,
     normalise_sequence,
     read_number,
+    spelled_as,
 )
 
 
@@ -153,6 +156,28 @@ def test_ordinary_words_are_not_dragged_into_the_german_equivalence(first, secon
     find again once it was in a transcript.
     """
     assert not are_equivalent(first, second)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("Ja.", "Yeah."), ("ja", "yeah"), ("Yeah,", "JA"), ("Ja, yeah", "yeah ja")],
+)
+def test_ja_and_yeah_are_the_same_word(first, second):
+    """Afrikaans and German write "ja" where English writes "yeah"."""
+    assert are_equivalent(first, second)
+    assert equivalence_kind(first, second) is EquivalenceKind.SPELLING_VARIANT
+
+
+@pytest.mark.parametrize(("first", "second"), [("jam", "yeah"), ("Ja.", "yes"), ("ja", "yea")])
+def test_only_ja_and_yeah_are_joined(first, second):
+    assert not are_equivalent(first, second)
+
+
+def test_spelled_as_ignores_capitals_and_punctuation_only():
+    assert spelled_as("Ja.", "ja")
+    assert spelled_as("Yeah,", "yeah")
+    assert not spelled_as("Ja.", "yeah")
+    assert not spelled_as("Jam", "ja")
 
 
 # -- Numbers ------------------------------------------------------------
@@ -609,3 +634,32 @@ def test_a_word_that_can_belong_to_a_spoken_number_is_a_number_word(text):
 @pytest.mark.parametrize("text", ["cost", "rand", "", "data", "often"])
 def test_an_ordinary_word_is_not_a_number_word(text):
     assert not is_number_word(text)
+
+
+# -- Fillers ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", ["Um,", "äh", "uh", "Ähm.", "um uh"])
+def test_a_filler_sound_is_a_filler(text: str) -> None:
+    assert is_filler(text)
+
+
+@pytest.mark.parametrize("text", ["umbrella", "m", "", ",", "um we"])
+def test_a_word_is_not_a_filler(text: str) -> None:
+    assert not is_filler(text)
+
+
+@pytest.mark.parametrize("text", ["er", "Um,", "um er"])
+def test_a_german_word_spelled_like_a_filler_is_not_a_filler_in_german(text: str) -> None:
+    assert is_filler(text)
+    assert not is_filler(text, Language.GERMAN)
+
+
+@pytest.mark.parametrize("language", [Language.ENGLISH, Language.AFRIKAANS, Language.UNKNOWN])
+def test_er_and_um_are_fillers_outside_german(language: Language) -> None:
+    assert is_filler("er", language)
+    assert is_filler("um", language)
+
+
+def test_a_german_filler_sound_is_still_a_filler_in_german() -> None:
+    assert is_filler("äh", Language.GERMAN)

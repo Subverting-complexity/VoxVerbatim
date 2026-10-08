@@ -169,6 +169,7 @@ from vox_verbatim.transcription.project import (
     ProjectStore,
     merge_learned_names,
     ReplacementRule,
+    SpeakerDoubtItem,
     WordGroup,
 )
 from vox_verbatim.transcription.vocabulary import VocabularyIndex
@@ -177,6 +178,8 @@ from vox_verbatim.ui.review_lists import (
     GroupRow,
     OccurrenceModel,
     OccurrenceView,
+    SpeakerDoubtModel,
+    SpeakerDoubtView,
     WordGroupModel,
     WordGroupView,
     build_group_rows,
@@ -187,8 +190,11 @@ from vox_verbatim.ui.review_lists import (
     loose_key,
     low_confidence_count,
     restored_token,
+    speaker_doubt_count_text,
+    speaker_doubts_in,
     spoken_group_summary,
     spoken_occurrence_summary,
+    spoken_speaker_doubt_summary,
     time_display,
 )
 from vox_verbatim.ui.review_queue import (
@@ -244,6 +250,8 @@ NO_TIMING = "No timing at all"
 NO_ITEM_SELECTED = "No item selected"
 NO_AUDIO = "This word has no audio behind it, so there is nothing to play."
 NO_CANONICAL_AUDIO = "There is no audio file for this recording, so nothing can be played."
+NO_SPEAKER_DOUBT_SELECTED = "No speaker doubt is selected."
+NO_SPEAKER_DOUBT_AUDIO = "This stretch has no time behind it, so there is nothing to play."
 
 #: Said when the word an occurrence points at is not in the transcript any
 #: more, which happens when the recording was transcribed again and the word
@@ -741,6 +749,7 @@ REASON_FILTERS = "reason_filters"
 CONFIDENCE_FILTERS = "confidence_filters"
 GROUPS = "groups"
 OCCURRENCES = "occurrences"
+SPEAKER_DOUBTS = "speaker_doubts"
 WORD_DETAILS = "word_details"
 CANDIDATES = "candidates"
 CANDIDATE_TEXT = "candidate_text"
@@ -860,6 +869,23 @@ _NOTES: dict[str, ControlNote] = {
 
             F3 and Shift+F3 move to the next and previous occurrence from anywhere in
             the window.
+            """
+        ),
+    ),
+    SPEAKER_DOUBTS: ControlNote(
+        "Speaker doubts",
+        "Stretches of speech where the services agree on the words but heard "
+        "different people say them.",
+        _reflowed(
+            """
+            One row per stretch of speech rather than per word. The words in these
+            stretches are not in doubt, so they are not in the word list; what is in
+            doubt is which of two people said them. Each row gives the file, where the
+            stretch starts and ends, and the two speakers the services heard.
+
+            Press Enter on a row to play the stretch, with a little of the audio either
+            side of it. This list shows where to listen; it does not yet change who a
+            stretch is attributed to.
             """
         ),
     ),
@@ -1371,7 +1397,10 @@ class ReviewWindow(QMainWindow):
         # and the reasoning behind it is at
         # vox_verbatim.transcription.project.FlaggedItem: reading the
         # folder instead is the obvious-looking simplification and it costs 37
-        # seconds on fifty hour-long recordings, every single time.
+        # seconds on fifty hour-long recordings, every single time. The
+        # stretches whose speaker is in doubt come back the same way.
+        self._speaker_doubt_model = SpeakerDoubtModel(self)
+        self._speaker_doubt_count_label: QLabel | None = None
         self._restore_flagged()
 
         self._group_model = WordGroupModel(self)
@@ -1459,10 +1488,49 @@ class ReviewWindow(QMainWindow):
         self._count_label = QLabel("", side)
         self._count_label.setWordWrap(True)
 
+        # Built here, between the lists and the settings, so that Tab reaches
+        # it after the occurrences and before the settings, which is the order
+        # it sits in on the screen.
+        doubts = self._build_speaker_doubt_list(side)
+
         layout.addWidget(lists, 3)
         layout.addWidget(self._count_label)
+        layout.addWidget(doubts, 1)
         layout.addWidget(self._build_settings(side), 2)
         return side
+
+    def _build_speaker_doubt_list(self, parent: QWidget) -> QWidget:
+        """The stretches of speech whose speaker is in doubt, one row each.
+
+        Kept out of the word list on purpose. The words in these stretches
+        are agreed by every service, and listing each of them for its speaker
+        alone buried the real text doubts under hundreds of identical rows.
+        """
+        holder = QWidget(parent)
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        # No Alt letter. Every letter of the label already belongs to another
+        # control or menu, and Alt+S is "Play with some context", which sits
+        # beside this table in the simple window. Sharing a letter would make
+        # neither reliably reachable. The table is one F6 from the word list
+        # in either window, and Tab reaches it too.
+        self._speaker_doubts_label = QLabel("Speaker doubts", holder)
+        self._speaker_doubts = SpeakerDoubtView(holder)
+        self._speaker_doubts.setModel(self._speaker_doubt_model)
+        self._explain(self._speaker_doubts, SPEAKER_DOUBTS)
+        self._speaker_doubts.setAccessibleName("Speaker doubts")
+        self._speaker_doubts_label.setBuddy(self._speaker_doubts)
+        # This one carries the count, so it is left unnamed, like the count
+        # under the lists. It says so in words when there are none, because
+        # an empty table is silent.
+        self._speaker_doubt_count_label = QLabel(
+            speaker_doubt_count_text(self._speaker_doubt_model.rowCount()), holder
+        )
+        self._speaker_doubt_count_label.setWordWrap(True)
+        layout.addWidget(self._speaker_doubts_label)
+        layout.addWidget(self._speaker_doubts, 1)
+        layout.addWidget(self._speaker_doubt_count_label)
+        return holder
 
     def _build_group_list(self, parent: QWidget) -> QWidget:
         holder = QWidget(parent)
@@ -2463,6 +2531,11 @@ class ReviewWindow(QMainWindow):
             self._on_occurrence_row_changed
         )
         self._candidates.selectionModel().currentRowChanged.connect(self._on_candidate_changed)
+        self._speaker_doubts.selectionModel().currentRowChanged.connect(
+            self._on_speaker_doubt_row_changed
+        )
+        # Enter and a double click both arrive as ``activated``.
+        self._speaker_doubts.activated.connect(lambda _index: self.play_speaker_doubt())
 
         self._process_button.clicked.connect(self.process_low_confidence_words)
         self._regroup_button.clicked.connect(self.regroup_words)
@@ -2643,6 +2716,7 @@ class ReviewWindow(QMainWindow):
         panels = [
             ("Word Groups", self._groups, self._focus_groups),
             ("Occurrences", self._occurrences, self._focus_occurrences),
+            ("Speaker doubts", self._speaker_doubts, self._focus_speaker_doubts),
             ("Review settings", self._settings_group, self._focus_settings),
             ("Item details", self._details_group, self._focus_details),
             ("Decide this word", self._choices_group, self._focus_choices),
@@ -2660,7 +2734,7 @@ class ReviewWindow(QMainWindow):
         """Move the focus to the panel before this one, which F6 alone cannot.
 
         Shift+F6 is what Windows does everywhere else and it was missing here,
-        so overshooting a panel meant going round all seven of them again.
+        so overshooting a panel meant going round every one of them again.
         """
         self._step_panel(-1)
 
@@ -2738,6 +2812,9 @@ class ReviewWindow(QMainWindow):
 
     def _focus_occurrences(self) -> None:
         self._occurrences.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _focus_speaker_doubts(self) -> None:
+        self._speaker_doubts.setFocus(Qt.FocusReason.TabFocusReason)
 
     def _focus_settings(self) -> None:
         self._process_button.setFocus(Qt.FocusReason.TabFocusReason)
@@ -2925,6 +3002,7 @@ class ReviewWindow(QMainWindow):
             target = self._settled if item.settled else self._uncertain
             target.append((item.recording_name, token))
         self._sort_uncertainties()
+        self._show_speaker_doubts()
 
     def _note_uncertainties(self, recording_name: str, transcript: Transcript) -> None:
         """Remember which words of one recording are flagged, and which are settled.
@@ -2971,6 +3049,82 @@ class ReviewWindow(QMainWindow):
         self._state.flagged = [
             item for item in self._state.flagged if item.recording_name != recording_name
         ] + items
+        # Replaced wholesale for the same reason: a stretch is a fact about
+        # the transcript, and a regenerated transcript may have none of the
+        # stretches it had before.
+        self._state.speaker_doubts = [
+            item for item in self._state.speaker_doubts if item.recording_name != recording_name
+        ] + speaker_doubts_in(recording_name, transcript)
+        self._show_speaker_doubts()
+
+    def _show_speaker_doubts(self) -> None:
+        """Fill the speaker doubt list from the project, in folder and clock order.
+
+        Reading a recording to play or show one of its words comes through
+        here too, and usually finds exactly what was already listed. The list
+        is then left alone rather than rebuilt, because a rebuild moves the
+        highlight and makes the reader say the row again over the audio that
+        was just asked for. Where it does change, the selected stretch is kept
+        where it is still listed, so the person is not thrown back to the top.
+        """
+        items = sorted(
+            self._state.speaker_doubts,
+            key=lambda item: (item.recording_name, item.start if item.start is not None else 0.0),
+        )
+        if self._speaker_doubt_count_label is not None:
+            self._speaker_doubt_count_label.setText(speaker_doubt_count_text(len(items)))
+        if items == self._speaker_doubt_model.items():
+            return
+        view = getattr(self, "_speaker_doubts", None)
+        selected = (
+            self._speaker_doubt_model.item_at(view.selected_row()) if view is not None else None
+        )
+        self._speaker_doubt_model.set_items(items)
+        if view is not None and selected is not None and selected in items:
+            # Put back quietly: the person did not move, so nothing is said.
+            quiet, self._quiet = self._quiet, True
+            try:
+                view.select_row(items.index(selected))
+            finally:
+                self._quiet = quiet
+
+    def current_speaker_doubt(self) -> SpeakerDoubtItem | None:
+        return self._speaker_doubt_model.item_at(self._speaker_doubts.selected_row())
+
+    def _on_speaker_doubt_row_changed(
+        self, current: QModelIndex, _previous: QModelIndex
+    ) -> None:
+        item = self._speaker_doubt_model.item_at(current.row()) if current.isValid() else None
+        if item is None:
+            return
+        # On the screen for a magnifier user, and read out unless the list is
+        # being rebuilt rather than moved through by the person.
+        self._set_status(spoken_speaker_doubt_summary(item), alert=not self._quiet)
+
+    def play_speaker_doubt(self) -> bool:
+        """Play the selected stretch of speech, with a little context either side.
+
+        Returns whether playing started, on the same terms as :meth:`play_span`.
+        """
+        item = self.current_speaker_doubt()
+        if item is None:
+            self._set_status(NO_SPEAKER_DOUBT_SELECTED, alert=True, urgent=True)
+            return False
+        path = self._audio_path_for(item.recording_name)
+        if path is None:
+            self._set_status(NO_CANONICAL_AUDIO, alert=True, urgent=True)
+            return False
+        if item.start is None or item.end is None:
+            self._set_status(NO_SPEAKER_DOUBT_AUDIO, alert=True, urgent=True)
+            return False
+        transcript = self._transcript(item.recording_name)
+        audio = transcript.canonical_audio if transcript is not None else None
+        span = AudioSpan(item.start, item.end).padded(
+            SHORT_CONTEXT_SECONDS,
+            SHORT_CONTEXT_SECONDS,
+            limit=audio.duration if audio else None,
+        )
+        return self._play_region(path, span, automatic=False)
 
     def _sort_uncertainties(self) -> None:
         """Put the block in the order somebody works down it, and tell the filters.
@@ -3637,6 +3791,7 @@ class ReviewWindow(QMainWindow):
         # them over: it holds fresh words for every recording this run read and
         # the previous words for every recording it could not.
         self._state.flagged = previous.flagged
+        self._state.speaker_doubts = previous.speaker_doubts
         applied = self._write_rule_answers()
         self.refresh(
             word_key=self._remembered_word_key(),
@@ -4322,6 +4477,14 @@ class ReviewWindow(QMainWindow):
         if span is None:
             self._set_status(NO_AUDIO, alert=True, urgent=True)
             return False
+        return self._play_region(path, span, automatic)
+
+    def _play_region(self, path: Path, span: AudioSpan, automatic: bool) -> bool:
+        """Play one region of one file, waiting for the file to open if it must.
+
+        Shared by the word and by a stretch whose speaker is in doubt, so that
+        the waiting described in :meth:`play_span` is written once.
+        """
         # Rounded rather than truncated. A margin of 0.15 seconds leaves
         # fractions that floating point holds a hair under the true value, and
         # truncating them stopped the clip a millisecond early.

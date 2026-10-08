@@ -275,7 +275,7 @@ _REVIEW_REASON_DISPLAY_NAMES: dict[ReviewReason, str] = {
     ReviewReason.PROVIDER_DISAGREEMENT: "The services disagree",
     ReviewReason.PROPER_NAME_DISAGREEMENT: "A name differs between services",
     ReviewReason.NUMERIC_DISAGREEMENT: "A number differs between services",
-    ReviewReason.HIGH_RISK_ENTITY: "A value that must not be guessed",
+    ReviewReason.HIGH_RISK_ENTITY: "A value that the services heard differently",
     ReviewReason.LOW_ACOUSTIC_CONFIDENCE: "The service was unsure of what it heard",
     ReviewReason.SPEAKER_UNCERTAIN: "The speaker is uncertain",
     ReviewReason.OVERLAPPING_SPEECH: "People are speaking over each other",
@@ -286,6 +286,31 @@ _REVIEW_REASON_DISPLAY_NAMES: dict[ReviewReason, str] = {
     ReviewReason.ESCALATION_UNRESOLVED: "A second opinion did not settle it",
     ReviewReason.ADJUDICATION_DECLINED: "The language model would not decide",
 }
+
+
+def review_reason_text(token: FinalToken, reason: ReviewReason) -> str:
+    """Why this word was flagged, naming the kind of value where it is one.
+
+    "A date that the services heard differently" tells a person what to
+    listen for; the general wording only tells them something is wrong. The
+    first kind of value the word was found to be is named, which is the one
+    its strongest rule found.
+    """
+    if reason is ReviewReason.HIGH_RISK_ENTITY and token.risk_categories:
+        return f"{token.risk_categories[0].noun_phrase} that the services heard differently"
+    return reason.display_name
+
+
+SPEAKER_ONLY_REASONS: frozenset[ReviewReason] = frozenset({ReviewReason.SPEAKER_UNCERTAIN})
+"""Reasons that are about who said a word, and say nothing about its text.
+
+A word held for one of these alone is left out of the word review list. Its
+text is as settled as any other word's, and listing it word by word buried
+the real text doubts under hundreds of rows that all said the same thing.
+The doubt is shown instead once for each stretch of speech it covers.
+Overlapping speech is deliberately not here: two voices at once makes the
+words themselves harder to hear, not only their owner.
+"""
 
 
 class RiskCategory(str, Enum):
@@ -314,6 +339,27 @@ class RiskCategory(str, Enum):
     @property
     def display_name(self) -> str:
         return self.value.replace("_", " ").capitalize()
+
+    @property
+    def noun_phrase(self) -> str:
+        """The kind of value as the start of a sentence, such as "A date"."""
+        return _RISK_NOUN_PHRASES[self]
+
+
+_RISK_NOUN_PHRASES: dict[RiskCategory, str] = {
+    RiskCategory.MONEY: "An amount of money",
+    RiskCategory.DATE: "A date",
+    RiskCategory.TIME: "A time of day",
+    RiskCategory.PERCENTAGE: "A percentage",
+    RiskCategory.TELEPHONE: "A telephone number",
+    RiskCategory.ACCOUNT_NUMBER: "An account number",
+    RiskCategory.VERSION_NUMBER: "A version number",
+    RiskCategory.ADDRESS: "An address",
+    RiskCategory.QUANTITY: "A quantity",
+    RiskCategory.LEGAL_IDENTIFIER: "A legal identifier",
+    RiskCategory.MEDICAL_MEASUREMENT: "A medical measurement",
+    RiskCategory.PRODUCT_CODE: "A product code",
+}
 
 
 class ReviewStatus(str, Enum):
@@ -645,6 +691,14 @@ class FinalToken:
     speaker: str | None = None
     speaker_source: Provider | None = None
     speaker_confidence: Confidence = Confidence.UNRESOLVED
+    speaker_alternative: str | None = None
+    """The other speaker a service heard, where the speaker is in doubt.
+
+    Set when the second opinion disagreed with the backbone: the word keeps
+    one answer in ``speaker`` and the one it did not keep is written here, so
+    a person can be told which two people it might have been. ``None`` where
+    there was no second answer to keep.
+    """
 
     # -- Language
     language: Language = Language.UNKNOWN
@@ -738,6 +792,24 @@ class FinalToken:
     @property
     def needs_review(self) -> bool:
         return self.review_status is ReviewStatus.PENDING or bool(self.review_reasons)
+
+    @property
+    def needs_word_review(self) -> bool:
+        """Whether this word belongs in the word review list.
+
+        True for any reason about the word itself. A word whose only doubt is
+        its speaker is left out, because its text is not in question; see
+        :data:`SPEAKER_ONLY_REASONS`. A pending word with no reason at all is
+        kept, since nothing says its doubt is only about the speaker.
+        """
+        if any(reason not in SPEAKER_ONLY_REASONS for reason in self.review_reasons):
+            return True
+        return not self.review_reasons and self.review_status is ReviewStatus.PENDING
+
+    @property
+    def has_speaker_doubt(self) -> bool:
+        """Whether a service doubted who said this word."""
+        return any(reason in SPEAKER_ONLY_REASONS for reason in self.review_reasons)
 
     @property
     def span(self) -> AudioSpan | None:
@@ -1041,6 +1113,11 @@ class Transcript:
     @property
     def review_tokens(self) -> list[FinalToken]:
         return [token for token in self.tokens if token.needs_review]
+
+    @property
+    def word_review_tokens(self) -> list[FinalToken]:
+        """The words whose text needs a person, without speaker-only doubts."""
+        return [token for token in self.tokens if token.needs_word_review]
 
     @property
     def verbatim_text(self) -> str:

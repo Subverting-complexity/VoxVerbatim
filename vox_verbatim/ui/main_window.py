@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from typing import TypeVar
 
 from PySide6.QtCore import QByteArray, QModelIndex, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
@@ -41,12 +42,13 @@ from vox_verbatim.transcription.calibration import (
     CalibrationStore,
 )
 from vox_verbatim.transcription.learning import user_terms_index
-from vox_verbatim.transcription.model import Transcript
+from vox_verbatim.transcription.model import SPEAKER_ONLY_REASONS, Transcript
 from vox_verbatim.transcription.project import (
     FlaggedItem,
     Occurrence,
     ProjectState,
     ProjectStore,
+    SpeakerDoubtItem,
 )
 from vox_verbatim.transcription.runner import RunSummary
 from vox_verbatim.transcription.runner import summarise as summarise_transcription
@@ -62,7 +64,7 @@ from vox_verbatim.ui.file_info_panel import FileInfoPanel
 from vox_verbatim.ui.file_table import AudioFileTableModel, AudioFileTableView
 from vox_verbatim.ui.folder_panel import FolderPanel
 from vox_verbatim.ui.help_dialogs import KeyboardShortcutsDialog, show_about
-from vox_verbatim.ui.review_lists import flagged_in
+from vox_verbatim.ui.review_lists import flagged_in, speaker_doubts_in
 from vox_verbatim.ui.review_window import ReviewWindow
 from vox_verbatim.ui.settings_dialog import SettingsDialog
 from vox_verbatim.ui.transcribe_dialog import TranscribeDialog
@@ -75,6 +77,10 @@ from vox_verbatim.ui.player_panel import (
 )
 
 _log = logging.getLogger(__name__)
+
+#: Anything saved per recording and replaced whole when the recording is read
+#: again: a flagged word, or a stretch whose speaker is in doubt.
+_PerRecording = TypeVar("_PerRecording", FlaggedItem, SpeakerDoubtItem)
 
 #: Moving through the file list with the arrow keys should not load a new
 #: file into the player on every key press, so loading waits for the
@@ -1021,6 +1027,7 @@ class MainWindow(QMainWindow):
         analysed_as = _transcript_times(analysing, stores)
         corrected, problems = self._answer_with_project_rules(state, analysing, reader)
         gathered: dict[str, list[FlaggedItem]] = {}
+        doubts: dict[str, list[SpeakerDoubtItem]] = {}
         # The folder listing is handed over as well as the shorter list of
         # recordings to read, and the two are different questions. The second
         # says which transcripts have to be parsed on this run; the first says
@@ -1030,10 +1037,11 @@ class MainWindow(QMainWindow):
         state = grouping.reprocess(
             state,
             analysing,
-            self._reading_and_noting(reader, gathered),
+            self._reading_and_noting(reader, gathered, doubts),
             present_recordings=recording_names,
         )
         state.flagged = _flagged_after(state.flagged, analysing, gathered)
+        state.speaker_doubts = _flagged_after(state.speaker_doubts, analysing, doubts)
         written, unwritten_problems = self._write_recorded_answers(state, analysing, reader)
         corrected += written
         problems.extend(unwritten_problems)
@@ -1257,7 +1265,9 @@ class MainWindow(QMainWindow):
         whether the file still gives the same mark. If it does
         not, for any reason and in either direction, the recording is read
         again. A recording the project has no note of has never been analysed,
-        or was analysed and could not be read, and is read as well.
+        or was analysed and could not be read, and is read as well. So is a
+        recording whose speaker doubts were saved in the old way, as flagged
+        words; see :func:`_without_speaker_stretches`.
 
         It is worth saying why this is a comparison for sameness rather than
         the obvious one, which is to ask whether the transcript is newer than
@@ -1291,10 +1301,11 @@ class MainWindow(QMainWindow):
         writes nothing further to them.
         """
         wanted: list[str] = []
+        old_speaker_doubts = _without_speaker_stretches(state)
         for name in recording_names:
             analysed_as = state.transcript_times.get(name)
             store = stores.get(name)
-            if analysed_as is None or store is None:
+            if analysed_as is None or store is None or name in old_speaker_doubts:
                 wanted.append(name)
                 continue
             try:
@@ -1313,6 +1324,7 @@ class MainWindow(QMainWindow):
     def _reading_and_noting(
         reader: _TranscriptReader,
         gathered: dict[str, list[FlaggedItem]],
+        doubts: dict[str, list[SpeakerDoubtItem]] | None = None,
     ) -> Callable[[str], Transcript | None]:
         """A loader that also takes the flagged words out of what it reads.
 
@@ -1339,6 +1351,8 @@ class MainWindow(QMainWindow):
             transcript = reader.load(recording_name)
             if transcript is not None:
                 gathered[recording_name] = flagged_in(recording_name, transcript)
+                if doubts is not None:
+                    doubts[recording_name] = speaker_doubts_in(recording_name, transcript)
             return transcript
 
         return load
@@ -2010,12 +2024,37 @@ def _let_the_window_breathe() -> None:
         application.processEvents()
 
 
+def _without_speaker_stretches(state: ProjectState) -> set[str]:
+    """The recordings whose speaker doubts were saved in the old way.
+
+    A project analysed before speaker doubts had their own list saved each
+    doubted word as a flagged word. Those words now leave the word list as
+    soon as the project is opened, but a recording whose transcript has not
+    changed is not read again, so its stretches would never be found and the
+    doubts would vanish from the window altogether. Such a recording has
+    flagged words whose only reason is the speaker, and no saved stretch, so
+    it is read once more. That reading saves its stretches, and the next
+    opening reads nothing.
+    """
+    speaker_only = {reason.value for reason in SPEAKER_ONLY_REASONS}
+    old_style = {
+        item.recording_name
+        for item in state.flagged
+        if not item.settled and item.reasons and set(item.reasons) <= speaker_only
+    }
+    with_stretches = {item.recording_name for item in state.speaker_doubts}
+    return old_style - with_stretches
+
+
 def _flagged_after(
-    remembered: list[FlaggedItem],
+    remembered: list[_PerRecording],
     analysed: list[str],
-    gathered: dict[str, list[FlaggedItem]],
-) -> list[FlaggedItem]:
+    gathered: dict[str, list[_PerRecording]],
+) -> list[_PerRecording]:
     """The project's flagged words after one analysis, kept honest both ways.
+
+    The stretches whose speaker is in doubt are kept by the same rule, and
+    pass through here too.
 
     A recording that was read is described entirely by what it was just found
     to say. Its old entries are dropped rather than merged with the new ones,

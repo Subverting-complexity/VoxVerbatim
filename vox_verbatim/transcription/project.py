@@ -421,6 +421,14 @@ class FlaggedItem:
     actually had, so it is what the confidence column falls back to.
     """
 
+    risk_categories: list[str] = field(default_factory=list)
+    """:class:`~vox_verbatim.transcription.model.RiskCategory` values.
+
+    Kept so that the window can say what kind of value a flagged word is,
+    such as a date, without opening its transcript. Plain strings for the
+    reason :attr:`reasons` is.
+    """
+
     settled: bool = False
     """Somebody has finished with this word: they corrected it or confirmed it.
 
@@ -466,7 +474,63 @@ class FlaggedItem:
             reasons=_string_list(data.get("reasons")),
             confidence=_text(data.get("confidence"), _UNRESOLVED_CONFIDENCE)
             or _UNRESOLVED_CONFIDENCE,
+            risk_categories=_string_list(data.get("risk_categories")),
             settled=_flag(data.get("settled")),
+        )
+
+
+@dataclass
+class SpeakerDoubtItem:
+    """One stretch of speech whose speaker is in doubt, remembered for the window.
+
+    A word whose text every service agrees on is not a word to review just
+    because the services heard it from different people, so these are kept
+    apart from :class:`FlaggedItem`. One item stands for a whole stretch of
+    consecutive words, which is how the doubt arises: the second opinion
+    disagrees about a passage, and listing it once for every word in it
+    filled the word list with hundreds of rows that all said the same thing.
+
+    It is saved for the reason flagged items are: the window lists these on a
+    folder whose transcripts nobody has opened. They are replaced wholesale
+    whenever their recording is read again, exactly as flagged items are.
+    """
+
+    recording_name: str
+    start: float | None = None
+    end: float | None = None
+    speakers: list[str] = field(default_factory=list)
+    """The speaker the words were given, then the other one a service heard.
+
+    Shorter than two where no other speaker could be named.
+    """
+
+    token_ids: list[str] = field(default_factory=list)
+    """The words of the stretch, as they were when the recording was read."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> SpeakerDoubtItem | None:
+        """Rebuild an item, or return ``None`` if it points at nothing.
+
+        A stretch with no recording or no words in it cannot be played or
+        found again, and the next analysis of that recording finds it afresh,
+        so it is dropped rather than shown as a row that does nothing.
+        """
+        if not isinstance(data, dict):
+            return None
+        recording_name = _optional_text(data.get("recording_name"))
+        token_ids = [item for item in _string_list(data.get("token_ids")) if item]
+        if recording_name is None or not token_ids:
+            _log.warning("A speaker doubt with no recording or no words was ignored.")
+            return None
+        return cls(
+            recording_name=recording_name,
+            start=_optional_number(data.get("start")),
+            end=_optional_number(data.get("end")),
+            speakers=[item for item in _string_list(data.get("speakers")) if item],
+            token_ids=token_ids,
         )
 
 
@@ -771,6 +835,12 @@ class ProjectState:
     words rather than that nobody has looked.
     """
 
+    speaker_doubts: list[SpeakerDoubtItem] = field(default_factory=list)
+    """Every stretch whose speaker is in doubt, in every recording that has been read.
+
+    Kept and replaced per recording exactly as :attr:`flagged` is.
+    """
+
     rules: list[ReplacementRule] = field(default_factory=list)
     processed_at: str = ""
     """When the analysis last ran, ISO 8601.
@@ -917,6 +987,7 @@ class ProjectState:
             "groups": [item.to_dict() for item in self.groups],
             "occurrences": [item.to_dict() for item in self.occurrences],
             "flagged": [item.to_dict() for item in self.flagged],
+            "speaker_doubts": [item.to_dict() for item in self.speaker_doubts],
             "rules": [item.to_dict() for item in self.rules],
             "processed_at": self.processed_at,
             "transcript_times": dict(self.transcript_times),
@@ -954,6 +1025,7 @@ class ProjectState:
         )
         state.groups = _unique_by_id(_each(data.get("groups"), WordGroup.from_dict), "word group")
         state.flagged = _each(data.get("flagged"), FlaggedItem.from_dict)
+        state.speaker_doubts = _each(data.get("speaker_doubts"), SpeakerDoubtItem.from_dict)
         state.rules = _each(data.get("rules"), ReplacementRule.from_dict)
         state.processed_at = _text(data.get("processed_at"))
         state.transcript_times = _whole_number_map(data.get("transcript_times"))
@@ -1068,6 +1140,22 @@ class ProjectState:
             seen_words.add(where)
             kept_flagged.append(item)
         self.flagged = kept_flagged
+
+        # The same stretch listed twice is the same fault as a word flagged
+        # twice: a row that duplicates another and overstates the work left.
+        seen_stretches: set[tuple[str, tuple[str, ...]]] = set()
+        kept_doubts: list[SpeakerDoubtItem] = []
+        for doubt in self.speaker_doubts:
+            stretch = (doubt.recording_name, tuple(doubt.token_ids))
+            if stretch in seen_stretches:
+                _log.warning(
+                    "A speaker doubt in %s is listed twice; keeping the first.",
+                    doubt.recording_name,
+                )
+                continue
+            seen_stretches.add(stretch)
+            kept_doubts.append(doubt)
+        self.speaker_doubts = kept_doubts
 
 
 def _each(value: Any, build: Any) -> list[Any]:

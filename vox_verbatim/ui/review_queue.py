@@ -29,7 +29,12 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView, QWidget
 
 from vox_verbatim.formatting import format_duration, spoken_duration
-from vox_verbatim.transcription.model import Confidence, FinalToken, ReviewReason
+from vox_verbatim.transcription.model import (
+    Confidence,
+    FinalToken,
+    ReviewReason,
+    review_reason_text,
+)
 
 COLUMN_TIME = 0
 COLUMN_TEXT = 1
@@ -106,11 +111,12 @@ def reason_text(token: FinalToken) -> str:
 
     The reasons come from :class:`ReviewReason` rather than being written
     out again here, so that the sentence in the table and the label on the
-    filter check box can never drift apart.
+    filter check box can never drift apart. A value that the services heard
+    differently says what kind of value it is, such as a date.
     """
     if not token.review_reasons:
         return NO_REASON_TEXT
-    return "; ".join(reason.display_name for reason in token.review_reasons)
+    return "; ".join(review_reason_text(token, reason) for reason in token.review_reasons)
 
 
 def spoken_summary(token: FinalToken) -> str:
@@ -167,9 +173,13 @@ class ReviewQueueModel(QAbstractTableModel):
         belongs in the queue is this model's job and nowhere else's. A
         corrected word stops needing review, so it leaves the queue the
         next time the transcript is handed back.
+
+        A word held only for doubt about its speaker is not a word to review:
+        its text is settled, and the doubt is shown once for each stretch of
+        speech instead of once for each word in it.
         """
         self.beginResetModel()
-        self._all = [token for token in tokens if token.needs_review]
+        self._all = [token for token in tokens if token.needs_word_review]
         self._rows = self._filtered()
         self.endResetModel()
         self.visibleCountChanged.emit(len(self._rows), len(self._all))

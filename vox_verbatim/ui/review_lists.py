@@ -56,6 +56,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView, QWidget
 
 from vox_verbatim.formatting import format_duration, spoken_duration
+from vox_verbatim.transcription.diarisation import speaker_doubt_stretches
 from vox_verbatim.transcription.confidence import (
     STRENGTH_NOT_MEASURED,
     strength_display,
@@ -67,6 +68,7 @@ from vox_verbatim.transcription.model import (
     Language,
     ReviewReason,
     ReviewStatus,
+    RiskCategory,
     Transcript,
 )
 from vox_verbatim.transcription.normalise import normalise
@@ -74,6 +76,7 @@ from vox_verbatim.transcription.project import (
     FlaggedItem,
     Occurrence,
     ProjectState,
+    SpeakerDoubtItem,
     WordGroup,
 )
 from vox_verbatim.ui.review_queue import reason_text
@@ -174,6 +177,26 @@ GROUP_KEY_PREFIX = "group:"
 LOOSE_KEY_PREFIX = "loose:"
 UNCERTAINTY_KEY_PREFIX = "token:"
 
+# -- The third table: where the speaker is in doubt ------------------------
+
+SPEAKER_DOUBT_COLUMN_FILE = 0
+SPEAKER_DOUBT_COLUMN_FROM = 1
+SPEAKER_DOUBT_COLUMN_TO = 2
+SPEAKER_DOUBT_COLUMN_SPEAKERS = 3
+SPEAKER_DOUBT_COLUMN_TOTAL = 4
+
+SPEAKER_DOUBT_COLUMN_TITLES = (
+    "Source file",
+    "From",
+    "To",
+    "Speakers heard",
+)
+
+#: Said in place of a second speaker nobody could name, so the cell never
+#: reads as one person with nothing to be in doubt about.
+ANOTHER_SPEAKER = "another speaker"
+UNKNOWN_SPEAKER = "Unknown speaker"
+
 
 def flagged_in(recording_name: str, transcript: Transcript) -> list[FlaggedItem]:
     """Everything of one transcript that belongs in the second block, to be saved.
@@ -196,10 +219,16 @@ def flagged_in(recording_name: str, transcript: Transcript) -> list[FlaggedItem]
     now, because that is the spelling the person recognises from the row they
     worked on, and because it is the one thing a later correction cannot
     recover.
+
+    A word held only because its speaker is in doubt is left out as well. Its
+    text is settled, and :func:`speaker_doubts_in` lists that doubt once for
+    each stretch of speech instead.
     """
     items: list[FlaggedItem] = []
     for token in transcript.tokens:
         settled = not token.needs_review
+        if not settled and not token.needs_word_review:
+            continue
         if settled and not (
             token.human_corrected or token.review_status is ReviewStatus.CONFIRMED
         ):
@@ -213,10 +242,65 @@ def flagged_in(recording_name: str, transcript: Transcript) -> list[FlaggedItem]
                 start=token.start,
                 reasons=[reason.value for reason in token.review_reasons],
                 confidence=token.confidence.value,
+                risk_categories=[category.value for category in token.risk_categories],
                 settled=settled,
             )
         )
     return items
+
+
+def speaker_doubts_in(recording_name: str, transcript: Transcript) -> list[SpeakerDoubtItem]:
+    """Every stretch of one transcript whose speaker is in doubt, to be saved.
+
+    Called at the same moments as :func:`flagged_in`, for the same reason. The
+    speakers are kept by the names the transcript gives them, because the
+    window lists these without opening the transcript to look the names up.
+    """
+    items: list[SpeakerDoubtItem] = []
+    for stretch in speaker_doubt_stretches(transcript.tokens):
+        speakers: list[str] = []
+        for label in stretch.speakers:
+            speaker = transcript.speaker_for(label)
+            speakers.append(speaker.display_name if speaker is not None else f"Speaker {label}")
+        items.append(
+            SpeakerDoubtItem(
+                recording_name=recording_name,
+                start=stretch.start,
+                end=stretch.end,
+                speakers=speakers,
+                token_ids=list(stretch.token_ids),
+            )
+        )
+    return items
+
+
+def speakers_heard_text(item: SpeakerDoubtItem) -> str:
+    """The two people a stretch might belong to, such as "Speaker A or Speaker B"."""
+    names = list(item.speakers) or [UNKNOWN_SPEAKER]
+    if len(names) < 2:
+        names.append(ANOTHER_SPEAKER)
+    return " or ".join(names)
+
+
+def spoken_speaker_doubt_summary(item: SpeakerDoubtItem) -> str:
+    """The whole row in one sentence, for the tooltip and the announcement."""
+    return (
+        f"{item.recording_name}. From {time_spoken(item.start)} to "
+        f"{time_spoken(item.end)}. {speakers_heard_text(item)}."
+    )
+
+
+def speaker_doubt_count_text(count: int) -> str:
+    """How many stretches are listed, said plainly even when there are none.
+
+    An empty table is silent to a screen reader, and a listener cannot tell
+    it from one that failed to load, so "none" is said in words too.
+    """
+    if count == 0:
+        return "No speaker doubts. The services agree on who said every word."
+    if count == 1:
+        return "1 stretch of speech where the speaker is in doubt."
+    return f"{count} stretches of speech where the speaker is in doubt."
 
 
 def restored_token(item: FlaggedItem) -> FinalToken:
@@ -259,6 +343,7 @@ def restored_token(item: FlaggedItem) -> FinalToken:
         speaker_confidence=confidence,
         review_status=ReviewStatus.SETTLED if item.settled else ReviewStatus.PENDING,
         review_reasons=[] if item.settled else _reason_values(item.reasons),
+        risk_categories=_risk_values(item.risk_categories),
     )
 
 
@@ -290,6 +375,21 @@ def _reason_values(values: list[str]) -> list[ReviewReason]:
         except ValueError:
             continue
     return reasons
+
+
+def _risk_values(values: list[str]) -> list[RiskCategory]:
+    """The saved kinds of value this version understands, in their saved order.
+
+    One it does not understand is dropped, as an unknown reason is, and the
+    reason then reads in its general wording.
+    """
+    categories: list[RiskCategory] = []
+    for value in values:
+        try:
+            categories.append(RiskCategory(value))
+        except ValueError:
+            continue
+    return categories
 
 
 def group_key(group_id: str) -> str:
@@ -1012,6 +1112,92 @@ class OccurrenceModel(QAbstractTableModel):
         return self._display_text(occurrence, column)
 
 
+class SpeakerDoubtModel(QAbstractTableModel):
+    """The stretches whose speaker is in doubt, one row each, across every file."""
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._rows: list[SpeakerDoubtItem] = []
+
+    def set_items(self, items: list[SpeakerDoubtItem]) -> None:
+        self.beginResetModel()
+        self._rows = list(items)
+        self.endResetModel()
+
+    def items(self) -> list[SpeakerDoubtItem]:
+        return list(self._rows)
+
+    def item_at(self, row: int) -> SpeakerDoubtItem | None:
+        if 0 <= row < len(self._rows):
+            return self._rows[row]
+        return None
+
+    def rowCount(self, parent: QModelIndex = TOP_LEVEL) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = TOP_LEVEL) -> int:
+        if parent.isValid():
+            return 0
+        return SPEAKER_DOUBT_COLUMN_TOTAL
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    def headerData(
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.ItemDataRole.DisplayRole,
+    ):
+        if orientation != Qt.Orientation.Horizontal:
+            return None
+        if not 0 <= section < SPEAKER_DOUBT_COLUMN_TOTAL:
+            return None
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
+            return SPEAKER_DOUBT_COLUMN_TITLES[section]
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        item = self.item_at(index.row())
+        if item is None:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._display_text(item, index.column())
+        if role == Qt.ItemDataRole.AccessibleTextRole:
+            return self._spoken_text(item, index.column())
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return spoken_speaker_doubt_summary(item)
+        if role == Qt.ItemDataRole.UserRole:
+            return item
+        return None
+
+    @staticmethod
+    def _display_text(item: SpeakerDoubtItem, column: int) -> str:
+        if column == SPEAKER_DOUBT_COLUMN_FILE:
+            return item.recording_name
+        if column == SPEAKER_DOUBT_COLUMN_FROM:
+            return time_display(item.start)
+        if column == SPEAKER_DOUBT_COLUMN_TO:
+            return time_display(item.end)
+        if column == SPEAKER_DOUBT_COLUMN_SPEAKERS:
+            return speakers_heard_text(item)
+        return ""
+
+    @staticmethod
+    def _spoken_text(item: SpeakerDoubtItem, column: int) -> str:
+        if column == SPEAKER_DOUBT_COLUMN_FROM:
+            return time_spoken(item.start)
+        if column == SPEAKER_DOUBT_COLUMN_TO:
+            return time_spoken(item.end)
+        return SpeakerDoubtModel._display_text(item, column)
+
+
 # -- The views ------------------------------------------------------------
 
 
@@ -1093,3 +1279,12 @@ class OccurrenceView(ReviewTable):
         super().setModel(model)
         if model is not None:
             self._stretch(OCCURRENCE_COLUMN_FILE)
+
+
+class SpeakerDoubtView(ReviewTable):
+    """The third list. The speakers take the spare room, being the longest."""
+
+    def setModel(self, model) -> None:
+        super().setModel(model)
+        if model is not None:
+            self._stretch(SPEAKER_DOUBT_COLUMN_SPEAKERS)

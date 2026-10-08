@@ -36,6 +36,7 @@ from vox_verbatim.transcription.model import (
     ReviewStatus,
     RiskCategory,
     TimingStatus,
+    review_reason_text,
 )
 from vox_verbatim.transcription.reconcile import (
     DEFAULT_OPTIONS,
@@ -503,6 +504,99 @@ def test_microsoft_carries_no_weight_on_a_confidently_afrikaans_span() -> None:
     assert disputed.text == "praat"
 
 
+# -- "Ja" and "yeah" -----------------------------------------------------
+
+
+def test_ja_and_yeah_agree_and_english_speech_shows_yeah() -> None:
+    """ElevenLabs writes the Afrikaans "Ja." where the others write "Yeah."."""
+    english = ["we", "should", "sign", "the", "contract"]
+    table = table_of(
+        spoken(Provider.ELEVENLABS, [*english, "Ja."]),
+        spoken(Provider.OPENAI, [*english, "Yeah."], timed=False),
+        spoken(Provider.MICROSOFT, [*english, "Yeah."], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    answer = tokens[5]
+    assert answer.language is Language.ENGLISH
+    assert answer.text == "Yeah."
+    assert len(answer.candidates) == 1
+    assert answer.text_confidence is Confidence.HIGH
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in answer.review_reasons
+    assert ReviewReason.PROPER_NAME_DISAGREEMENT not in answer.review_reasons
+
+
+def test_ja_and_yeah_in_afrikaans_speech_shows_ja() -> None:
+    words = AFRIKAANS_WORDS[:5]
+    backbone = spoken(Provider.ELEVENLABS, [*words, "Ja."])
+    backbone.detected_language = Language.AFRIKAANS
+    openai = spoken(Provider.OPENAI, [*words, "Yeah."], timed=False)
+    openai.detected_language = Language.AFRIKAANS
+    microsoft = spoken(Provider.MICROSOFT, [*words, "Yeah."], timed=False)
+    microsoft.detected_language = Language.AFRIKAANS
+    table = table_of(backbone, openai, microsoft)
+
+    tokens = reconcile(
+        table,
+        configuration=RecordingConfiguration(afrikaans_enabled=True),
+        results=[backbone, openai, microsoft],
+    )
+
+    answer = tokens[5]
+    assert answer.language is Language.AFRIKAANS
+    assert answer.text == "Ja."
+    assert len(answer.candidates) == 1
+    assert ReviewReason.PROPER_NAME_DISAGREEMENT not in answer.review_reasons
+
+
+def test_english_speech_shows_yeah_even_where_most_services_wrote_ja() -> None:
+    english = ["we", "should", "sign", "the", "contract"]
+    table = table_of(
+        spoken(Provider.ELEVENLABS, [*english, "Ja."]),
+        spoken(Provider.OPENAI, [*english, "Ja."], timed=False),
+        spoken(Provider.MICROSOFT, [*english, "Yeah."], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert tokens[5].language is Language.ENGLISH
+    assert tokens[5].text == "Yeah."
+
+
+def test_ja_and_yeah_in_german_speech_shows_ja() -> None:
+    words = ["ich", "glaube", "das", "ist", "richtig"]
+    german = [Language.GERMAN] * 6
+    backbone = spoken(Provider.ELEVENLABS, [*words, "yeah,"], languages=german)
+    backbone.detected_language = Language.GERMAN
+    openai = spoken(Provider.OPENAI, [*words, "yeah,"], timed=False, languages=german)
+    openai.detected_language = Language.GERMAN
+    microsoft = spoken(
+        Provider.MICROSOFT, [*words, "Ja,"], timed=False, languages=german
+    )
+    microsoft.detected_language = Language.GERMAN
+    table = table_of(backbone, openai, microsoft)
+
+    tokens = reconcile(table, results=[backbone, openai, microsoft])
+
+    answer = tokens[5]
+    assert answer.language is Language.GERMAN
+    assert answer.text == "Ja,"
+    assert len(answer.candidates) == 1
+
+
+def test_the_chosen_yeah_keeps_its_own_punctuation_and_capitals() -> None:
+    english = ["we", "should", "sign", "the", "contract"]
+    table = table_of(
+        spoken(Provider.ELEVENLABS, [*english, "Ja."]),
+        spoken(Provider.OPENAI, [*english, "yeah,"], timed=False),
+    )
+
+    tokens = reconcile(table)
+
+    assert tokens[5].text == "yeah,"
+
+
 def test_microsoft_is_only_reduced_where_the_language_is_uncertain() -> None:
     """A code-switch boundary, where nothing is confidently anything.
 
@@ -841,6 +935,247 @@ def test_a_service_absent_from_the_whole_neighbourhood_is_not_a_deletion() -> No
     assert all(words[index] in kept for index in range(10 + reach, 110 - reach))
     assert "word10" not in kept
     assert "word109" not in kept
+
+
+# -- Words a service tidies away ------------------------------------------
+
+
+def _two_wrote_two_left_out(
+    written: list[str], tidied: list[str], third: list[str] | None = None
+) -> list:
+    """ElevenLabs and Deepgram write ``written``; OpenAI and AssemblyAI tidy it.
+
+    ``third``, where given, is what AssemblyAI wrote instead.
+    """
+    return reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, written),
+            spoken(Provider.DEEPGRAM, written),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.ASSEMBLYAI, third or tidied, timed=False),
+        )
+    )
+
+
+def test_a_filler_some_services_leave_out_is_not_a_disagreement() -> None:
+    """A service that tidies away "um" has not heard anything different."""
+    tokens = _two_wrote_two_left_out(["so", "um", "we", "go"], ["so", "we", "go"])
+
+    filler = token_at(tokens, "um")
+    assert filler.text_confidence is Confidence.HIGH
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in filler.review_reasons
+    assert not filler.needs_review
+
+
+def test_a_stutter_some_services_leave_out_is_not_a_disagreement() -> None:
+    """Either copy of "we, we" may be the one left out.
+
+    Alignment puts the gap on the first "we,", so that copy has only the
+    word after it to match. "so" comes first because a gap on the very
+    first word of a recording is ignored for a different reason.
+    """
+    tokens = _two_wrote_two_left_out(
+        ["so", "we,", "we,", "should", "go"], ["so", "we,", "should", "go"]
+    )
+
+    assert texts_of(tokens) == ["so", "we,", "we,", "should", "go"]
+    for repeat in tokens[1:3]:
+        assert repeat.text_confidence is Confidence.HIGH
+        assert ReviewReason.PROVIDER_DISAGREEMENT not in repeat.review_reasons
+        assert not repeat.needs_review
+
+
+def test_a_real_word_a_service_left_out_is_still_a_disagreement() -> None:
+    tokens = _two_wrote_two_left_out(["we", "should", "sign", "today"], ["we", "sign", "today"])
+
+    assert ReviewReason.PROVIDER_DISAGREEMENT in token_at(tokens, "should").review_reasons
+
+
+def test_a_repeat_with_a_word_between_is_still_a_disagreement() -> None:
+    tokens = _two_wrote_two_left_out(["we", "should", "we", "go"], ["we", "should", "go"])
+
+    assert texts_of(tokens) == ["we", "should", "we", "go"]
+    assert ReviewReason.PROVIDER_DISAGREEMENT in tokens[2].review_reasons
+
+
+def test_a_filler_another_service_heard_as_a_word_is_still_a_disagreement() -> None:
+    tokens = _two_wrote_two_left_out(
+        ["so", "um", "we", "go"], ["so", "we", "go"], third=["so", "on", "we", "go"]
+    )
+
+    assert ReviewReason.PROVIDER_DISAGREEMENT in tokens[1].review_reasons
+
+
+def test_a_german_er_some_services_leave_out_is_still_a_disagreement() -> None:
+    """In German "er" is "he", so a service that left it out lost a word."""
+    written = ["dann", "hat", "er", "das", "gemacht"]
+    tidied = ["dann", "hat", "das", "gemacht"]
+    results = []
+    for provider, words, timed in (
+        (Provider.ELEVENLABS, written, True),
+        (Provider.DEEPGRAM, written, True),
+        (Provider.OPENAI, tidied, False),
+        (Provider.ASSEMBLYAI, tidied, False),
+    ):
+        result = spoken(
+            provider, words, timed=timed, languages=[Language.GERMAN] * len(words)
+        )
+        result.detected_language = Language.GERMAN
+        results.append(result)
+
+    tokens = reconcile(table_of(*results), results=results)
+
+    word = token_at(tokens, "er")
+    assert word.language is Language.GERMAN
+    assert ReviewReason.PROVIDER_DISAGREEMENT in word.review_reasons
+    assert word.needs_review
+
+
+# -- High-risk values the services agree on ------------------------------
+
+
+def test_a_date_every_service_heard_the_same_way_is_settled() -> None:
+    words = ["we", "met", "on", "15", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, words, timed=False),
+            spoken(Provider.MICROSOFT, words, timed=False),
+        )
+    )
+
+    date = token_at(tokens, "15")
+    assert RiskCategory.DATE in date.risk_categories
+    assert date.text_confidence is Confidence.HIGH
+    assert date.review_reasons == []
+    assert not date.needs_review
+
+
+def test_a_date_three_services_agree_on_and_one_left_out_is_settled() -> None:
+    """A service that heard nothing there did not hear a different date."""
+    words = ["we", "met", "on", "15", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.DEEPGRAM, words),
+            spoken(Provider.OPENAI, words, timed=False),
+            spoken(
+                Provider.ASSEMBLYAI,
+                ["we", "met", "on", "March", "last", "year"],
+                timed=False,
+            ),
+        )
+    )
+
+    date = token_at(tokens, "15")
+    assert RiskCategory.DATE in date.risk_categories
+    assert date.text_confidence is Confidence.HIGH
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in date.review_reasons
+    assert not date.needs_review
+
+
+def test_a_date_only_one_service_heard_is_still_flagged() -> None:
+    """Nobody corroborated it, so the silence of the others still counts."""
+    words = ["we", "met", "on", "15", "March", "last", "year"]
+    tidied = ["we", "met", "on", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    date = token_at(tokens, "15")
+    assert ReviewReason.PROVIDER_DISAGREEMENT in date.review_reasons
+    assert date.needs_review
+
+
+def test_a_repeated_digit_only_one_service_heard_is_still_flagged() -> None:
+    """The repeat rule must not settle a digit in a phone number."""
+    words = ["call", "me", "on", "0", "8", "2", "2", "5", "tomorrow"]
+    tidied = ["call", "me", "on", "0", "8", "2", "5", "tomorrow"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    assert texts_of(tokens) == words
+    digits = tokens[5:7]
+    assert all(token.risk_categories for token in digits)
+    assert any(ReviewReason.PROVIDER_DISAGREEMENT in token.review_reasons for token in digits)
+    assert any(token.needs_review for token in digits)
+
+
+def test_a_unit_spelled_like_a_filler_only_one_service_heard_is_still_flagged() -> None:
+    """"mm" is on the filler list, but after a number it is millimetres."""
+    words = ["cut", "it", "5", "mm", "deep", "please"]
+    tidied = ["cut", "it", "5", "deep", "please"]
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    unit = token_at(tokens, "mm")
+    assert unit.risk_categories
+    assert ReviewReason.PROVIDER_DISAGREEMENT in unit.review_reasons
+    assert unit.needs_review
+
+
+@pytest.mark.parametrize(
+    ("words", "tidied"),
+    [
+        (
+            ["it", "cost", "fifteen", "uh", "thousand", "rand", "in", "total"],
+            ["it", "cost", "fifteen", "thousand", "rand", "in", "total"],
+        ),
+        (
+            ["we", "met", "on", "15", "uh", "March", "last", "year"],
+            ["we", "met", "on", "15", "March", "last", "year"],
+        ),
+    ],
+)
+def test_a_filler_inside_a_value_only_one_service_heard_is_not_a_disagreement(
+    words: list[str], tidied: list[str]
+) -> None:
+    """The words around a number are high risk, but "uh" there is still a filler."""
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    filler = token_at(tokens, "uh")
+    assert filler.risk_categories
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in filler.review_reasons
+
+
+def test_a_date_a_service_heard_differently_names_the_kind_of_value() -> None:
+    backbone = spoken(Provider.ELEVENLABS, ["we", "met", "on", "15", "March", "last", "year"])
+    other = ["we", "met", "on", "16", "March", "last", "year"]
+    tokens = reconcile(
+        table_of(
+            backbone,
+            spoken(Provider.OPENAI, other, timed=False),
+            spoken(Provider.MICROSOFT, other, timed=False),
+        )
+    )
+
+    date = tokens[3]
+    assert date.text_confidence is Confidence.UNRESOLVED
+    assert ReviewReason.HIGH_RISK_ENTITY in date.review_reasons
+    assert (
+        review_reason_text(date, ReviewReason.HIGH_RISK_ENTITY)
+        == "A date that the services heard differently"
+    )
 
 
 # -- The risk window ----------------------------------------------------------

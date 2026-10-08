@@ -431,6 +431,27 @@ _LEFT_ALONE = frozenset(
 #: evidence* they are the same thing, and which one to print is a question
 #: for the reconciliation rules rather than for this module.
 
+#: Words that are one spoken word written in two languages. "Ja" is how
+#: Afrikaans and German write what English writes as "yeah", and a service
+#: that wrote one where the others wrote the other heard the same thing.
+#: Comparing them as different words left a disagreement, often reported as
+#: a name that differs, at every one of them. Each entry is mapped to one
+#: shared spelling at the spelling stage, so they meet as a spelling
+#: variant. Which spelling the transcript shows is for the reconciliation
+#: rules, which know the language spoken at that place.
+_SAME_WORD_ACROSS_LANGUAGES = {"ja": "yeah"}
+
+#: Sounds a speaker makes while thinking, in English, German and Afrikaans.
+#: Some services write them down and others tidy them away, so a service
+#: that left one out has not heard anything different. "m" is not here on
+#: purpose: it is also the unit "metre", and a missing unit is a real loss.
+FILLER_WORDS = frozenset(
+    (
+        "um", "umm", "uh", "uhm", "er", "erm", "ah", "hmm", "mm", "mhm",
+        "äh", "ähm", "öh", "hm",
+    )
+)
+
 
 # -- Building the comparison forms ---------------------------------------
 
@@ -538,8 +559,14 @@ def _settle_apostrophes(word: str) -> str:
 
 @lru_cache(maxsize=100_000)
 def _spelling_form(text: str, dropped: bool) -> str:
-    """German characters settled, in one direction or the other."""
-    plain = _plain_form(text)
+    """German characters settled, in one direction or the other.
+
+    A word in ``_SAME_WORD_ACROSS_LANGUAGES`` is settled to its shared
+    spelling first, so "Ja" and "yeah" meet here.
+    """
+    plain = " ".join(
+        _SAME_WORD_ACROSS_LANGUAGES.get(word, word) for word in _plain_form(text).split()
+    )
     return _drop_german_letters(plain) if dropped else _german_fold(plain)
 
 
@@ -908,6 +935,39 @@ def is_punctuation_only(text: str) -> bool:
     return not normalise(text)
 
 
+#: :data:`FILLER_WORDS` with case, punctuation and German letters settled,
+#: so "äh" is held here as "aeh".
+_FILLER_FORMS = frozenset(_spelling_form(word, False) for word in FILLER_WORDS)
+
+#: Fillers in English that are real words in German: "er" is "he", and "um"
+#: is "at" or "around", as in "um zehn Uhr". In German speech a service that
+#: left one out has lost a word, so they are not fillers there. Afrikaans
+#: has neither word ("hy" and "om" are its forms), so nothing is set aside
+#: for it.
+_REAL_WORDS_BY_LANGUAGE = {"de": frozenset(("er", "um"))}
+
+
+def is_filler(text: str, language: str | None = None) -> bool:
+    """Whether this text is nothing but filler sounds, such as "um" or "äh".
+
+    Punctuation and case are set aside, so "Um," is a filler. A text with no
+    word in it at all is not.
+
+    ``language`` is the language spoken there, as its code ("de" for German).
+    A filler sound that is a real word in that language is not a filler; see
+    :data:`_REAL_WORDS_BY_LANGUAGE`. Without a language, every filler counts.
+
+    The spelling form is used rather than :func:`normalise`, because
+    :func:`normalise` joins words, and "um uh" would come out as "umuh".
+    """
+    words = _spelling_form(text, False).split()
+    # The code is read from the enum's value, because an enum member hashes
+    # by its name and would not find "de" in the table.
+    code = getattr(language, "value", language)
+    real = _REAL_WORDS_BY_LANGUAGE.get(code, frozenset())
+    return bool(words) and all(word in _FILLER_FORMS and word not in real for word in words)
+
+
 def read_number(text: str) -> int | None:
     """Return the whole number this text names, or ``None`` if it is not one.
 
@@ -1061,6 +1121,17 @@ def equivalence_kind(first: str, second: str) -> EquivalenceKind:
         (smallest, EquivalenceKind.COMPOUND),
         key=_BY_TIMING_CONSTRAINT.index,
     )
+
+
+def spelled_as(text: str, word: str) -> bool:
+    """Whether this text is the given word, apart from case and punctuation.
+
+    "Ja." is spelled as "ja" and "Yeah," as "yeah", but "Ja." is not spelled
+    as "yeah", even though the two are equivalent. The reconciliation rules
+    use this to pick, from readings that are the same word, the one written
+    in the language spoken at that place.
+    """
+    return _plain_form(text) == _plain_form(word)
 
 
 def are_equivalent(first: str, second: str) -> bool:

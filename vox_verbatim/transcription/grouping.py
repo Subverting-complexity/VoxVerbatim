@@ -1316,6 +1316,11 @@ def reprocess(
             for item in state.flagged
             if not _has_left_the_folder(item.recording_name, present)
         ],
+        speaker_doubts=[
+            item
+            for item in state.speaker_doubts
+            if not _has_left_the_folder(item.recording_name, present)
+        ],
         rules=state.rules,
         processed_at=_now(),
         # Carried across untouched, apart from the recordings that have left

@@ -13,8 +13,10 @@ from vox_verbatim.transcription.model import (
     AudioSpan,
     Confidence,
     FinalToken,
+    SPEAKER_ONLY_REASONS,
     ReviewReason,
     ReviewStatus,
+    RiskCategory,
 )
 from vox_verbatim.ui.review_queue import (
     COLUMN_CONFIDENCE,
@@ -26,8 +28,14 @@ from vox_verbatim.ui.review_queue import (
     ReviewQueueModel,
     ReviewQueueView,
     count_text,
+    reason_text,
     spoken_summary,
 )
+
+
+#: The reasons that put a word in the word list. A reason about the speaker
+#: alone does not, because the text of such a word is not in doubt.
+WORD_REASONS = [reason for reason in ReviewReason if reason not in SPEAKER_ONLY_REASONS]
 
 
 def make_token(
@@ -190,11 +198,11 @@ def test_the_confidence_is_the_weakest_of_the_three_answers(qapp):
 def test_clearing_any_one_reason_hides_exactly_the_words_flagged_for_it(qapp):
     """Every reason in the model is a filter, so every one of them is tried."""
     model = ReviewQueueModel()
-    model.set_tokens([make_token(text=reason.value, reasons=(reason,)) for reason in ReviewReason])
-    total = len(list(ReviewReason))
+    model.set_tokens([make_token(text=reason.value, reasons=(reason,)) for reason in WORD_REASONS])
+    total = len(WORD_REASONS)
     assert model.rowCount() == total
 
-    for reason in ReviewReason:
+    for reason in WORD_REASONS:
         model.set_reason_shown(reason, False)
 
         assert model.rowCount() == total - 1
@@ -272,14 +280,30 @@ def test_a_word_with_no_reason_recorded_is_hidden_once_the_reasons_are_narrowed(
 
 def test_showing_everything_puts_every_filter_back_on(qapp):
     model = ReviewQueueModel()
-    model.set_tokens([make_token(text=reason.value, reasons=(reason,)) for reason in ReviewReason])
+    model.set_tokens([make_token(text=reason.value, reasons=(reason,)) for reason in WORD_REASONS])
     model.set_reason_shown(ReviewReason.PROVIDER_DISAGREEMENT, False)
     model.set_confidence_shown(Confidence.REVIEW_REQUIRED, False)
     assert model.rowCount() == 0
 
     model.show_everything()
 
-    assert model.rowCount() == len(list(ReviewReason))
+    assert model.rowCount() == len(WORD_REASONS)
+
+
+def test_a_word_in_doubt_only_for_its_speaker_is_not_in_the_word_list(qapp):
+    """Its text is agreed, so it is shown once per stretch elsewhere instead."""
+    model = ReviewQueueModel()
+    speaker_only = make_token(
+        text="yes", reasons=(ReviewReason.SPEAKER_UNCERTAIN,), confidence=Confidence.HIGH
+    )
+    both = make_token(
+        text="fifteen",
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT, ReviewReason.SPEAKER_UNCERTAIN),
+    )
+
+    model.set_tokens([speaker_only, both])
+
+    assert [token.text for token in model.visible_tokens()] == ["fifteen"]
 
 
 # -- The count -----------------------------------------------------------
@@ -348,7 +372,20 @@ def test_the_whole_row_is_said_in_one_sentence_when_the_highlight_moves(qapp):
     token = make_token(text="15,000", start=92.0, reasons=(ReviewReason.HIGH_RISK_ENTITY,))
 
     assert spoken_summary(token) == (
-        "1 minute 32 seconds. 15,000. A value that must not be guessed. Review required."
+        "1 minute 32 seconds. 15,000. A value that the services heard differently. "
+        "Review required."
+    )
+
+
+def test_a_value_the_services_heard_differently_says_what_kind_of_value_it_is(qapp):
+    token = make_token(
+        text="16th",
+        reasons=(ReviewReason.HIGH_RISK_ENTITY, ReviewReason.NUMERIC_DISAGREEMENT),
+    )
+    token.risk_categories = [RiskCategory.DATE]
+
+    assert reason_text(token) == (
+        "A date that the services heard differently; A number differs between services"
     )
 
 

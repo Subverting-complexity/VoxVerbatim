@@ -417,6 +417,7 @@ def _final_token_to_dict(token: FinalToken) -> dict[str, Any]:
         "speaker": token.speaker,
         "speaker_source": token.speaker_source.value if token.speaker_source else None,
         "speaker_confidence": token.speaker_confidence.value,
+        "speaker_alternative": token.speaker_alternative,
         "language": token.language.value,
         "language_evidence": _language_evidence_to_dict(token.language_evidence),
         "source_tokens": [_reference_to_dict(item) for item in token.source_tokens],
@@ -463,6 +464,9 @@ def _final_token_from_dict(data: Any) -> FinalToken | None:
     token.speaker_confidence = _enum_of(
         Confidence, data.get("speaker_confidence"), Confidence.UNRESOLVED
     )
+    # Absent from files written before it existed, which then load with no
+    # alternative speaker; the review window falls back to the neighbours.
+    token.speaker_alternative = _optional_text(data.get("speaker_alternative"))
     token.language = _enum_of(Language, data.get("language"), Language.UNKNOWN)
     token.language_evidence = _language_evidence_from_dict(data.get("language_evidence"))
     token.source_tokens = _references_from(data.get("source_tokens"))

@@ -119,9 +119,16 @@ from vox_verbatim.transcription.normalise import (
     EquivalenceKind,
     are_equivalent,
     equivalence_kind,
+    is_filler,
     normalise,
+    spelled_as,
 )
-from vox_verbatim.transcription.risk import RISK_WINDOW, numbers_disagree, risk_at
+from vox_verbatim.transcription.risk import (
+    RISK_WINDOW,
+    is_unit_word,
+    numbers_disagree,
+    risk_at,
+)
 from vox_verbatim.transcription.vocabulary import TermCategory, VocabularyIndex
 
 #: How far each service is believed before anything about the word is known.
@@ -834,6 +841,15 @@ def _decide_scope(
         return []
 
     risk = _risk_for(scope, backbone_texts, groups)
+    counted = _contesting_silence(
+        deletions,
+        winner,
+        runner_up,
+        scope,
+        backbone_texts,
+        risk,
+        languages.language_at(position),
+    )
     unresolved, reasons = _settle(
         winner=winner,
         runner_up=runner_up,
@@ -862,7 +878,7 @@ def _decide_scope(
         acoustic_source=_group_acoustic_source(winner),
         alignment_quality=_group_quality(winner),
         agreeing_providers=len(winner.providers),
-        contesting_providers=len(_contesting(groups, winner)) + len(deletions),
+        contesting_providers=len(_contesting(groups, winner)) + len(counted),
         language_support=_language_support(winner, evidence, languages),
         in_vocabulary=winner.in_vocabulary,
         is_high_risk=bool(risk),
@@ -871,7 +887,7 @@ def _decide_scope(
     assessment = assess_text(signals)
     reasons.extend(assessment.reasons)
     category = assessment.category
-    if _everybody_agreed(groups, winner, deletions) and not assessment.reasons:
+    if _everybody_agreed(groups, winner, counted) and not assessment.reasons:
         # Section 12.1, applied as written: where every service that spoke
         # said the same thing once formatting is set aside, the word is
         # accepted with high confidence. Running unanimous agreement back
@@ -1154,7 +1170,7 @@ def _score_group(
     group.score = _combine(per_provider, options)
     group.components["combined"] = round(group.score, 4)
     group.components["supporting_providers"] = float(len(group.readings))
-    group.display = _preferred_text(group, vocabulary)
+    group.display = _preferred_text(group, vocabulary, language)
 
 
 def _combine(scores: Sequence[float], options: ReconciliationOptions) -> float:
@@ -1201,7 +1217,46 @@ def _vocabulary_factor(
     return 1.0, False
 
 
-def _preferred_text(group: _Group, vocabulary: VocabularyIndex | None) -> str:
+#: The spelling each language gives a word that is one spoken word written
+#: in two languages, as in ``normalise._SAME_WORD_ACROSS_LANGUAGES``.
+_SPELLING_BY_LANGUAGE: tuple[dict[Language, str], ...] = (
+    {Language.ENGLISH: "yeah", Language.AFRIKAANS: "ja", Language.GERMAN: "ja"},
+)
+
+
+def _readings_for_language(
+    readings: Sequence[_Reading], language: Language
+) -> Sequence[_Reading]:
+    """Keep the readings spelled for the language spoken at this place.
+
+    Only where the readings hold more than one spelling of a word in
+    ``_SPELLING_BY_LANGUAGE``: "Ja" and "Yeah" are then the same word, and
+    the transcript should show the one the speaker's language writes. Where
+    the language is not known, or no reading has its spelling, every
+    reading is kept and the usual ranking decides.
+    """
+    for spellings in _SPELLING_BY_LANGUAGE:
+        wanted = spellings.get(language)
+        if wanted is None:
+            continue
+        present = {
+            spelling
+            for spelling in spellings.values()
+            if any(spelled_as(reading.text, spelling) for reading in readings)
+        }
+        if len(present) < 2:
+            continue
+        chosen = [reading for reading in readings if spelled_as(reading.text, wanted)]
+        if chosen:
+            return chosen
+    return readings
+
+
+def _preferred_text(
+    group: _Group,
+    vocabulary: VocabularyIndex | None,
+    language: Language,
+) -> str:
     """Choose which spelling of one candidate to print.
 
     The user's own spelling wins, because that is the entire point of having
@@ -1211,7 +1266,9 @@ def _preferred_text(group: _Group, vocabulary: VocabularyIndex | None) -> str:
     poorer of the two would lose information nobody can recover later.
     Otherwise the strongest service's spelling is used, with the backbone's
     preferred on a tie so that the same recording reconciles the same way
-    twice.
+    twice. Where the readings are one word written in two languages, as
+    "Ja" and "Yeah", only those spelled for the language spoken here are
+    ranked; the chosen reading keeps its own capitals and punctuation.
     """
     texts = group.texts
     if not texts:
@@ -1222,7 +1279,7 @@ def _preferred_text(group: _Group, vocabulary: VocabularyIndex | None) -> str:
             if match is not None:
                 return match.term.text
     ranked = sorted(
-        group.readings,
+        _readings_for_language(group.readings, language),
         key=lambda reading: (
             group.components.get(f"{reading.provider.value}.score", 0.0),
             _has_german_letter(reading.text),
@@ -1279,7 +1336,8 @@ def _settle(
     statement about what a wrong answer would cost: the specification is
     explicit that a two-to-one result on a monetary amount is meaningful
     evidence and still not a reason to write the amount down as though it
-    were known.
+    were known. Where no service heard a different value there is nothing
+    to decide between, so a high-risk value alone does not stop it settling.
     """
     reasons: list[ReviewReason] = []
     if languages.is_uncertain(position):
@@ -1382,6 +1440,94 @@ def _is_hallucination(
     if measured is None:
         return False
     return measured < options.hallucination_acoustic_ceiling
+
+
+def _contesting_silence(
+    deletions: tuple[Provider, ...],
+    winner: _Group,
+    runner_up: _Group | None,
+    scope: tuple[int, ...],
+    backbone_texts: Sequence[str],
+    risk: tuple[RiskCategory, ...],
+    language: Language = Language.UNKNOWN,
+) -> tuple[Provider, ...]:
+    """The silent services that count as arguing against the winning word.
+
+    Normally every one of them. A service that heard nothing where others
+    heard a word is evidence that the word may not be there.
+
+    That stops being true for a filler such as "um" and for a word that
+    repeats the word beside it, as in "we, we". Several services tidy speech
+    and leave both out as a matter of style, so their silence says nothing
+    about the audio. Counting it put every such word in the review list as
+    a disagreement even when every service that wrote it agreed. Where no
+    service heard a different word, the silence is set aside. "er" and "um"
+    are real words in German, so in German speech they are not fillers.
+
+    The same holds for a high-risk value such as a date or an amount that
+    at least two services heard the same way. A service that heard nothing
+    there did not hear a different value, so its silence is not a dispute
+    about which value was said. A value only one service heard keeps every
+    silence against it, because nobody corroborated it.
+
+    High-risk values are decided first, and the repeat rule does not apply
+    to them. Otherwise a digit only one service heard, as in "0 8 2 2 5"
+    against "0 8 2 5", was settled because it repeats the digit beside it.
+    In a phone number that is the very word that must be checked.
+
+    A filler keeps the filler rule even inside a value, because the words
+    between a keyword and its number are all marked high risk: the "uh" in
+    "fifteen uh thousand rand" is still only a hesitation. A unit spelled
+    like a filler, such as "mm" in "5 mm deep", is the exception: there it
+    is millimetres, part of the value itself.
+
+    Only the confidence of the word uses this. Removing a word that nobody
+    else heard still counts every silent service; see
+    :func:`_is_hallucination`.
+    """
+    if runner_up is not None:
+        return deletions
+    filler = is_filler(winner.display, language) and not (
+        risk and is_unit_word(winner.display)
+    )
+    if risk and not filler:
+        return () if len(winner.providers) >= 2 else deletions
+    if filler or _is_repeated_beside(scope, backbone_texts, winner.display):
+        return ()
+    return deletions
+
+
+def _is_repeated_beside(
+    scope: tuple[int, ...],
+    backbone_texts: Sequence[str],
+    text: str,
+) -> bool:
+    """Whether this text repeats the backbone word just before or after it.
+
+    Both sides are checked because alignment does not choose which copy of
+    a stutter a service left out. Given "so we we should" against "so we
+    should", it puts the gap on the first "we", which only matches the word
+    after it. Punctuation the backbone returned as its own entry is
+    skipped, so "we , we" is still a repeat.
+    """
+    form = normalise(text)
+    if not form:
+        return False
+    before = range(scope[0] - 1, -1, -1)
+    after = range(scope[-1] + 1, len(backbone_texts))
+    return any(
+        _nearest_word(backbone_texts, positions) == form for positions in (before, after)
+    )
+
+
+def _nearest_word(backbone_texts: Sequence[str], positions: range) -> str:
+    """The comparison form of the first real word at these positions, or ""."""
+    for position in positions:
+        if 0 <= position < len(backbone_texts):
+            form = normalise(backbone_texts[position])
+            if form:
+                return form
+    return ""
 
 
 def _apply_adjudication(

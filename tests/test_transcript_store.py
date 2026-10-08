@@ -1071,3 +1071,29 @@ def test_the_dictionary_form_can_be_used_on_its_own():
     rebuilt = transcript_from_dict(json.loads(json.dumps(transcript_to_dict(original))))
 
     assert rebuilt == original
+
+
+# -- The other speaker a service heard ------------------------------------
+
+
+def test_the_other_speaker_heard_survives_the_round_trip(tmp_path):
+    transcript = _full_transcript()
+    transcript.tokens[1].speaker_alternative = "speaker_0"
+    store = TranscriptStore(tmp_path / "board-meeting.m4a")
+    store.save(transcript)
+
+    loaded = store.load()
+
+    assert loaded is not None
+    assert [token.speaker_alternative for token in loaded.tokens] == [None, "speaker_0"]
+
+
+def test_a_file_written_before_the_other_speaker_was_kept_still_loads():
+    data = transcript_to_dict(_full_transcript())
+    for token in data["tokens"]:
+        del token["speaker_alternative"]
+
+    loaded = transcript_from_dict(data)
+
+    assert loaded is not None
+    assert [token.speaker_alternative for token in loaded.tokens] == [None, None]

@@ -32,7 +32,7 @@ from vox_verbatim.transcription.model import (
     Transcript,
 )
 from vox_verbatim.transcription.normalise import normalise
-from vox_verbatim.transcription.project import ProjectStore, ReplacementRule
+from vox_verbatim.transcription.project import FlaggedItem, ProjectStore, ReplacementRule
 from vox_verbatim.transcription.runner import RecordingOutcome, RunSummary
 from vox_verbatim.transcription.store import TranscriptStore
 from vox_verbatim.transcription.vocabulary import (
@@ -1040,6 +1040,138 @@ def test_a_flagged_word_that_has_gone_from_a_new_transcript_is_not_still_listed(
         saved = ProjectStore(audio_folder).load()
         assert [item.token_id for item in saved.flagged] == []
         assert gone not in [token.id for token in again.tokens]
+    finally:
+        close_window(window)
+
+
+def speaker_doubt_transcript(name: str) -> Transcript:
+    """Three agreed words whose speaker a second opinion doubted, after one plain word."""
+    transcript = spoken_transcript(
+        name, [("so", 0.99), ("that", 0.99), ("is", 0.99), ("fine", 0.99)]
+    )
+    transcript.tokens[0].speaker = "speaker_0"
+    for token in transcript.tokens[1:]:
+        token.speaker = "speaker_1"
+        token.speaker_alternative = "speaker_0"
+        token.flag(ReviewReason.SPEAKER_UNCERTAIN)
+    return transcript
+
+
+def save_in_the_old_format(folder, transcript: Transcript) -> None:
+    """Make the project look as one analysed before speaker doubts had a list.
+
+    Each doubted word was then a flagged word of its own, and no stretch was
+    saved at all.
+    """
+    project_store = ProjectStore(folder)
+    state = project_store.load()
+    state.speaker_doubts = []
+    state.flagged = [
+        FlaggedItem(
+            recording_name=transcript.recording_name,
+            token_id=token.id,
+            text=token.text,
+            start=token.start,
+            reasons=[ReviewReason.SPEAKER_UNCERTAIN.value],
+        )
+        for token in transcript.tokens[1:]
+    ]
+    assert project_store.save(state)
+
+
+def test_a_project_saved_before_speaker_doubts_had_a_list_still_shows_them(
+    qapp, monkeypatch, store, audio_folder
+):
+    """The doubted words leave the word list, so their stretch must appear.
+
+    The transcript has not changed, so it would not be read again, and
+    without a reading nothing would ever build the stretch. Beta holds the
+    doubts and alpha a flagged word, so the window lands on alpha and
+    reading beta for its detail panel cannot hide the fault.
+    """
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        save_transcript(window, audio_folder / "alpha.m4a", flagged_transcript("alpha.m4a"))
+        doubted = speaker_doubt_transcript("beta.m4a")
+        save_transcript(window, audio_folder / "beta.m4a", doubted)
+        first = window.open_project_review()
+        assert first is not None
+        first.close()
+        save_in_the_old_format(audio_folder, doubted)
+
+        read = count_transcript_reads(monkeypatch)
+        review = window.open_project_review()
+
+        assert review is not None
+        assert "beta.m4a" in read
+        model = review._speaker_doubt_model
+        assert model.rowCount() == 1
+        assert model.items()[0].recording_name == "beta.m4a"
+        assert model.items()[0].token_ids == [token.id for token in doubted.tokens[1:]]
+        saved = ProjectStore(audio_folder).load()
+        assert len(saved.speaker_doubts) == 1
+        assert all(item.recording_name != "beta.m4a" for item in saved.flagged)
+
+        # Once the stretch is saved, the recording is spared again.
+        review.close()
+        read.clear()
+        window.open_project_review()
+        assert "beta.m4a" not in read
+    finally:
+        close_window(window)
+
+
+def test_a_recording_not_read_again_keeps_its_speaker_doubts(
+    qapp, monkeypatch, store, audio_folder
+):
+    """Alpha changes and is read again; beta does not, and keeps its stretch."""
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        for name in ("alpha.m4a", "beta.m4a"):
+            save_transcript(window, audio_folder / name, speaker_doubt_transcript(name))
+        window.show_review()
+        before = {
+            item.recording_name: item.token_ids
+            for item in ProjectStore(audio_folder).load().speaker_doubts
+        }
+        assert sorted(before) == ["alpha.m4a", "beta.m4a"]
+
+        renewed = speaker_doubt_transcript("alpha.m4a")
+        save_transcript(window, audio_folder / "alpha.m4a", renewed)
+        read = count_transcript_reads(monkeypatch)
+        window.show_review()
+
+        assert read == ["alpha.m4a"]
+        after = {
+            item.recording_name: item.token_ids
+            for item in ProjectStore(audio_folder).load().speaker_doubts
+        }
+        assert after["beta.m4a"] == before["beta.m4a"]
+        assert after["alpha.m4a"] == [token.id for token in renewed.tokens[1:]]
+    finally:
+        close_window(window)
+
+
+def test_a_recording_deleted_from_the_folder_takes_its_speaker_doubts_with_it(
+    qapp, monkeypatch, store, audio_folder
+):
+    fake_review_window(monkeypatch)
+    window = loaded_window(qapp, store, audio_folder)
+    try:
+        for name in ("alpha.m4a", "beta.m4a"):
+            save_transcript(window, audio_folder / name, speaker_doubt_transcript(name))
+        window.show_review()
+
+        transcripts = window._transcript_store(audio_folder / "beta.m4a").transcript_path
+        shutil.rmtree(transcripts.parent)
+        (audio_folder / "beta.m4a").unlink()
+        window.refresh()
+        assert wait_until(qapp, lambda: window._model.rowCount() == 2)
+        window.show_review()
+
+        saved = ProjectStore(audio_folder).load()
+        assert [item.recording_name for item in saved.speaker_doubts] == ["alpha.m4a"]
     finally:
         close_window(window)
 

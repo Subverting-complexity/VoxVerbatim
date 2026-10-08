@@ -59,6 +59,7 @@ from vox_verbatim.transcription.project import ProjectStore, remove_learned_name
 from vox_verbatim.transcription.vocabulary import VocabularyStore
 from vox_verbatim.ui import review_lists
 from vox_verbatim.ui import review_window as review_window_module
+from vox_verbatim.ui import review_queue
 from vox_verbatim.ui.review_lists import (
     GROUP_COLUMN_CONFIDENCE,
     GROUP_COLUMN_COUNT,
@@ -450,7 +451,7 @@ def test_the_flagged_words_come_back_from_the_project_without_a_read(qapp, tmp_p
     try:
         assert [row.word for row in second._group_model.rows()] == ["15,000", "Jurgen"]
         assert folder.reads == [RECORDING]
-        assert group_row(second, "Jurgen").why == "A value that must not be guessed"
+        assert group_row(second, "Jurgen").why == "A value that the services heard differently"
         assert group_row(second, "Jurgen").reviewed == NOT_REVIEWED
     finally:
         second.close()
@@ -885,14 +886,16 @@ def test_clearing_a_reason_hides_the_words_flagged_for_it(qapp, tmp_path):
             RECORDING: make_transcript(
                 [
                     make_token("one", reasons=(ReviewReason.PROVIDER_DISAGREEMENT,)),
-                    make_token("two", start=40.0, reasons=(ReviewReason.SPEAKER_UNCERTAIN,)),
+                    make_token(
+                        "two", start=40.0, reasons=(ReviewReason.LOW_ACOUSTIC_CONFIDENCE,)
+                    ),
                 ]
             )
         }
     )
     window = open_window(tmp_path, folder, process=True)
     try:
-        window._reason_boxes[ReviewReason.SPEAKER_UNCERTAIN].setChecked(False)
+        window._reason_boxes[ReviewReason.LOW_ACOUSTIC_CONFIDENCE].setChecked(False)
 
         assert [row.word for row in window._group_model.rows()] == ["one"]
     finally:
@@ -1065,7 +1068,7 @@ def test_a_word_that_is_both_weak_and_flagged_appears_once_and_says_both(qapp, t
         assert len(rows) == 1
         assert rows[0].why == review_lists.WHY_LOW_CONFIDENCE
         # And the reason it was flagged for is still on the screen.
-        assert window._reasons_edit.text() == "A value that must not be guessed"
+        assert window._reasons_edit.text() == "A value that the services heard differently"
         # The count must not report it as a second item being kept back,
         # since it is in fact on the screen.
         assert window._count_label.text() == "Showing 1 word group."
@@ -4798,6 +4801,274 @@ def test_a_correction_after_accepting_the_timing_is_counted(qapp, tmp_path):
         window.close()
 
 
+# -- Doubt about the speaker alone ---------------------------------------
+
+
+def speaker_doubt(text: str, start: float) -> FinalToken:
+    """A word every service agreed on, given to another person by the second opinion."""
+    return make_token(
+        text,
+        start=start,
+        end=start + 0.4,
+        reasons=(ReviewReason.SPEAKER_UNCERTAIN,),
+        confidence=Confidence.HIGH,
+        speaker="speaker_1",
+        speaker_alternative="speaker_0",
+    )
+
+
+def speaker_doubt_folder() -> Folder:
+    """One stretch of three words in doubt for their speaker, and one real text doubt."""
+    return Folder(
+        {
+            RECORDING: make_transcript(
+                [
+                    make_token("15,000", start=10.0, end=10.5),
+                    speaker_doubt("that", 40.0),
+                    speaker_doubt("is", 40.5),
+                    speaker_doubt("fine", 41.0),
+                ]
+            )
+        }
+    )
+
+
+def next_tab_stop(widget):
+    """The control Tab moves to from this one."""
+    candidate = widget.nextInFocusChain()
+    while candidate is not widget:
+        if (
+            candidate.focusPolicy() & Qt.FocusPolicy.TabFocus
+            and candidate.isVisible()
+            and candidate.isEnabled()
+        ):
+            return candidate
+        candidate = candidate.nextInFocusChain()
+    return None
+
+
+def test_flagged_in_leaves_out_a_word_in_doubt_only_for_its_speaker():
+    transcript = speaker_doubt_folder().transcripts[RECORDING]
+
+    items = review_lists.flagged_in(RECORDING, transcript)
+
+    assert [item.text for item in items] == ["15,000"]
+
+
+def test_a_saved_flagged_word_still_says_what_kind_of_value_it_is():
+    """The project file keeps the kind, so the list can name it without a read."""
+    amount = make_token("15,000", reasons=(ReviewReason.HIGH_RISK_ENTITY,))
+    amount.risk_categories = [RiskCategory.MONEY]
+
+    [item] = review_lists.flagged_in(RECORDING, make_transcript([amount]))
+    item.risk_categories.append("a kind this version has never heard of")
+    restored = review_lists.restored_token(item)
+
+    assert restored.risk_categories == [RiskCategory.MONEY]
+    assert review_queue.reason_text(restored) == "An amount of money that the services heard differently"
+
+
+def test_a_word_in_doubt_for_its_text_and_its_speaker_is_still_flagged():
+    both = make_token(
+        "fifteen",
+        reasons=(ReviewReason.PROVIDER_DISAGREEMENT, ReviewReason.SPEAKER_UNCERTAIN),
+    )
+
+    items = review_lists.flagged_in(RECORDING, make_transcript([both]))
+
+    assert [item.text for item in items] == ["fifteen"]
+
+
+def test_speaker_only_words_are_not_rows_of_the_word_list(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        assert [row.word for row in window._group_model.rows()] == ["15,000"]
+    finally:
+        window.close()
+
+
+def test_a_stretch_whose_speaker_is_in_doubt_is_one_row(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        model = window._speaker_doubt_model
+        assert model.rowCount() == 1
+        cells = [model.data(model.index(0, column)) for column in range(model.columnCount())]
+        assert cells == [RECORDING, "0:40", "0:41", "Speaker speaker_1 or Jacques"]
+        assert window._speaker_doubt_count_label.text() == (
+            "1 stretch of speech where the speaker is in doubt."
+        )
+    finally:
+        window.close()
+
+
+def test_the_speaker_doubts_are_saved_in_the_project(qapp, tmp_path):
+    store = ProjectStore(tmp_path)
+    window = open_window(tmp_path, speaker_doubt_folder(), store=store, process=True)
+    try:
+        window._save_project(quiet=True)
+    finally:
+        window.close()
+
+    saved = store.load().speaker_doubts
+    assert [(item.start, item.end, item.speakers) for item in saved] == [
+        (40.0, 41.4, ["Speaker speaker_1", "Jacques"])
+    ]
+
+
+def test_regrouping_keeps_the_speaker_doubts(qapp, tmp_path):
+    folder = speaker_doubt_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        before = list(window.state.speaker_doubts)
+        assert len(before) == 1
+
+        assert window.regroup_words() is True
+
+        assert window.state.speaker_doubts == before
+        assert window._speaker_doubt_model.items() == before
+    finally:
+        window.close()
+
+
+def test_regrouping_keeps_the_speaker_doubts_of_a_recording_it_could_not_read(
+    qapp, tmp_path
+):
+    """A recording that cannot be read now has not lost its doubts."""
+    folder = speaker_doubt_folder()
+    window = open_window(tmp_path, folder, process=True)
+    try:
+        before = list(window.state.speaker_doubts)
+        del folder.transcripts[RECORDING]
+
+        window.regroup_words()
+
+        assert window.state.speaker_doubts == before
+        assert window._speaker_doubt_model.rowCount() == 1
+    finally:
+        window.close()
+
+
+def test_the_speaker_doubt_list_says_so_when_there_are_none(qapp, tmp_path):
+    window = open_window(tmp_path, process=True)
+    try:
+        assert window._speaker_doubt_model.rowCount() == 0
+        assert window._speaker_doubt_count_label.text().startswith("No speaker doubts.")
+    finally:
+        window.close()
+
+
+def test_the_speaker_doubt_list_is_named_as_its_label_reads(qapp, tmp_path):
+    window = open_window(tmp_path)
+    try:
+        label = window._speaker_doubts_label
+        assert label.buddy() is window._speaker_doubts
+        assert label.text().replace("&", "") == window._speaker_doubts.accessibleName()
+        assert window._speaker_doubts.accessibleName() == "Speaker doubts"
+        assert window._speaker_doubts.accessibleDescription()
+    finally:
+        window.close()
+
+
+def test_tab_reaches_the_speaker_doubts_between_the_occurrences_and_the_settings(
+    qapp, tmp_path
+):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True, show_details=True)
+    try:
+        assert next_tab_stop(window._occurrences) is window._speaker_doubts
+        assert next_tab_stop(window._speaker_doubts) is window._process_button
+    finally:
+        window.close()
+
+
+def test_the_panel_key_reaches_the_speaker_doubts(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True, show_details=True)
+    try:
+        window._occurrences.setFocus()
+        window.focus_next_panel()
+
+        assert window._status_label.text() == "Speaker doubts"
+    finally:
+        window.close()
+
+
+def test_the_simple_window_shows_the_speaker_doubts(qapp, tmp_path):
+    """Hiding the details must not hide a stretch the person has to decide."""
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        assert window.state.settings.show_details is False
+        assert window._speaker_doubts.isVisibleTo(window)
+        assert window._speaker_doubt_model.rowCount() == 1
+    finally:
+        window.close()
+
+
+def test_tab_and_the_panel_key_reach_the_speaker_doubts_in_the_simple_window(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        assert next_tab_stop(window._groups) is window._speaker_doubts
+
+        window.focus_word_list()
+        window.focus_next_panel()
+
+        assert window._status_label.text() == "Speaker doubts"
+        assert window._holds_focus(window._speaker_doubts)
+    finally:
+        window.close()
+
+
+def test_a_screen_reader_hears_the_times_and_both_speakers(qapp, tmp_path):
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        model = window._speaker_doubt_model
+        spoken = [
+            model.data(model.index(0, column), Qt.ItemDataRole.AccessibleTextRole)
+            for column in range(model.columnCount())
+        ]
+        assert spoken[0] == RECORDING
+        assert spoken[1] == review_lists.time_spoken(40.0)
+        assert spoken[2] == review_lists.time_spoken(41.4)
+        assert spoken[3] == "Speaker speaker_1 or Jacques"
+        assert "Speaker speaker_1 or Jacques" in model.data(
+            model.index(0, 2), Qt.ItemDataRole.ToolTipRole
+        )
+    finally:
+        window.close()
+
+
+def test_moving_to_a_stretch_says_what_it_is(qapp, tmp_path, monkeypatch):
+    said: list[str] = []
+    monkeypatch.setattr(
+        review_window_module,
+        "announce",
+        lambda widget, message, urgent=False: said.append(message),
+    )
+    window = open_window(tmp_path, speaker_doubt_folder(), process=True)
+    try:
+        said.clear()
+        window._speaker_doubts.select_row(0)
+
+        assert any("Speaker speaker_1 or Jacques" in message for message in said)
+    finally:
+        window.close()
+
+
+def test_enter_on_a_stretch_plays_the_whole_stretch(qapp, tmp_path):
+    player = FakePlayer()
+    window = open_window(tmp_path, speaker_doubt_folder(), player=player, process=True)
+    try:
+        window._speaker_doubts.setFocus()
+        window._speaker_doubts.select_row(0)
+        QTest.keyClick(window._speaker_doubts, Qt.Key.Key_Return)
+        player.becomes_ready()
+
+        assert player.seeks[-1] == round((40.0 - SHORT_CONTEXT_SECONDS) * 1000)
+        assert window._stop_at_ms is not None
+        assert window._stop_at_ms == round((41.4 + SHORT_CONTEXT_SECONDS) * 1000)
+        assert player.plays >= 1
+    finally:
+        window.close()
+
+
 # -- The simple window, and the switch that shows the details ------------
 
 
@@ -5064,6 +5335,7 @@ def test_tab_moves_through_the_simple_window_in_reading_order(qapp, tmp_path):
 
         expected = [
             window._groups,
+            window._speaker_doubts,
             window._choice_buttons[0],
             window._choice_buttons[1],
             window._typed_edit,
@@ -5074,7 +5346,8 @@ def test_tab_moves_through_the_simple_window_in_reading_order(qapp, tmp_path):
             window._play_wide_button,
         ]
         assert [widget for widget in chain if widget in expected] == expected
-        # Only the word list, the choices and playback are on the way.
+        # Only the word list, the speaker doubts, the choices and playback
+        # are on the way.
         assert set(chain) <= set(expected)
     finally:
         window.close()
@@ -5085,11 +5358,11 @@ def test_the_panel_key_skips_the_hidden_panels(qapp, tmp_path):
     try:
         window.focus_word_list()
         names = []
-        for _ in range(3):
+        for _ in range(4):
             window.focus_next_panel()
             names.append(window._status_label.text())
 
-        assert names == ["Decide this word", "Playback", "Word Groups"]
+        assert names == ["Speaker doubts", "Decide this word", "Playback", "Word Groups"]
     finally:
         window.close()
 

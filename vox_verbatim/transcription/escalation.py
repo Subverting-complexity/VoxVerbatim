@@ -1368,7 +1368,11 @@ def apply_answers(
     clear the answer. Two services against one on an amount of money is
     evidence, and the specification is explicit that it is still not a
     reason to write the amount down as though it were known. Those words
-    keep the answer as evidence and go to a person.
+    keep the answer as evidence and go to a person. Only an answer that
+    sided against the transcript's reading is marked as a second opinion
+    that did not settle it. An answer that agreed is confirmation: where
+    every service heard the same value the word is left as it was, and
+    where they did not, the word goes to a person for that dispute alone.
 
     Settling changes the text and nothing else. Timing and speaker come
     from their own sources, which is the idea the whole design rests on; a
@@ -1422,7 +1426,7 @@ def apply_answers(
                     settled += 1
                 elif verdict == "confirmed":
                     confirmed += 1
-                else:
+                elif verdict == "unsettled":
                     unsettled += 1
 
     return EscalationApplication(
@@ -1503,14 +1507,28 @@ def _apply_one(
     heard: Sequence[ProviderToken],
     result: EscalationResult,
 ) -> str:
-    """Weigh one answer against one word. Returns what became of it."""
+    """Weigh one answer against one word. Returns what became of it.
+
+    One of "settled", "confirmed", "unsettled" or "unchanged". The last is
+    an agreed value the second opinion said nothing about, which is not
+    counted at all: it was not confirmed, and it is not waiting for anyone.
+    """
     if not heard:
         # The service was asked about this moment and reported no word in
         # it. That is not an answer a person can act on, so the word stays
         # where it was and is marked as still needing one.
+        if _agreed_value(token):
+            # Unless every service already heard the same value. It was asked
+            # about only as a precaution, so an empty answer leaves nothing
+            # in doubt, and flagging it would put it back in the list.
+            return "unchanged"
         token.flag(ReviewReason.ESCALATION_UNRESOLVED)
         return "unsettled"
 
+    # Whether the services disagreed before the second opinion is added to
+    # the candidates. Afterwards a second opinion that heard something new
+    # would look like a dispute of its own.
+    disputed = len(_distinct_texts(token.candidates)) > 1
     provider = heard[0].provider
     heard_text = " ".join(word.text for word in heard if word.text).strip()
     references = tuple(TokenReference(provider, word.index) for word in heard)
@@ -1525,7 +1543,23 @@ def _apply_one(
         references = (TokenReference(provider, nearest.index),)
         matched = _attach_evidence(token, heard_text, provider, references)
 
-    if matched is None or not result.settles_disputes or token.risk_categories:
+    if matched is not None and token.risk_categories:
+        if not are_equivalent(matched.text, token.text):
+            # It sided with a reading the transcript did not choose. A value
+            # that must not be guessed is never changed on that, so the word
+            # goes to a person with the answer kept as evidence.
+            token.flag(ReviewReason.ESCALATION_UNRESOLVED)
+            return "unsettled"
+        if disputed:
+            # It agreed with the transcript, but the services still heard
+            # the value differently. The word stays with a person for that
+            # reason; the second opinion is not why, so it is not flagged.
+            return "unsettled"
+        # Every service heard the same value and so did the second opinion.
+        # There is nothing to change and nothing to review.
+        return "confirmed"
+
+    if matched is None or not result.settles_disputes:
         token.flag(ReviewReason.ESCALATION_UNRESOLVED)
         return "unsettled"
 
@@ -1608,8 +1642,22 @@ def apply_outcome(transcript: Transcript, outcome: EscalationOutcome) -> None:
     if not unsettled:
         return
     for token in transcript.tokens:
-        if token.id in unsettled:
+        if token.id in unsettled and not _agreed_value(token):
             token.flag(ReviewReason.ESCALATION_UNRESOLVED)
+
+
+def _agreed_value(token: FinalToken) -> bool:
+    """Whether this is a high-risk value the services already agreed on.
+
+    Such a word is sent for a second opinion only as a precaution. Where
+    that opinion never came, nothing is in doubt that was not already
+    settled, so it is not flagged as waiting for one.
+    """
+    return (
+        bool(token.risk_categories)
+        and token.text_confidence is Confidence.HIGH
+        and not token.review_reasons
+    )
 
 
 def _number(source: Any, name: str, default: float) -> float:

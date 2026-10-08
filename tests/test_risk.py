@@ -94,6 +94,28 @@ def test_a_measured_amount_is_a_quantity() -> None:
     assert RiskCategory.QUANTITY in _categories("about", "thirty", "kilograms")
 
 
+def test_a_bare_number_is_still_a_quantity() -> None:
+    assert RiskCategory.QUANTITY in risk_at(["we", "need", "twelve", "more"], 2)
+
+
+@pytest.mark.parametrize(
+    ("words", "position"),
+    [
+        (["he", "paid", "five", "hundred"], 2),
+        (["ons", "het", "twaalf", "nodig"], 2),
+        (["Zimmer", "eins", "bitte"], 1),
+    ],
+)
+def test_a_spelled_out_number_other_than_one_is_still_a_quantity(
+    words: list[str], position: int
+) -> None:
+    assert RiskCategory.QUANTITY in risk_at(words, position)
+
+
+def test_afrikaans_een_with_nothing_to_measure_is_not_a_quantity() -> None:
+    assert RiskCategory.QUANTITY not in risk_at(["die", "een", "wat", "kom"], 1)
+
+
 def test_a_bare_number_in_digits_is_still_a_quantity() -> None:
     assert RiskCategory.QUANTITY in risk_at(["we", "need", "12", "more"], 2)
 

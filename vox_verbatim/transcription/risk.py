@@ -511,6 +511,14 @@ def _self_evident(cleaned: str) -> list[tuple[RiskCategory, str]]:
     return found
 
 
+#: The words for "one" that are as often a pronoun as a number: English
+#: "one" and Afrikaans "een". They are not a quantity on their own. German
+#: "ein" and "eine" are articles and are not read as numbers at all. German
+#: "eins" is kept as a quantity, because it is only ever the number counted
+#: or named, as in "Zimmer eins".
+_PRONOUN_ONES = frozenset(("one", "een"))
+
+
 def find_risks(words: Sequence[str]) -> tuple[RiskFinding, ...]:
     """Every high-risk stretch in a sequence of words, in order.
 
@@ -544,15 +552,17 @@ def find_risks(words: Sequence[str]) -> tuple[RiskFinding, ...]:
     # Anything with a digit in it counts, whether or not it can be read as
     # one number: "1/2", "3/4" and "24/7" could not be read and used to slip
     # through here, and a wrong fraction is as wrong as a wrong integer.
-    # A number written as a word does not count on its own. "One" in "the
-    # one who taught me" or "That one" is a pronoun, not a measurement, and
-    # flagging every such word buried the real values in the review list. A
-    # number word next to a unit or a currency is claimed above already.
+    # "One" on its own does not count. In "the one who taught me" or "That
+    # one" it is a pronoun, not a value, and flagging every such word buried
+    # the real values in the review list. Every other number word still
+    # counts: "twelve" in "we need twelve more" is a value, and leaving it
+    # out would let a second opinion overwrite "fifteen" with "fifty". "One"
+    # next to a unit or a currency is claimed above already.
     claimed = {position for finding in findings for position in finding.positions}
     for index, word in enumerate(cleaned):
-        if index in claimed or not numeric[index]:
+        if index in claimed or not numeric[index] or word in _PRONOUN_ONES:
             continue
-        if any(character.isdigit() for character in word):
+        if any(character.isdigit() for character in word) or read_number(word) is not None:
             findings.append(RiskFinding(RiskCategory.QUANTITY, (index,), "a number"))
     return tuple(findings)
 

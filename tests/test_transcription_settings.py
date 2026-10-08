@@ -244,19 +244,31 @@ def test_the_missing_pieces_are_named_one_by_one():
     assert "endpoint" in problems[0]
 
 
-def test_a_required_service_that_is_switched_off_stops_a_run():
+def test_openai_transcription_alone_is_enough_for_a_run():
     transcription = TranscriptionSettings()
-    transcription.elevenlabs.api_key = "el-test"
     transcription.elevenlabs.enabled = False
     transcription.openai_transcription.api_key = "sk-test"
     transcription.openai_adjudication.api_key = "sk-test"
     transcription.microsoft.enabled = False
     transcription.assemblyai.enabled = False
 
+    assert transcription.missing_requirements() == []
+
+
+def test_every_whole_recording_service_switched_off_stops_a_run():
+    """AssemblyAI on its own does not count: it is not sent the whole recording."""
+    transcription = TranscriptionSettings()
+    transcription.elevenlabs.enabled = False
+    transcription.openai_transcription.enabled = False
+    transcription.openai_adjudication.api_key = "sk-test"
+    transcription.microsoft.enabled = False
+    transcription.assemblyai.api_key = "aai-test"
+
     problems = transcription.missing_requirements()
 
     assert len(problems) == 1
-    assert "ElevenLabs Scribe is switched off" in problems[0]
+    assert "are all switched off" in problems[0]
+    assert "at least one" in problems[0]
 
 
 def test_a_service_nobody_asked_for_is_not_a_problem():

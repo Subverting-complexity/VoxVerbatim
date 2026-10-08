@@ -258,8 +258,11 @@ def transcribe_recording(
                 "cannot be placed in the recording and nothing can be played back from "
                 "the review window."
             )
+        # A person who switched ElevenLabs off on purpose should not be told
+        # it failed, so the opening says which of the two happened.
+        why = "is switched off" if Provider.ELEVENLABS not in providers else "did not answer"
         transcript.warnings.append(
-            f"{Provider.ELEVENLABS.display_name} did not answer, so timings and "
+            f"{Provider.ELEVENLABS.display_name} {why}, so timings and "
             f"speakers come from {backbone_provider.display_name} instead. {detail}"
         )
     backbone = outcome.results[backbone_provider]

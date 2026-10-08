@@ -407,17 +407,6 @@ def test_a_run_that_cannot_succeed_is_refused_before_anything_is_sent(
         dialog.close()
 
 
-def test_a_missing_elevenlabs_is_explained_as_the_backbone_it_is(qapp, recordings):
-    dialog = open_dialog(recordings, TranscriptionSettings())
-    try:
-        dialog.start()
-
-        report = dialog._report_text.toPlainText()
-        assert "no word timings and no initial speaker labels" in report
-    finally:
-        dialog.close()
-
-
 def test_a_library_that_cannot_be_loaded_refuses_the_run_like_a_missing_key(
     qapp, monkeypatch, recordings
 ):

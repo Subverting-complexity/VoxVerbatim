@@ -994,24 +994,23 @@ It is used only when the smooth transcript is made after each transcription.""",
         title="Use ElevenLabs Scribe",
         summary=(
             "Whether ElevenLabs is called at all. It supplies the timings and speaker "
-            "labels every transcript is built on, so a run without it is not a run."
+            "labels. Without it a transcript has the words only."
         ),
         note="""\
 This switches ElevenLabs Scribe on and off.
 
-Off is allowed but is close to meaningless for real work. Scribe is the
-structural backbone of a transcript: the word timings, the speaker labels and
-the confidence figures that decide what goes to the review queue all come from
-it, and nothing else here supplies them. A run without it has no timings to
-click, no speakers to name and nothing to measure against.
+Off is allowed, but think before you choose it. Scribe is the structural
+backbone of a transcript: the word timings, the speaker labels and the
+confidence figures that decide what goes to the review queue all come from it,
+and nothing else here supplies them. A run without it has no timings to click,
+no speakers to name and nothing to measure against.
 
-If you switch it off, you are told before a run starts that a transcript
-cannot be made, rather than getting a transcript that quietly lacks half of
-what a transcript is.
+With it off, the transcript is made from the other services that are switched
+on, such as OpenAI transcription alone. You get the words, but nothing can be
+played back from the review window, and the transcript says why.
 
-The switch is here for one honest reason: so that a service having a bad day
-can be taken out of the picture while you work out what is happening, without
-your key being deleted.""",
+Switch it off when you want only the words, or when the service is having a
+bad day and you want it out of the picture without deleting your key.""",
     ),
     _api_key_note(
         ELEVENLABS,
@@ -1124,7 +1123,7 @@ it, and none of them currently does.""",
         title="Use OpenAI for transcription",
         summary=(
             "Whether OpenAI is asked what was said. It is the second full reading "
-            "that ElevenLabs is checked against, so a run needs it."
+            "that ElevenLabs is checked against."
         ),
         note="""\
 This switches OpenAI transcription on and off.
@@ -1136,8 +1135,10 @@ without a second one there is nothing to disagree, nothing to escalate and
 nothing to adjudicate, and the confidence figures have nothing to check
 themselves against.
 
-So a run with this off is not a run. You are told before anything is sent
-rather than at the end.
+You can switch it off, and a run still goes ahead with the other services
+that are on. But with fewer readings, fewer words can be checked against each
+other, so more of them wait for you in review. A run needs at least one of
+ElevenLabs, OpenAI or Microsoft switched on.
 
 It is asked for words only. It is not asked for timing or for speakers, both
 of which come from ElevenLabs, so nothing on this page mentions either.""",
@@ -1415,7 +1416,7 @@ The box cannot be empty. OK refuses an empty prompt and says so.""",
         note="""\
 This switches Microsoft MAI-Transcribe on and off.
 
-It is a third opinion rather than a necessity. Where the two required services
+It is a third opinion rather than a necessity. Where ElevenLabs and OpenAI
 disagree, a third independent reading often settles the matter without anything
 having to be escalated or adjudicated, which is where it earns its cost.
 

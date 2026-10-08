@@ -120,7 +120,8 @@ def run_passes(
     if not providers:
         outcome.warnings.append(
             "No transcription service is switched on, so there was nothing to run. "
-            "Open Settings and switch at least ElevenLabs and OpenAI on."
+            "Open Settings and switch on at least one of ElevenLabs, OpenAI or "
+            "Microsoft."
         )
         return outcome
 

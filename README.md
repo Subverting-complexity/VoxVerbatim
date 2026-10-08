@@ -54,16 +54,18 @@ that the sign-ups are yours to do.
 
 | Service | What it is asked to do | Needed? |
 | --- | --- | --- |
-| ElevenLabs Scribe | Reads every recording in full, and measures where each word falls in the audio | Yes |
-| OpenAI | Reads every recording in full. A second, separate key lets a reasoning model settle the words the others could not agree on | Yes |
+| ElevenLabs Scribe | Reads every recording in full, and measures where each word falls in the audio | Recommended |
+| OpenAI | Reads every recording in full. A second, separate key lets a reasoning model settle the words the others could not agree on | Recommended |
 | Microsoft MAI-Transcribe | Reads every recording in full, as a third opinion | Optional |
 | AssemblyAI | Asked only about the passages the others disagreed on, so it is paid for a second opinion and nothing else | Optional |
 | Deepgram | Nothing yet. It has a settings page and a working adapter, but takes no part in a run | No |
 
 Out of the box everything except Deepgram is switched on, so a first run
-expects all four to be set up. Two accounts are the least you can get away
-with, ElevenLabs and OpenAI, because those two are what every transcript is
-built from and the application will not begin a run without them. If you
+expects all four to be set up. A run needs at least one of ElevenLabs, OpenAI or
+Microsoft. Two accounts, ElevenLabs and OpenAI, are the recommended least,
+because ElevenLabs gives the timings and speakers and OpenAI gives the second
+reading the words are checked against. OpenAI alone gives the words only, with
+nothing to play back in the review window. If you
 want to start with only those, switch Microsoft and AssemblyAI off on their
 own Settings pages first. A service that is switched off is never called and
 never billed, and one that is switched on but not set up stops the run

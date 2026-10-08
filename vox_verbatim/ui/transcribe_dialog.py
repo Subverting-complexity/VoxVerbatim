@@ -1695,14 +1695,6 @@ class TranscribeDialog(QDialog):
         )
         lines = [headline, ""]
         lines.extend(problems)
-        if any(problem.startswith("ElevenLabs") for problem in problems):
-            lines.append("")
-            lines.append(
-                "ElevenLabs Scribe is the backbone of every transcript. Without it "
-                "there are no word timings and no initial speaker labels, so there is "
-                "nothing to play back and nobody to attribute the words to. It is the "
-                "one service a run genuinely cannot be made without."
-            )
         self._report_text.setPlainText("\n".join(lines))
         self._report_group.setVisible(True)
         if len(problems) == 1:

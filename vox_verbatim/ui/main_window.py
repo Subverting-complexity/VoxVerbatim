@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QStatusBar,
@@ -33,10 +34,11 @@ from vox_verbatim.session import SessionState, SessionStore
 from vox_verbatim.settings import (
     SETTINGS_FILE_NAME,
     EnhanceSettings,
+    ExportSettings,
     Settings,
     SettingsStore,
 )
-from vox_verbatim.transcription import grouping, smoothing
+from vox_verbatim.transcription import folder_export, grouping, smoothing
 from vox_verbatim.transcription.calibration import (
     CALIBRATION_FILE_NAME,
     CalibrationStore,
@@ -65,6 +67,7 @@ from vox_verbatim.transcription.vocabulary import (
 )
 from vox_verbatim.ui.accessibility import announce, describe
 from vox_verbatim.ui.enhance_dialog import EnhanceAudioDialog, summarise
+from vox_verbatim.ui.export_dialog import ExportDialog
 from vox_verbatim.ui.file_info_panel import FileInfoPanel
 from vox_verbatim.ui.file_table import AudioFileTableModel, AudioFileTableView
 from vox_verbatim.ui.folder_panel import FolderPanel
@@ -323,6 +326,12 @@ class MainWindow(QMainWindow):
             "&Review Transcript...",
             QKeySequence("Ctrl+R"),
             self.show_review,
+        )
+        self._export_action = self._add_action(
+            file_menu,
+            "Ex&port Transcripts...",
+            QKeySequence("Ctrl+Shift+E"),
+            self.show_export,
         )
         self._make_smooth_action = self._add_action(
             file_menu,
@@ -871,6 +880,106 @@ class MainWindow(QMainWindow):
             # file, and opening on the new file alone would hide exactly the
             # decision that has already been taken.
             self.open_project_review(land_on=review.path.name)
+
+    # -- Exporting transcripts ---------------------------------------------
+
+    def show_export(self) -> None:
+        """Export the chosen recordings' transcripts to a folder the person picks."""
+        files = self._chosen_files()
+        if not files:
+            self._set_status(
+                "There is nothing to export. Check the files you want, or highlight "
+                "one in the file list.",
+                alert=True,
+                urgent=True,
+            )
+            return
+        dialog = ExportDialog(len(files), self._settings.export, self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        chosen = dialog.chosen_settings()
+        kinds = dialog.chosen_kinds()
+        dialog.deleteLater()
+        self._remember_export_settings(chosen)
+        if not accepted:
+            self._set_status("Export Transcripts was closed without exporting anything.")
+            return
+        folder = Path(chosen.folder)
+        plan = folder_export.plan_export(
+            [audio_file.path for audio_file in files], folder, kinds, self._transcript_store
+        )
+        replace_existing = True
+        existing = plan.existing()
+        if existing:
+            answer = self._ask_about_existing_exports(existing, folder)
+            if answer == "cancel":
+                self._set_status("The export was cancelled. Nothing was written.", alert=True)
+                return
+            replace_existing = answer == "replace"
+        result = folder_export.run_export(plan, self._transcript_store, replace_existing)
+        message = folder_export.summary_text(result)
+        self._set_status(message)
+        if self._show_export_summary(message):
+            self._open_with_windows(folder, "export folder")
+
+    def _remember_export_settings(self, export: ExportSettings) -> None:
+        """Keep what was chosen, so the dialog opens the same way next time."""
+        self._settings = replace(self._settings, export=export)
+        if not self._settings_store.save(self._settings):
+            _log.warning("The Export Transcripts settings could not be saved.")
+
+    def _ask_about_existing_exports(self, existing: list[Path], folder: Path) -> str:
+        """Ask once what to do with files already in the folder.
+
+        Answers "replace", "skip" or "cancel". A test replaces this.
+        """
+        count = len(existing)
+        names = [path.name for path in existing]
+        shown = "\n".join(names[:10])
+        if count > 10:
+            shown += f"\nand {count - 10} more."
+        one = count == 1
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Files Already Exist")
+        box.setText(
+            f"{count} {'file' if one else 'files'} with the same "
+            f"{'name' if one else 'names'} already {'exists' if one else 'exist'} "
+            f"in {folder}. Replace them, skip them, or cancel the export?"
+        )
+        box.setInformativeText(shown)
+        replace_button = box.addButton("&Replace All", QMessageBox.ButtonRole.YesRole)
+        skip_button = box.addButton("&Skip Them", QMessageBox.ButtonRole.NoRole)
+        cancel_button = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+        box.deleteLater()
+        if clicked is replace_button:
+            return "replace"
+        if clicked is skip_button:
+            return "skip"
+        return "cancel"
+
+    def _show_export_summary(self, message: str) -> bool:
+        """Show how the export went, and answer whether to open the folder.
+
+        A message box rather than the status bar alone, because it holds the
+        button that opens the folder, and a screen reader reads its text when
+        it appears. A test replaces this.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Export Finished")
+        box.setText(message)
+        open_button = box.addButton("&Open Folder", QMessageBox.ButtonRole.ActionRole)
+        close_button = box.addButton(QMessageBox.StandardButton.Close)
+        box.setDefaultButton(close_button)
+        box.setEscapeButton(close_button)
+        box.exec()
+        opened = box.clickedButton() is open_button
+        box.deleteLater()
+        return opened
 
     # -- The smooth transcript ---------------------------------------------
 

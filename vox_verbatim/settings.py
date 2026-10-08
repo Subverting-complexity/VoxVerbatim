@@ -290,6 +290,35 @@ class EnhanceSettings:
 
 
 @dataclass
+class ExportSettings:
+    """What the Export Transcripts dialog opens with.
+
+    The first time, the two transcripts are ticked and the review report is
+    not, because the transcripts are what people share and the report is for
+    whoever checks the work. After that the dialog opens as it was left.
+    """
+
+    folder: str = ""
+    """Where transcripts were last exported. Empty until the first export."""
+
+    transcript: bool = True
+    smooth_transcript: bool = True
+    review_report: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ExportSettings":
+        settings = cls()
+        folder = data.get("folder")
+        if isinstance(folder, str):
+            settings.folder = folder.strip()
+        for name in ("transcript", "smooth_transcript", "review_report"):
+            value = data.get(name)
+            if isinstance(value, bool):
+                setattr(settings, name, value)
+        return settings
+
+
+@dataclass
 class OpenAiTranscriptionSettings:
     """How the application talks to OpenAI for speech-to-text.
 
@@ -1029,6 +1058,9 @@ class Settings:
     enhance: EnhanceSettings = field(default_factory=EnhanceSettings)
     """What the Enhance Audio dialog opens with next time."""
 
+    export: ExportSettings = field(default_factory=ExportSettings)
+    """What the Export Transcripts dialog opens with next time."""
+
     transcription: TranscriptionSettings = field(default_factory=TranscriptionSettings)
     """The services transcription talks to, and how a run behaves."""
 
@@ -1067,6 +1099,9 @@ class Settings:
         enhance = data.get("enhance")
         if isinstance(enhance, dict):
             settings.enhance = EnhanceSettings.from_dict(enhance)
+        export = data.get("export")
+        if isinstance(export, dict):
+            settings.export = ExportSettings.from_dict(export)
         # A settings file written before transcription existed has no
         # section for it, and must keep working. Every field then takes its
         # documented default, which is what makes adding settings safe.

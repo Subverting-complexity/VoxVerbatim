@@ -355,6 +355,13 @@ class Occurrence:
         moment ago, so the occurrence would come back as a loose word with no
         history, looking like a fresh finding rather than like damage. The
         analysis finds the word again on the next run in any case.
+
+        The comparison form is worked out again from ``detected_text``, as
+        :meth:`ReplacementRule.from_dict` does for a rule. The review window
+        finds the rule an occurrence taught by comparing the two forms, so if
+        only the rule's form were brought up to date, a project saved before
+        the comparison forms changed would load with the two disagreeing, and
+        reversing a correction would leave its rule behind to go on applying.
         """
         if not isinstance(data, dict):
             return None
@@ -367,7 +374,9 @@ class Occurrence:
             recording_name=_text(data.get("recording_name")),
             token_id=_text(data.get("token_id")),
             detected_text=_text(data.get("detected_text")),
-            normalised_text=_text(data.get("normalised_text")),
+            normalised_text=(
+                normalise(_text(data.get("detected_text"))) or _text(data.get("normalised_text"))
+            ),
             start=_optional_number(data.get("start")),
             end=_optional_number(data.get("end")),
             confidence_strength=_optional_number(data.get("confidence_strength")),

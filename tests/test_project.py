@@ -119,6 +119,7 @@ def test_a_saved_project_comes_back_unchanged(tmp_path):
             make_occurrence(
                 "two",
                 detected_text="Bosh",
+                normalised_text="bosh",
                 auto_applied=True,
                 applied_rule_id="rule-1",
                 stale=True,
@@ -574,6 +575,17 @@ def test_a_rule_saved_under_an_older_comparison_form_still_matches(tmp_path):
 
     assert state.rules[0].normalised_text == "yeah"
     assert state.rule_for("yeah", "en") is state.rules[0]
+
+
+def test_an_occurrence_and_its_rule_saved_under_an_older_form_still_agree(tmp_path):
+    """The window finds the rule a word taught by comparing the two forms."""
+    occurrence = make_occurrence("one", detected_text="ja", normalised_text="ja").to_dict()
+    write_project(tmp_path, {"occurrences": [occurrence], "rules": [saved_rule("ja", "ja")]})
+
+    state = ProjectStore(tmp_path).load()
+
+    assert state.occurrences[0].normalised_text == "yeah"
+    assert state.occurrences[0].normalised_text == state.rules[0].normalised_text
 
 
 def test_a_stored_form_that_disagrees_with_the_matched_text_is_worked_out_again(tmp_path):

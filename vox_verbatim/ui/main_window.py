@@ -1113,6 +1113,7 @@ class MainWindow(QMainWindow):
             parent=self,
             record_statistics=lambda change: self._calibration_store.apply(change.apply),
             vocabulary=user_terms_index(self._vocabulary_store.load()),
+            app_smoothing_prompt=self._settings.transcription.smoothing.prompt,
         )
         # Given its parent after the window exists rather than before, so that
         # Qt destroys the player along with the window it belongs to. A player

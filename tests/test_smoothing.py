@@ -33,9 +33,12 @@ from vox_verbatim.transcription.smoothing import (
     Turn,
     build_turns,
     check_turn,
+    smoother_for,
     split_into_parts,
+    style_prompt_for,
     write_smooth_transcript,
 )
+from vox_verbatim.transcription.project import ProjectStore
 
 _TURN_LINE = re.compile(r"^Turn (\d+) \(([^)]*)\): (.*)$")
 
@@ -425,3 +428,41 @@ def test_a_failed_check_then_a_failed_retry_gives_the_check_as_the_reason():
     assert len(outcome.warnings) == 1
     assert "lost too many of its words" in outcome.warnings[0]
     assert "could not be reached" not in outcome.warnings[0]
+
+
+# -- A folder's own prompt ---------------------------------------------------
+
+
+def _echo(turns, _):
+    return [(number, text) for number, _speaker, text in turns]
+
+
+def test_a_folder_with_no_prompt_of_its_own_uses_the_apps_prompt(tmp_path):
+    settings = Settings().transcription
+    settings.smoothing.prompt = "The app's prompt.\n"
+    settings.openai_adjudication.api_key = "sk-test"
+    client = FakeClient(_echo)
+    smoother_for(settings, tmp_path, client=client).smooth(_transcript(("0", "hello there")))
+    assert client.calls[0]["instructions"].startswith("The app's prompt.")
+
+
+def test_a_saved_folder_prompt_is_used_for_that_folder(tmp_path):
+    store = ProjectStore(tmp_path)
+    state = store.load()
+    state.settings.smoothing_prompt = "Skryf in Afrikaans.\n"
+    assert store.save(state)
+    client = FakeClient(_echo)
+    settings = Settings().transcription
+    settings.openai_adjudication.api_key = "sk-test"
+    smoother = smoother_for(settings, tmp_path, client=client)
+    smoother.smooth(_transcript(("0", "hello there")))
+    instructions = client.calls[0]["instructions"]
+    assert instructions.startswith("Skryf in Afrikaans.")
+    assert DEFAULT_SMOOTHING_PROMPT.strip() not in instructions
+    assert FORMAT_INSTRUCTIONS in instructions
+
+
+def test_a_blank_folder_prompt_counts_as_none():
+    assert style_prompt_for("App.", "  \n") == "App."
+    assert style_prompt_for("App.", "") == "App."
+    assert style_prompt_for("App.", "Folder.\n") == "Folder.\n"

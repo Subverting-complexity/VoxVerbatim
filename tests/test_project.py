@@ -102,6 +102,7 @@ def test_a_saved_project_comes_back_unchanged(tmp_path):
             play_automatically=False,
             show_details=True,
             auto_play_delay_seconds=5,
+            smoothing_prompt="Skryf in Afrikaans.\n  Hou dit kort.\n",
         ),
         groups=[
             WordGroup(
@@ -1106,3 +1107,13 @@ def test_one_stretch_listed_twice_keeps_the_first(tmp_path):
     )
 
     assert ProjectStore(tmp_path).load().speaker_doubts == [first]
+
+
+def test_a_folder_has_no_smoothing_prompt_of_its_own_until_one_is_saved(tmp_path):
+    assert ProjectStore(tmp_path).load().settings.smoothing_prompt == ""
+
+
+def test_a_blank_or_wrong_typed_smoothing_prompt_counts_as_none(tmp_path):
+    for value in ("   \n", 42, None):
+        write_project(tmp_path, {"settings": {"smoothing_prompt": value}})
+        assert ProjectStore(tmp_path).load().settings.smoothing_prompt == ""

@@ -54,6 +54,7 @@ from tests.test_passes import (
     three_services,
 )
 from tests.test_smoothing import FakeClient as SmoothingClient
+from tests.test_smoothing import _transcript as smoothing_transcript
 
 
 # -- Setting a run up ----------------------------------------------------
@@ -1509,6 +1510,77 @@ def test_a_fault_in_smoothing_does_not_cost_the_transcript(transcribe, monkeypat
 
     assert run.transcript.verbatim_text == SENTENCE
     assert run.warned_about("The smooth transcript was not made", "the engine broke")
+
+
+def _two_part_smoothing(tmp_path, monkeypatch, answer):
+    """Smooth a two-speaker transcript sent in one part per turn."""
+    transcript = smoothing_transcript(("0", "we we went home"), ("1", "um and then we ate dinner beside the river"))
+    store = TranscriptStore(tmp_path / "talk.wav")
+    client = SmoothingClient(answer)
+
+    def build(settings):
+        return smoothing.Smoother(api_key="sk-test-key", model="m", client=client, part_words=1)
+
+    monkeypatch.setattr(pipeline, "_build_smoother", build)
+    pipeline._smooth(transcript, smoothing_settings(), store, pipeline._Reporter(None))
+    return transcript, store
+
+
+def test_a_part_with_no_answer_is_named_as_such(tmp_path, monkeypatch):
+    def second_part_fails(turns, _index):
+        if any(number == 2 for number, _speaker, _text in turns):
+            raise ConnectionError("no network")
+        return echo(turns, _index)
+
+    transcript, store = _two_part_smoothing(tmp_path, monkeypatch, second_part_fails)
+
+    # The file still matches the transcript: the failed part keeps its
+    # literal words under a warning line.
+    assert (store.exports_folder / smoothing.SMOOTH_EXPORT_NAME).exists()
+    assert len(transcript.warnings) == 1
+    warning = transcript.warnings[0]
+    assert "did not answer for 1 part" in warning
+    assert "did not pass its check" not in warning
+
+
+def test_a_part_that_fails_its_check_is_named_as_such(tmp_path, monkeypatch):
+    def drop_the_second_turn(turns, _index):
+        return [(number, "" if number == 2 else text) for number, _speaker, text in turns]
+
+    transcript, _store = _two_part_smoothing(tmp_path, monkeypatch, drop_the_second_turn)
+
+    assert len(transcript.warnings) == 1
+    assert "edit of 1 part did not pass its check" in transcript.warnings[0]
+    assert "did not answer" not in transcript.warnings[0]
+
+
+def test_the_report_charges_only_the_answered_smoothing_requests(transcribe, monkeypatch):
+    def refuse(_turns, _index):
+        raise ConnectionError("no network")
+
+    fake_smoother(monkeypatch, SmoothingClient(refuse))
+
+    run = transcribe(settings=smoothing_settings())
+
+    report = report_of(run)
+    assert "of which 0 answered" in report
+    assert "an estimated 0.00 USD" in report
+
+
+def test_the_report_does_not_claim_a_stale_file_is_gone():
+    transcript = Transcript(
+        recording_name="talk.wav",
+        warnings=[
+            "The smooth transcript was not made: no OpenAI API key has been entered.",
+            f"An older {smoothing.SMOOTH_EXPORT_NAME} could not be removed, and it does "
+            "not match this transcript.",
+        ],
+    )
+
+    report = exports.render_review_report(transcript)
+
+    assert "## The smooth transcript" in report
+    assert "was left beside this transcript" not in report
 
 
 def test_smoothing_says_what_it_is_doing(transcribe, monkeypatch):

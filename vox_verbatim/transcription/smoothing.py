@@ -347,6 +347,10 @@ class SmoothOutcome:
     warnings: list[str] = field(default_factory=list)
     requests: list[ProviderRequestRecord] = field(default_factory=list)
     error: str | None = None
+    unanswered_parts: int = 0
+    """Parts the model never answered, kept as the literal words."""
+    unchecked_parts: int = 0
+    """Parts whose edit failed its check twice, kept with a warning."""
 
     @property
     def succeeded(self) -> bool:
@@ -438,6 +442,10 @@ class Smoother:
             outcome.requests.extend(result.requests)
             if result.warning is not None:
                 outcome.warnings.append(result.warning)
+                if result.answered:
+                    outcome.unchecked_parts += 1
+                else:
+                    outcome.unanswered_parts += 1
         outcome.text = render_smooth_text(transcript, results, self._model)
         return outcome
 

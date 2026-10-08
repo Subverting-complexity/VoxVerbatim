@@ -907,7 +907,14 @@ def _report_smoothing(transcript: Transcript) -> str:
 
     lines = ["## The smooth transcript", ""]
     if failure is not None:
-        lines.append(f"{failure} No {SMOOTH_EXPORT_NAME} was left beside this transcript.")
+        stale = any(
+            warning.startswith(f"An older {SMOOTH_EXPORT_NAME} could not be removed")
+            for warning in transcript.warnings
+        )
+        if stale:
+            lines.append(failure)
+        else:
+            lines.append(f"{failure} No {SMOOTH_EXPORT_NAME} was left beside this transcript.")
     else:
         lines.append(
             f"{SMOOTH_EXPORT_NAME} is an edited copy of this transcript for easy reading. "
@@ -925,9 +932,10 @@ def _report_smoothing(transcript: Transcript) -> str:
         )
         rate = _smoothing_rate(transcript)
         if rate is not None:
+            # Only the requests that were answered are charged for.
             sentence += (
-                f" At the rate in Settings that is an estimated "
-                f"{describe_money(len(requests) * rate)}."
+                f" At the rate in Settings the answered requests cost an estimated "
+                f"{describe_money(answered * rate)}."
             )
         lines.append(sentence)
         lines.append("")

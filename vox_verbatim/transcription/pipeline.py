@@ -1092,9 +1092,12 @@ def _finish(
             _forget_smooth_transcript(transcript, store)
             transcript.warnings.append(f"{smoothing.NOT_MADE}. {error}")
             changed = True
-        if changed and saved:
-            # Its requests and any warning belong in the saved record too.
-            store.save(transcript)
+        if changed:
+            # The run finishes when the smoothing does, and its requests and
+            # any warning belong in the saved record too.
+            transcript.completed_at = _now()
+            if saved:
+                store.save(transcript)
     _write_exports(transcript, store, (exports.REPORT_EXPORT_NAME,))
     _log.info(
         "Transcribed %s in %.1f seconds: %d words, %d needing review.",
@@ -1178,13 +1181,23 @@ def _smooth(
         transcript.warnings.append(outcome.error)
         reporter.stage("smoothing", 1.0, outcome.error)
         return True
-    if outcome.warnings:
-        parts = len(outcome.warnings)
+    problems: list[str] = []
+    if outcome.unanswered_parts:
+        problems.append(
+            f"the language model did not answer for {_count(outcome.unanswered_parts, 'part')}, "
+            "which keep the literal words"
+        )
+    if outcome.unchecked_parts:
+        problems.append(
+            f"the language model's edit of {_count(outcome.unchecked_parts, 'part')} "
+            "did not pass its check"
+        )
+    if problems:
         transcript.warnings.append(
-            "The smooth transcript was made, but the language model's edit of "
-            f"{_count(parts, 'part')} did not pass its check. A warning line in "
-            f"{smoothing.SMOOTH_EXPORT_NAME} marks each one, to compare with "
-            f"{exports.TEXT_EXPORT_NAME}."
+            "The smooth transcript was made, but "
+            + " and ".join(problems)
+            + f". A warning line in {smoothing.SMOOTH_EXPORT_NAME} marks each one, to "
+            f"compare with {exports.TEXT_EXPORT_NAME}."
         )
     reporter.stage("smoothing", 1.0, "The smooth transcript is ready.")
     return True

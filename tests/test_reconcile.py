@@ -1128,6 +1128,36 @@ def test_a_unit_spelled_like_a_filler_only_one_service_heard_is_still_flagged() 
     assert unit.needs_review
 
 
+@pytest.mark.parametrize(
+    ("words", "tidied"),
+    [
+        (
+            ["it", "cost", "fifteen", "uh", "thousand", "rand", "in", "total"],
+            ["it", "cost", "fifteen", "thousand", "rand", "in", "total"],
+        ),
+        (
+            ["we", "met", "on", "15", "uh", "March", "last", "year"],
+            ["we", "met", "on", "15", "March", "last", "year"],
+        ),
+    ],
+)
+def test_a_filler_inside_a_value_only_one_service_heard_is_not_a_disagreement(
+    words: list[str], tidied: list[str]
+) -> None:
+    """The words around a number are high risk, but "uh" there is still a filler."""
+    tokens = reconcile(
+        table_of(
+            spoken(Provider.ELEVENLABS, words),
+            spoken(Provider.OPENAI, tidied, timed=False),
+            spoken(Provider.MICROSOFT, tidied, timed=False),
+        )
+    )
+
+    filler = token_at(tokens, "uh")
+    assert filler.risk_categories
+    assert ReviewReason.PROVIDER_DISAGREEMENT not in filler.review_reasons
+
+
 def test_a_date_a_service_heard_differently_names_the_kind_of_value() -> None:
     backbone = spoken(Provider.ELEVENLABS, ["we", "met", "on", "15", "March", "last", "year"])
     other = ["we", "met", "on", "16", "March", "last", "year"]

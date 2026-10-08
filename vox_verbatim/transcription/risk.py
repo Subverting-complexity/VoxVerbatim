@@ -431,6 +431,17 @@ def has_ambiguous_separator(text: str) -> bool:
     return bool(_SEPARATED_NUMBER.match(cleaned) or _WRITTEN_DATE.match(cleaned))
 
 
+def is_unit_word(text: str) -> bool:
+    """Whether this word is a unit of measure, such as "kg" or "mm".
+
+    Some units are spelled like a filler sound: "mm" is millimetres after a
+    number and a hum anywhere else. Reconciliation asks this so that a filler
+    standing inside an amount is still treated as a filler while the unit of
+    a measurement is not.
+    """
+    return _clean(text) in _QUANTITY_WORDS
+
+
 def is_numeric(text: str) -> bool:
     """Whether this word carries a number, written as digits or as words.
 

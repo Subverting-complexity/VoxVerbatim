@@ -123,7 +123,12 @@ from vox_verbatim.transcription.normalise import (
     normalise,
     spelled_as,
 )
-from vox_verbatim.transcription.risk import RISK_WINDOW, numbers_disagree, risk_at
+from vox_verbatim.transcription.risk import (
+    RISK_WINDOW,
+    is_unit_word,
+    numbers_disagree,
+    risk_at,
+)
 from vox_verbatim.transcription.vocabulary import TermCategory, VocabularyIndex
 
 #: How far each service is believed before anything about the word is known.
@@ -1465,12 +1470,16 @@ def _contesting_silence(
     about which value was said. A value only one service heard keeps every
     silence against it, because nobody corroborated it.
 
-    High-risk values are decided first, and the filler and repeat rule does
-    not apply to them. Otherwise a digit only one service heard, as in
-    "0 8 2 2 5" against "0 8 2 5", was settled because it repeats the digit
-    beside it, and the unit "mm" in "5 mm deep" because it is spelled like
-    a filler. In a phone number or a measurement that is the very word that
-    must be checked.
+    High-risk values are decided first, and the repeat rule does not apply
+    to them. Otherwise a digit only one service heard, as in "0 8 2 2 5"
+    against "0 8 2 5", was settled because it repeats the digit beside it.
+    In a phone number that is the very word that must be checked.
+
+    A filler keeps the filler rule even inside a value, because the words
+    between a keyword and its number are all marked high risk: the "uh" in
+    "fifteen uh thousand rand" is still only a hesitation. A unit spelled
+    like a filler, such as "mm" in "5 mm deep", is the exception: there it
+    is millimetres, part of the value itself.
 
     Only the confidence of the word uses this. Removing a word that nobody
     else heard still counts every silent service; see
@@ -1478,11 +1487,12 @@ def _contesting_silence(
     """
     if runner_up is not None:
         return deletions
-    if risk:
+    filler = is_filler(winner.display, language) and not (
+        risk and is_unit_word(winner.display)
+    )
+    if risk and not filler:
         return () if len(winner.providers) >= 2 else deletions
-    if is_filler(winner.display, language) or _is_repeated_beside(
-        scope, backbone_texts, winner.display
-    ):
+    if filler or _is_repeated_beside(scope, backbone_texts, winner.display):
         return ()
     return deletions
 

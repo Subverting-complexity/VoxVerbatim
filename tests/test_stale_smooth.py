@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 
 import pytest
+import shiboken6
 from PySide6.QtCore import Qt
 
 from vox_verbatim.session import SessionStore
@@ -373,3 +374,76 @@ def test_opening_an_out_of_date_smooth_transcript_says_so_and_how_to_update_it(
     assert "It is out of date" in message
     assert "Make Smooth Transcript Again, Ctrl+Shift+M, updates it." in message
     assert smooth_path(store).is_file()
+
+
+class _GatedSmoother(FakeSmoother):
+    """Holds its answer until the test lets it go."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = threading.Event()
+
+    def smooth(self, transcript: Transcript):
+        self.gate.wait(10)
+        return super().smooth(transcript)
+
+
+def test_an_export_still_finishes_when_the_review_window_is_destroyed_meanwhile(
+    qapp, tmp_path, main, out, monkeypatch
+):
+    """Ctrl+R again, a new folder or closing the app destroys the review window.
+
+    The export it started was promised, so it must still run, and its
+    summary must be said in the main window instead.
+    """
+    fake = _GatedSmoother()
+    monkeypatch.setattr(smoothing, "smoother_for", lambda *_args, **_kw: fake)
+    review = open_review(tmp_path, main)
+    select_word(review, "Bosch")
+    name = review.current_occurrence().recording_name
+    store = TranscriptStore(review._recording_paths[name])
+    write_smooth_transcript(store.load(), store, FakeSmoother())
+    review._replacement_edit.setText("Bausch")
+    assert review.apply_replacement_to_word() is True
+    monkeypatch.setattr(
+        export_flow_module,
+        "ExportDialog",
+        FakeDialog(ExportSettings(folder=str(out), transcript=False), remake=True),
+    )
+    summaries = _catch_summary(monkeypatch)
+
+    review.export_transcripts()
+    assert main._smooth_runner.is_running()
+    review.close()
+    shiboken6.delete(review)
+    fake.gate.set()
+
+    assert wait_until(qapp, lambda: bool(summaries))
+    stem = name.rsplit(".", 1)[0]
+    assert "Bausch" in (out / f"{stem} - smooth transcript.txt").read_text(encoding="utf-8")
+    assert main._status_label.text().startswith("Exported 1 file")
+
+
+class _UnwritableStore:
+    """A store whose smooth file cannot be written."""
+
+    def __init__(self, folder) -> None:
+        self.folder = folder
+        self.exports_folder = folder / "exports"
+
+    def write_export(self, _name, _text):
+        return None
+
+
+def test_a_failed_write_leaves_no_old_fingerprint_behind(tmp_path):
+    """Otherwise undoing the correction could make a stale file read as current."""
+    folder = tmp_path / "t"
+    folder.mkdir()
+    (folder / SMOOTH_SOURCE_NAME).write_text("an older fingerprint\n", encoding="utf-8")
+
+    outcome = write_smooth_transcript(
+        _transcript("interview.m4a", "hello"), _UnwritableStore(folder), FakeSmoother()
+    )
+
+    assert outcome.error
+    assert not (folder / SMOOTH_SOURCE_NAME).exists()

@@ -242,12 +242,26 @@ def test_the_focus_goes_back_where_it_was_when_the_export_ends(
         review.deleteLater()
 
 
-def test_with_no_word_chosen_or_no_export_given_it_says_why(qapp, tmp_path, main):
+def test_with_no_export_given_it_says_why(qapp, tmp_path, main):
     review = open_review(tmp_path, main, export=False)
     try:
         select_word(review, "Bosch")
         review.export_transcripts()
         assert "cannot be exported from this window" in review._status_label.text()
+    finally:
+        review.close()
+        review.deleteLater()
+
+
+def test_with_no_word_chosen_it_says_why_and_opens_nothing(qapp, tmp_path, main, monkeypatch):
+    review = open_review(tmp_path, main)
+    try:
+        opened = []
+        monkeypatch.setattr(export_flow_module, "ExportDialog", lambda *a, **k: opened.append(a))
+        monkeypatch.setattr(review, "current_occurrence", lambda: None)
+        review.export_transcripts()
+        assert opened == []
+        assert review._status_label.text().startswith("Choose a word first.")
     finally:
         review.close()
         review.deleteLater()

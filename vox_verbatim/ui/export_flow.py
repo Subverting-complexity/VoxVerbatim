@@ -86,10 +86,19 @@ class ExportFlow(QObject):
         store_for: StoreFor,
         smooth_runner: SmoothRunner | None = None,
         build_smoother: Callable[[Path], Smoother] | None = None,
+        owner: QWidget | None = None,
+        owner_say: Say | None = None,
     ) -> None:
-        super().__init__(parent)
+        # Owned by the main window when it is given, not by the window that
+        # asked. The review window can be destroyed while smooth transcripts
+        # are being made again, by Ctrl+R, a new folder or closing the app;
+        # a flow owned by it would go with it, and the export the person was
+        # promised would never run and never be mentioned.
+        super().__init__(owner if owner is not None else parent)
         self._window = parent
         self._say = say
+        self._owner = owner
+        self._owner_say = owner_say
         self._settings = settings
         self._save_settings = save_settings
         self._store_for = store_for
@@ -137,7 +146,7 @@ class ExportFlow(QObject):
         dialog.deleteLater()
         self._save_settings(chosen)
         if not accepted:
-            self._say("Export Transcripts was closed without exporting anything.")
+            self._tell("Export Transcripts was closed without exporting anything.")
             return
         self._recordings = recordings
         self._folder = Path(chosen.folder)
@@ -159,7 +168,7 @@ class ExportFlow(QObject):
         and waiting an unknown time without saying so would be worse.
         """
         if self._runner is None or self._build_smoother is None:
-            self._say(
+            self._tell(
                 "The smooth transcripts cannot be made again from here, so nothing was "
                 "exported.",
                 alert=True,
@@ -167,7 +176,7 @@ class ExportFlow(QObject):
             )
             return
         if self._runner.is_running():
-            self._say(
+            self._tell(
                 f"{busy_message()} Nothing was exported.", alert=True, urgent=True
             )
             return
@@ -203,7 +212,7 @@ class ExportFlow(QObject):
                 )
                 continue
             done = self._remake_count - len(self._to_remake)
-            self._say(
+            self._tell(
                 f"Making the smooth transcript of {name} again before exporting, "
                 f"{done} of {self._remake_count}. You can keep working. You will hear "
                 "when the export is done.",
@@ -237,13 +246,13 @@ class ExportFlow(QObject):
         if existing:
             answer = self._ask_about_existing_exports(existing, folder)
             if answer == "cancel":
-                self._say("The export was cancelled. Nothing was written.", alert=True)
+                self._tell("The export was cancelled. Nothing was written.", alert=True)
                 return
             replace_existing = answer == "replace"
         result = folder_export.run_export(plan, self._store_for, replace_existing)
         result.failed[:0] = self._remake_problems
         message = folder_export.summary_text(result)
-        self._say(message)
+        self._tell(message)
         if self._show_export_summary(message):
             self._open_folder(folder)
 
@@ -254,6 +263,31 @@ class ExportFlow(QObject):
         self._restore_focus()
         self.deleteLater()
 
+    # -- Where to speak -----------------------------------------------------
+
+    def _asking_window_gone(self) -> bool:
+        """Whether the window that asked has been destroyed or closed.
+
+        Closing the review window only hides it, and a box parented to a
+        hidden window, or a sentence in its status line, reaches nobody.
+        """
+        if self._owner is None:
+            return False
+        return not shiboken6.isValid(self._window) or not self._window.isVisible()
+
+    def _tell(self, message: str, alert: bool = False, urgent: bool = False) -> None:
+        """Say ``message`` in the asking window, or in the owner's once it has gone."""
+        if self._asking_window_gone() and self._owner_say is not None:
+            self._owner_say(message, alert=alert, urgent=urgent)
+        else:
+            self._say(message, alert=alert, urgent=urgent)
+
+    def _box_parent(self) -> QWidget:
+        """The window a box opens in front of: the asking one while it is there."""
+        if self._asking_window_gone() and shiboken6.isValid(self._owner):
+            return self._owner
+        return self._window
+
     # -- Focus ---------------------------------------------------------------
 
     def _remember_focus(self) -> None:
@@ -263,6 +297,9 @@ class ExportFlow(QObject):
         application has no focus widget while the window is not active, and
         the window still knows which of its controls had it.
         """
+        if not shiboken6.isValid(self._window):
+            self._focus = None
+            return
         self._focus = self._window.window().focusWidget()
 
     def _restore_focus(self) -> None:
@@ -286,7 +323,7 @@ class ExportFlow(QObject):
         if count > 10:
             shown += f"\nand {count - 10} more."
         one = count == 1
-        box = QMessageBox(self._window)
+        box = QMessageBox(self._box_parent())
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Files Already Exist")
         box.setText(
@@ -316,7 +353,7 @@ class ExportFlow(QObject):
         button that opens the folder, and a screen reader reads its text when
         it appears. A test replaces this.
         """
-        box = QMessageBox(self._window)
+        box = QMessageBox(self._box_parent())
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Export Finished")
         box.setText(message)
@@ -332,8 +369,8 @@ class ExportFlow(QObject):
     def _open_folder(self, folder: Path) -> None:
         """Open the export folder in File Explorer. A test replaces this."""
         if QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
-            self._say(f"Opened the export folder, {folder}.", alert=True)
+            self._tell(f"Opened the export folder, {folder}.", alert=True)
         else:
-            self._say(
+            self._tell(
                 f"Windows could not open the export folder, {folder}.", alert=True, urgent=True
             )

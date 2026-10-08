@@ -658,6 +658,10 @@ def write_smooth_transcript(transcript: Transcript, store: Any, smoother: Smooth
     outcome = smoother.smooth(transcript)
     if not outcome.text:
         return outcome
+    # The old fingerprint goes before the new file is written. If the write
+    # then fails, no fingerprint is left to match a smooth file it does not
+    # describe, so the file can only ever read as out of date, never current.
+    _remove_source_fingerprint(store)
     if store.write_export(SMOOTH_EXPORT_NAME, outcome.text) is None:
         outcome.error = f"{NOT_MADE}: the {SMOOTH_EXPORT_NAME} file could not be written."
         return outcome
@@ -695,6 +699,15 @@ def smooth_is_out_of_date(store: Any, transcript: Transcript) -> bool:
     except (OSError, UnicodeDecodeError):
         return True
     return recorded != source_fingerprint(transcript)
+
+
+def _remove_source_fingerprint(store: Any) -> None:
+    """Remove the recorded fingerprint, if any. A failure is only logged."""
+    path = store.folder / SMOOTH_SOURCE_NAME
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        _log.warning("Could not remove %s.", path, exc_info=True)
 
 
 def _write_source_fingerprint(store: Any, fingerprint: str) -> None:

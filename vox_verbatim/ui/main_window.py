@@ -922,6 +922,8 @@ class MainWindow(QMainWindow):
                     self._settings.transcription, recording.parent
                 )
             ),
+            owner=self,
+            owner_say=self._set_status,
         )
         flow.run(recordings, scope_text)
 

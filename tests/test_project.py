@@ -341,6 +341,32 @@ def test_a_confidence_outside_the_range_is_pulled_back_into_it(tmp_path):
     assert settings.grouping_tolerance == 0.0
 
 
+def test_a_new_folder_plays_without_a_wait(tmp_path):
+    assert ProjectStore(tmp_path).load().settings.auto_play_delay_seconds == 0
+
+
+def test_the_old_default_wait_in_an_older_file_becomes_no_wait(tmp_path):
+    """Two seconds in a version 1 file is the old default, not a choice."""
+    write_project(tmp_path, {"version": 1, "settings": {"auto_play_delay_seconds": 2}})
+    assert ProjectStore(tmp_path).load().settings.auto_play_delay_seconds == 0
+
+
+def test_a_wait_the_person_chose_in_an_older_file_is_kept(tmp_path):
+    write_project(tmp_path, {"version": 1, "settings": {"auto_play_delay_seconds": 5}})
+    assert ProjectStore(tmp_path).load().settings.auto_play_delay_seconds == 5
+
+
+def test_two_seconds_chosen_after_the_change_is_kept(tmp_path):
+    """Once written at the current version, two seconds is the person's own."""
+    store = ProjectStore(tmp_path)
+    write_project(tmp_path, {"version": 1, "settings": {"auto_play_delay_seconds": 2}})
+    state = store.load()
+    state.settings.auto_play_delay_seconds = 2
+    store.save(state)
+
+    assert store.load().settings.auto_play_delay_seconds == 2
+
+
 def test_the_wait_before_playing_is_kept_in_whole_seconds(tmp_path):
     """It is a number a person sets for themselves, so it is forgiving.
 
